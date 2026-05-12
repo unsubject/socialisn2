@@ -376,6 +376,8 @@ Authority score in `()`. Higher = more weight in heuristic ranking. Scale 0-100.
 
 Podcasts are ingested as RSS items using the episode title + show notes as input to the normalization stage (§7.3). Audio transcription is deferred to v2.x. The `Nikkei Asia` primary RSS is at `https://asia.nikkei.com/rss/feed/nar`; `Asia Times` is at `https://asiatimes.com/feed/`; `Project Syndicate` is at `https://www.project-syndicate.org/rss`.
 
+> **Email-bridge ingestion (§6.9):** Reuters, Bloomberg, Financial Times, The Economist, Wall Street Journal, The Information, Politico, Foreign Affairs, Foreign Policy, and South China Morning Post don't expose article-level RSS but offer free email digests. They are ingested through the Cloudflare Email Worker bridge — see §6.9 for the slug-to-feed mapping. Free newsletters typically carry headlines + 1–3 line excerpts + links rather than full article bodies, which is acceptable signal for clustering and ranking.
+
 ### 6.2 Frontier Tech — Mass Market
 
 | Source | Authority | Sub-area |
@@ -390,7 +392,7 @@ Podcasts are ingested as RSS items using the episode title + show notes as input
 | Endpoints News | 80 | pharma |
 | Canary Media | 75 | energy |
 
-> Heatmap News has no public RSS — see §6.9 for its email-bridge ingestion.
+> **Email-bridge ingestion (§6.9):** Wired, MIT Technology Review, Ars Technica, The Verge, Nature News, Stat News, Endpoints News, Canary Media, and Heatmap News don't expose article-level RSS — handled via the Cloudflare Email Worker bridge in §6.9.
 
 **Podcast feeds (companion to article RSS):**
 
@@ -448,6 +450,8 @@ Podcasts are ingested as RSS items using the episode title + show notes as input
 - Behavioral Scientist
 - Psychological Science (current issue)
 - American Sociological Review (current issue)
+
+> **Email-bridge ingestion (§6.9):** NBER, SSRN, VoxEU, AEA papers & proceedings, Behavioral Scientist, and American Sociological Review reach Socialisn2 as periodic email digests through the bridge. Their alerts arrive as paper-list or table-of-contents emails — useful as low-frequency baseline signal even where ranking signal is weak.
 
 ### 6.5 Country-Specific Political Economy
 
@@ -570,9 +574,14 @@ GDELT 2.0 GKG API is queried after clustering to enrich candidates, not before t
 
 GDELT is rate-limited (free tier) — cache responses for 6 hours per query.
 
-### 6.9 Email-Only Sources (Cloudflare Email Worker Bridge)
+### 6.9 Sources Without Public RSS (Cloudflare Email Worker Bridge)
 
-Several high-value sources publish only via email newsletter, with no public RSS/Atom feed. To remain within the no-scraping policy, Socialisn2 ingests these via a **Cloudflare Email Worker bridge** running on the domain `socialisn.com` (Cloudflare-managed DNS, free Email Routing tier).
+A meaningful share of high-value sources don't expose public RSS/Atom feeds:
+
+- **Newsletter-only publishers** — Anthropic news, Meta AI blog, Hugging Face Daily Papers, Brad Setser (Follow the Money), Heatmap News, Robinson Meyer (Shift Key), Derek Lowe (In the Pipeline). No RSS exists.
+- **Primary news outlets named in §6.1, §6.2, §6.4** — Reuters, Bloomberg, FT, The Economist, WSJ, The Information, Politico, Foreign Affairs, Foreign Policy, SCMP, Wired, MIT Tech Review, Ars Technica, The Verge, Nature News, Stat News, Endpoints News, Canary Media, NBER, SSRN, VoxEU, AEA, Behavioral Scientist, ASR. RSS may not exist at article level but every one of these offers a free email digest with headlines + excerpts + links.
+
+To remain within the no-scraping policy, Socialisn2 ingests both categories via a **Cloudflare Email Worker bridge** running on the domain `socialisn.com` (Cloudflare-managed DNS, free Email Routing tier).
 
 **Mechanism:**
 
@@ -581,7 +590,9 @@ Several high-value sources publish only via email newsletter, with no public RSS
 3. A second Worker exposes per-source Atom feeds at `https://inbox.socialisn.com/feeds/<slug>.xml`, reading from D1 with a `LIMIT 50` window. Socialisn2's ingestion worker polls those URLs like any other RSS source (`sources.kind = 'email_bridge'`).
 4. To add a new source: subscribe to the publisher's newsletter using `<slug>@socialisn.com`; the catch-all rule + Worker take it from there. No CF dashboard changes needed per source.
 
-**Seed addresses for v1:**
+**Seed addresses (v1):**
+
+Newsletter-only publishers:
 
 | Source | Subscribe-as address | Worker feed URL | Authority | Domains |
 |--------|----------------------|-----------------|-----------|---------|
@@ -592,6 +603,45 @@ Several high-value sources publish only via email newsletter, with no public RSS
 | Heatmap News | heatmap@socialisn.com | https://inbox.socialisn.com/feeds/heatmap.xml | 70 | scitech (energy/climate) |
 | Robinson Meyer — Shift Key | shift-key@socialisn.com | https://inbox.socialisn.com/feeds/shift-key.xml | 70 | scitech (energy/climate) |
 | Derek Lowe — In the Pipeline | derek-lowe@socialisn.com | https://inbox.socialisn.com/feeds/derek-lowe.xml | 75 | scitech (bio/pharma) |
+
+§6.1 news outlets routed through the bridge:
+
+| Source | Subscribe-as address | Worker feed URL | Authority | Domains |
+|--------|----------------------|-----------------|-----------|---------|
+| Reuters | reuters@socialisn.com | https://inbox.socialisn.com/feeds/reuters.xml | 85 | geopolitics, national |
+| Bloomberg | bloomberg@socialisn.com | https://inbox.socialisn.com/feeds/bloomberg.xml | 85 | economy, geopolitics, national |
+| Financial Times | ft@socialisn.com | https://inbox.socialisn.com/feeds/ft.xml | 90 | economy, geopolitics, national |
+| The Economist | economist@socialisn.com | https://inbox.socialisn.com/feeds/economist.xml | 85 | economy, geopolitics, national, economics |
+| Wall Street Journal | wsj@socialisn.com | https://inbox.socialisn.com/feeds/wsj.xml | 80 | economy, national |
+| The Information | the-information@socialisn.com | https://inbox.socialisn.com/feeds/the-information.xml | 85 | scitech |
+| Politico (US/EU) | politico@socialisn.com | https://inbox.socialisn.com/feeds/politico.xml | 75 | national, geopolitics |
+| Foreign Affairs | foreign-affairs@socialisn.com | https://inbox.socialisn.com/feeds/foreign-affairs.xml | 80 | geopolitics |
+| Foreign Policy | foreign-policy@socialisn.com | https://inbox.socialisn.com/feeds/foreign-policy.xml | 75 | geopolitics |
+| South China Morning Post | scmp@socialisn.com | https://inbox.socialisn.com/feeds/scmp.xml | 70 | national |
+
+§6.2 mass-market tech routed through the bridge:
+
+| Source | Subscribe-as address | Worker feed URL | Authority | Domains |
+|--------|----------------------|-----------------|-----------|---------|
+| Wired | wired@socialisn.com | https://inbox.socialisn.com/feeds/wired.xml | 70 | scitech |
+| MIT Technology Review | mit-tech-review@socialisn.com | https://inbox.socialisn.com/feeds/mit-tech-review.xml | 80 | scitech |
+| Ars Technica | ars-technica@socialisn.com | https://inbox.socialisn.com/feeds/ars-technica.xml | 75 | scitech |
+| The Verge | the-verge@socialisn.com | https://inbox.socialisn.com/feeds/the-verge.xml | 65 | scitech |
+| Nature News | nature-news@socialisn.com | https://inbox.socialisn.com/feeds/nature-news.xml | 85 | scitech |
+| Stat News | stat-news@socialisn.com | https://inbox.socialisn.com/feeds/stat-news.xml | 80 | scitech |
+| Endpoints News | endpoints@socialisn.com | https://inbox.socialisn.com/feeds/endpoints.xml | 80 | scitech |
+| Canary Media | canary-media@socialisn.com | https://inbox.socialisn.com/feeds/canary-media.xml | 75 | scitech |
+
+§6.4 academic outlets routed through the bridge:
+
+| Source | Subscribe-as address | Worker feed URL | Authority | Domains |
+|--------|----------------------|-----------------|-----------|---------|
+| NBER Working Papers | nber@socialisn.com | https://inbox.socialisn.com/feeds/nber.xml | 70 | economics |
+| SSRN top downloads | ssrn@socialisn.com | https://inbox.socialisn.com/feeds/ssrn.xml | 65 | economics |
+| VoxEU | voxeu@socialisn.com | https://inbox.socialisn.com/feeds/voxeu.xml | 65 | economics |
+| AEA papers & proceedings | aea@socialisn.com | https://inbox.socialisn.com/feeds/aea.xml | 70 | economics |
+| Behavioral Scientist | behavioral-scientist@socialisn.com | https://inbox.socialisn.com/feeds/behavioral-scientist.xml | 60 | scitech, economics |
+| American Sociological Review | asr@socialisn.com | https://inbox.socialisn.com/feeds/asr.xml | 65 | scitech |
 
 **Implementation notes:**
 

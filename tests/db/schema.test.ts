@@ -3,9 +3,8 @@
 // Locally: `docker compose up -d postgres` and export DATABASE_URL pointing at
 // a `*_test` database (NOT the default `socialisn2`).
 //
-// The test calls DROP SCHEMA public CASCADE; the destructive-DB guard below
-// refuses to run unless the database name ends with `_test` or the explicit
-// opt-in `SOCIALISN2_ALLOW_DESTRUCTIVE_TESTS=1` is set.
+// The destructive-DB guard lives in tests/helpers/destructive-guard.ts and is
+// shared with seeds.test.ts.
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -17,25 +16,13 @@ import { v7 as uuidv7 } from 'uuid';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { costLedger, sources } from '../../src/db/schema.js';
+import { assertDestructiveAllowed } from '../helpers/destructive-guard.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const migrationSql = readFileSync(
   resolve(process.cwd(), 'migrations/001_init.sql'),
   'utf-8',
 );
-
-function assertDestructiveAllowed(url: string): void {
-  const dbName = new URL(url).pathname.replace(/^\//, '');
-  const looksLikeTestDb = dbName.endsWith('_test');
-  const explicitOptIn = process.env.SOCIALISN2_ALLOW_DESTRUCTIVE_TESTS === '1';
-  if (!looksLikeTestDb && !explicitOptIn) {
-    throw new Error(
-      `Refusing to run destructive schema test against database "${dbName}". ` +
-        'Point DATABASE_URL at a database whose name ends with `_test`, or set ' +
-        'SOCIALISN2_ALLOW_DESTRUCTIVE_TESTS=1 to override.',
-    );
-  }
-}
 
 describe.skipIf(!DATABASE_URL)('001_init schema', () => {
   let client: ReturnType<typeof postgres>;

@@ -41,10 +41,33 @@ describe.skipIf(!DATABASE_URL)('migrations 001-004 (schema + seeds)', () => {
       SELECT kind, COUNT(*)::int AS n FROM sources GROUP BY kind ORDER BY kind
     `;
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r.n]));
-    expect(byKind.email_bridge).toBe(7);
+    // 31 = 7 (§6.9 newsletter-only) + 10 (§6.1) + 8 (§6.2) + 6 (§6.4)
+    expect(byKind.email_bridge).toBe(31);
     expect(byKind.arxiv).toBe(3);
     // 80 RSS rows in 002 (§6.1–§6.6 entries with URLs in SPEC).
     expect(byKind.rss).toBe(80);
+  });
+
+  it('seeds Reuters via email-bridge (§6.1 → §6.9)', async () => {
+    const rows = await client<{ url: string; authority_score: number }[]>`
+      SELECT url, authority_score
+      FROM sources
+      WHERE kind = 'email_bridge' AND name = 'Reuters'
+    `;
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.url).toBe('https://inbox.socialisn.com/feeds/reuters.xml');
+    expect(rows[0]?.authority_score).toBe(85);
+  });
+
+  it('seeds NBER via email-bridge (§6.4 → §6.9)', async () => {
+    const rows = await client<{ url: string; authority_score: number }[]>`
+      SELECT url, authority_score
+      FROM sources
+      WHERE kind = 'email_bridge' AND name = 'NBER Working Papers'
+    `;
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.url).toBe('https://inbox.socialisn.com/feeds/nber.xml');
+    expect(rows[0]?.authority_score).toBe(70);
   });
 
   it('leaves competitors empty (003 is placeholder)', async () => {

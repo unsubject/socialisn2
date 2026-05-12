@@ -41,11 +41,11 @@ describe.skipIf(!DATABASE_URL)('migrations 001-004 (schema + seeds)', () => {
       SELECT kind, COUNT(*)::int AS n FROM sources GROUP BY kind ORDER BY kind
     `;
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r.n]));
-    // 31 = 7 (§6.9 newsletter-only) + 10 (§6.1) + 8 (§6.2) + 6 (§6.4)
-    expect(byKind.email_bridge).toBe(31);
+    // 30 = 7 (§6.9 newsletter-only) - 1 (Shift Key moved to §6.6 by 006) + 10 (§6.1) + 8 (§6.2) + 6 (§6.4)
+    expect(byKind.email_bridge).toBe(30);
     expect(byKind.arxiv).toBe(3);
-    // 80 RSS rows in 002 (§6.1–§6.6 entries with URLs in SPEC).
-    expect(byKind.rss).toBe(80);
+    // 81 RSS rows = 80 from 002 + 1 (Shift Key added by 006).
+    expect(byKind.rss).toBe(81);
   });
 
   it('seeds Reuters via email-bridge (§6.1 → §6.9)', async () => {
@@ -59,7 +59,7 @@ describe.skipIf(!DATABASE_URL)('migrations 001-004 (schema + seeds)', () => {
     expect(rows[0]?.authority_score).toBe(85);
   });
 
-  it('seeds NBER via email-bridge (§6.4 → §6.9)', async () => {
+  it('seeds NBER via email-bridge (§6.4 → §6.9) with bumped authority', async () => {
     const rows = await client<{ url: string; authority_score: number }[]>`
       SELECT url, authority_score
       FROM sources
@@ -67,7 +67,31 @@ describe.skipIf(!DATABASE_URL)('migrations 001-004 (schema + seeds)', () => {
     `;
     expect(rows.length).toBe(1);
     expect(rows[0]?.url).toBe('https://inbox.socialisn.com/feeds/nber.xml');
-    expect(rows[0]?.authority_score).toBe(70);
+    // 006 bumped NBER from 70 → 80 (peer-reviewed top-tier econ).
+    expect(rows[0]?.authority_score).toBe(80);
+  });
+
+  it('moves Shift Key from email-bridge to §6.6 RSS (006)', async () => {
+    // Email-bridge row deleted.
+    const bridged = await client<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM sources
+      WHERE kind = 'email_bridge' AND name = 'Robinson Meyer — Shift Key'
+    `;
+    expect(bridged[0]?.n).toBe(0);
+
+    // RSS row inserted with Acast feed + 120 min cadence + authority 70.
+    const podcast = await client<{
+      url: string;
+      authority_score: number;
+      fetch_interval_min: number;
+    }[]>`
+      SELECT url, authority_score, fetch_interval_min FROM sources
+      WHERE name = 'Shift Key (Robinson Meyer & Jesse Jenkins)'
+    `;
+    expect(podcast.length).toBe(1);
+    expect(podcast[0]?.url).toBe('https://feeds.acast.com/public/shows/shift-key');
+    expect(podcast[0]?.authority_score).toBe(70);
+    expect(podcast[0]?.fetch_interval_min).toBe(120);
   });
 
   it('leaves competitors empty (003 is placeholder)', async () => {
@@ -117,11 +141,11 @@ describe.skipIf(!DATABASE_URL)('migrations 001-004 (schema + seeds)', () => {
     `;
     expect(nber[0]?.fetch_interval_min).toBe(1440);
 
-    // §6.6 substack default → 60 min (Sinocism).
+    // §6.6 substack → 90 min after 006 (Sinocism; was 60 before 006).
     const sinocism = await client<{ fetch_interval_min: number }[]>`
       SELECT fetch_interval_min FROM sources WHERE url = 'https://sinocism.com/feed'
     `;
-    expect(sinocism[0]?.fetch_interval_min).toBe(60);
+    expect(sinocism[0]?.fetch_interval_min).toBe(90);
 
     // §6.6 podcast → 120 min (Ezra Klein Show).
     const ezra = await client<{ fetch_interval_min: number }[]>`

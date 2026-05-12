@@ -36,11 +36,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          # No `cache: 'npm'` — setup-node hashes a lockfile to build the cache
+          # key and errors out when no lockfile exists. PR 2 commits
+          # package-lock.json and re-enables caching alongside `npm ci`.
 
       - name: Install dependencies
         # PR 1 ships no lockfile. PR 2 (Drizzle setup) will run `npm install` once
-        # locally, commit `package-lock.json`, and this step can switch to `npm ci`.
+        # locally, commit `package-lock.json`, and this step switches to `npm ci`.
         run: npm install --no-audit --no-fund
 
       - name: Lint

@@ -1,6 +1,11 @@
 // Smoke-tests migrations/001_init.sql against a real Postgres (vector-enabled).
 // In CI the workflow's `pgvector/pgvector:pg16` service container provides this.
-// Locally: `docker compose up -d postgres` and export DATABASE_URL.
+// Locally: `docker compose up -d postgres` and export DATABASE_URL pointing at
+// a `*_test` database (NOT the default `socialisn2`).
+//
+// The test calls DROP SCHEMA public CASCADE; the destructive-DB guard below
+// refuses to run unless the database name ends with `_test` or the explicit
+// opt-in `SOCIALISN2_ALLOW_DESTRUCTIVE_TESTS=1` is set.
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -19,11 +24,25 @@ const migrationSql = readFileSync(
   'utf-8',
 );
 
+function assertDestructiveAllowed(url: string): void {
+  const dbName = new URL(url).pathname.replace(/^\//, '');
+  const looksLikeTestDb = dbName.endsWith('_test');
+  const explicitOptIn = process.env.SOCIALISN2_ALLOW_DESTRUCTIVE_TESTS === '1';
+  if (!looksLikeTestDb && !explicitOptIn) {
+    throw new Error(
+      `Refusing to run destructive schema test against database "${dbName}". ` +
+        'Point DATABASE_URL at a database whose name ends with `_test`, or set ' +
+        'SOCIALISN2_ALLOW_DESTRUCTIVE_TESTS=1 to override.',
+    );
+  }
+}
+
 describe.skipIf(!DATABASE_URL)('001_init schema', () => {
   let client: ReturnType<typeof postgres>;
   let db: ReturnType<typeof drizzle>;
 
   beforeAll(async () => {
+    assertDestructiveAllowed(DATABASE_URL!);
     client = postgres(DATABASE_URL!);
     // Idempotent reset — lets the test rerun cleanly on the same CI service.
     await client.unsafe('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;');
@@ -76,7 +95,7 @@ describe.skipIf(!DATABASE_URL)('001_init schema', () => {
     expect(rows[0]?.input_tokens).toBe(1234);
   });
 
-  it("rejects an invalid sources.kind via CHECK constraint", async () => {
+  it('rejects an invalid sources.kind via CHECK constraint', async () => {
     const id = uuidv7();
     await expect(
       client`

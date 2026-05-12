@@ -41,6 +41,7 @@ To prevent scope drift, the following are explicitly out of scope for v1:
 - It does not use Chinese-hosted models (no Qwen, DeepSeek, GLM, etc).
 - It does not use Perplexity API. Direct ingestion from primary sources only.
 - It is not an email service in v1. Daily email digest is explicitly deferred to a later version.
+- It does not scrape. Sources must expose an RSS/Atom feed or an official API. Twitter/X via nitter, RSS-Bridge, RSSHub, or any other unofficial scraping path is explicitly excluded. Voices that publish only on Twitter/X without a parallel Substack/blog/podcast are dropped from v1. Sources that publish only via email newsletter are ingested through a Cloudflare Email Worker → RSS bridge (see §6.9), which is consensual delivery, not scraping.
 
 ---
 
@@ -99,6 +100,7 @@ Estimated daily total: **~$0.75/day** with twice-daily runs. Hard ceiling enforc
 | Telegram | `grammy` library | Bidirectional bot |
 | Container | Docker + docker-compose | Mirrors `2nd-brain` deployment |
 | Reverse proxy | Caddy or nginx | TLS termination, MCP endpoint |
+| Email→RSS bridge | Cloudflare Email Worker + D1 | Edge-hosted ingress for newsletter-only sources (§6.9). Outputs Atom feeds at `https://inbox.socialisn.com/feeds/<source>.xml`. Self-hosted on a CF-managed domain (`socialisn.com`); zero VPS load. |
 
 ### 4.3 Deployment Topology
 
@@ -136,7 +138,7 @@ All tables use UUIDv7 primary keys (sortable, time-ordered). Timestamps in UTC, 
 -- A configured ingestion source
 CREATE TABLE sources (
   id              UUID PRIMARY KEY,
-  kind            TEXT NOT NULL,         -- 'rss' | 'youtube_channel' | 'gdelt' | 'arxiv' | 'twitter_list' | 'substack'
+  kind            TEXT NOT NULL,         -- 'rss' | 'youtube_channel' | 'gdelt' | 'arxiv' | 'email_bridge'
   url             TEXT NOT NULL,
   name            TEXT NOT NULL,
   language        TEXT,                  -- ISO 639-1, NULL = mixed
@@ -352,6 +354,28 @@ Authority score in `()`. Higher = more weight in heuristic ranking. Scale 0-100.
 
 **Note on "exclusive report" detection:** for any cluster where the first-published source has authority ≥ 75 and was published more than 4 hours before the second source in the cluster, mark `is_exclusive = true` and store `exclusive_source_id`.
 
+**Podcast feeds (companion to article RSS):**
+
+| Source | Show | Feed URL |
+|--------|------|----------|
+| The Economist | Money Talks | https://access.acast.com/rss/39fc4a99-8861-437d-81e2-684d13e48f92 |
+| The Economist | The Intelligence | https://access.acast.com/rss/d556eb54-6160-4c85-95f4-47d9f5216c49 |
+| The Economist | Drum Tower (China) | https://access.acast.com/rss/633ebf6dfc7f5a0012acdc97 |
+| Financial Times | FT News Briefing | https://feeds.acast.com/public/shows/73fe3ede-5c5c-4850-96a8-30db8dbae8bf |
+| Financial Times | The Story of Money (was Behind the Money) | https://feeds.acast.com/public/shows/6a13c15d-181a-4a2e-a662-739d0e7f731a |
+| Financial Times | Unhedged | https://feeds.acast.com/public/shows/6478a825654260001190a7cb |
+| Bloomberg | Odd Lots | https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/8a94442e-5a74-4fa2-8b8d-ae27003a8d6b/982f5071-765c-403d-969d-ae27003a8d83/podcast.rss |
+| Bloomberg | Big Take | https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/825d4e29-b616-46f4-afd7-ae2b0013005c/8b1dd624-a026-43e9-8b57-ae2b00130066/podcast.rss |
+| Bloomberg | Trumponomics | https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/84f3c095-964f-4994-9d24-ae2b00130029/c9553948-bc39-4871-8989-ae2b00130032/podcast.rss |
+| WSJ | The Journal | https://video-api.wsj.com/podcast/rss/wsj/the-journal |
+| Reuters | Reuters World News | https://feeds.megaphone.fm/reutersworldnews |
+| Foreign Affairs | The Foreign Affairs Interview | https://feed.podbean.com/foreignaffairsmagazine/feed.xml |
+| Foreign Policy | FP Live | https://feeds.megaphone.fm/FGP8797000077 |
+| The Information | TITV (formerly 411) | https://anchor.fm/s/9add758/podcast/rss |
+| South China Morning Post | Inside China | https://cms.scmp.com/rss/google_assistant/325477/media_rss.xml?article-type=329431 |
+
+Podcasts are ingested as RSS items using the episode title + show notes as input to the normalization stage (§7.3). Audio transcription is deferred to v2.x. The `Nikkei Asia` primary RSS is at `https://asia.nikkei.com/rss/feed/nar`; `Asia Times` is at `https://asiatimes.com/feed/`; `Project Syndicate` is at `https://www.project-syndicate.org/rss`.
+
 ### 6.2 Frontier Tech — Mass Market
 
 | Source | Authority | Sub-area |
@@ -365,33 +389,54 @@ Authority score in `()`. Higher = more weight in heuristic ranking. Scale 0-100.
 | Stat News | 80 | bio/pharma/medical |
 | Endpoints News | 80 | pharma |
 | Canary Media | 75 | energy |
-| Heatmap News | 75 | energy/climate |
+
+> Heatmap News has no public RSS — see §6.9 for its email-bridge ingestion.
+
+**Podcast feeds (companion to article RSS):**
+
+| Source | Show | Feed URL |
+|--------|------|----------|
+| MIT Technology Review | In Machines We Trust / MITTR Narrated | https://feeds.megaphone.fm/inmachineswetrust |
+| Wired | Gadget Lab / Uncanny Valley | https://publicfeeds.net/f/5901/gadget-lab |
+| Stat News | First Opinion | https://www.statnews.com/category/first-opinion-podcast/feed/ |
+| Stat News | The Readout LOUD | https://feeds.megaphone.fm/thereadoutloud |
+| Nature | Nature Podcast | https://feeds.acast.com/public/shows/0185cea5-9e3b-4b82-a887-26f91f92765f |
 
 ### 6.3 Frontier Tech — Niche & Expert
 
-**IT / Computer Science:**
+**IT / Computer Science (RSS-available):**
 - arXiv `cs.AI`, `cs.CL`, `cs.LG` (daily listing)
-- Hugging Face Daily Papers
-- Anthropic, OpenAI, DeepMind, Meta AI, Google Research blogs
-- Stratechery (Ben Thompson)
-- Semianalysis
-- Import AI (Jack Clark)
-- Hacker News top stories (filtered by domain whitelist)
+- OpenAI blog — https://openai.com/blog/rss.xml
+- DeepMind blog — https://deepmind.google/blog/rss.xml
+- Google Research blog — https://research.google/blog/rss/
+- Stratechery (Ben Thompson) — https://stratechery.com/feed/ (freemium: free weekly Articles full-text; paid Daily Updates appear as truncated previews — treat previews as low-authority signal)
+- Semianalysis — https://semianalysis.com/feed/
+- Hacker News top stories (filtered by domain whitelist; feed via hnrss.org)
 
-**Energy:**
-- IEA reports
+> Anthropic news, Meta AI blog, and Hugging Face Daily Papers lack official RSS — see §6.9 for email-bridge ingestion. Import AI (Jack Clark) is covered under §6.6.
+
+**Energy (RSS-available):**
+- IEA reports (where RSS available; otherwise dropped per no-scraping policy)
 - RMI (Rocky Mountain Institute) publications
-- Volts newsletter (David Roberts)
 - NBER working papers — energy & environment
-- BloombergNEF reports (open content)
+- BloombergNEF reports (open content, where RSS available)
+
+> Volts (David Roberts) is covered under §6.6. Canary Media is in §6.2. Heatmap News and Robinson Meyer's Shift Key are in §6.9.
 
 **Biological / Pharmaceutical / Medical:**
 - bioRxiv (daily new postings, filtered by sub-categories: synthetic biology, neuroscience, immunology, cancer biology, genomics)
 - medRxiv (daily, filtered for therapeutic relevance)
 - Nature Medicine, NEJM (open abstracts)
 - Stat News, Endpoints News (already listed in mass market — overlap fine)
-- In the Pipeline (Derek Lowe)
 - The Transmitter (neuroscience)
+
+> Eric Topol (Ground Truths) is covered under §6.6. Derek Lowe (In the Pipeline at Science.org) is RSS-blocked by Science.org's WAF — see §6.9 for newsletter-bridge ingestion.
+
+**Podcast feeds:**
+
+| Source | Show | Feed URL |
+|--------|------|----------|
+| NEJM | NEJM This Week | http://feeds.feedburner.com/nejm-this-week-audio-summaries |
 
 ### 6.4 Academic — Economics & Adjacent
 
@@ -407,101 +452,103 @@ Authority score in `()`. Higher = more weight in heuristic ranking. Scale 0-100.
 ### 6.5 Country-Specific Political Economy
 
 **USA:**
-- Politico, Axios, The Atlantic, The Bulwark, Slow Boring, The Dispatch, Reason
+- Politico, Axios, The Atlantic, The Bulwark, The Dispatch, Reason
+- Slow Boring and ChinaTalk Substacks are covered under §6.6.
 
 **China:**
-- Sinocism (Bill Bishop), Trivium China, China Books Review, Caixin Global, ChinaTalk (Jordan Schneider), MacroPolo
+- Sinocism (covered under §6.6)
+- Trivium China — https://triviumchina.com/feed/
+- China Books Review
+- Caixin Global — https://gateway.caixin.com/api/data/global/feedlyRss.xml (returned 406 to generic UA in feed verification; the ingestion worker must send a browser-style UA — confirm at deploy)
+- ChinaTalk (covered under §6.6)
+
+> MacroPolo (Paulson Institute think tank) ceased operations in 2024 — dropped from v1.
 
 **UK:**
-- The Guardian (filtered: politics + business), The Times (where accessible), Tortoise, UnHerd, ConservativeHome, LabourList
+- The Guardian (filtered: politics + business), The Times (where accessible), Tortoise / The Observer Slow Newscast, UnHerd, ConservativeHome, LabourList
 
 **Canada:**
-- The Globe and Mail (politics + business), National Post, The Hub, The Line, Maclean's
+- The Globe and Mail (politics + business), National Post, The Hub — https://thehub.ca/feed/ (article RSS), The Line — https://www.readtheline.ca/feed (Substack), Maclean's
 
 **Australia:**
-- The Australian, ABC News politics, The Conversation AU, Crikey, Inside Story
+- The Australian, ABC News politics, The Conversation AU, Crikey, Inside Story — https://insidestory.org.au/feed/
 
 **Taiwan:**
-- Focus Taiwan, Taipei Times, 天下雜誌, 報導者, China-Taiwan-focused English commentary
+- Focus Taiwan — http://feeds.feedburner.com/rsscna/engnews (English)
+- Taipei Times
+- 天下雜誌 CommonWealth — https://www.cw.com.tw/RSS/cw_content.xml (Chinese)
+- 報導者 The Reporter — https://public.twreporter.org/rss/twreporter-rss.xml (Chinese)
+- China-Taiwan-focused English commentary
 
-### 6.6 Social Influencers — Seed List
+**Podcast feeds:**
 
-Twitter/X handles to monitor (system creates Twitter lists, or scrapes via nitter or RSS-bridge). Substack-published authors are also tracked via Substack RSS.
+| Source | Show | Feed URL |
+|--------|------|----------|
+| The Atlantic | Radio Atlantic | https://feeds.megaphone.fm/radioatlantic |
+| The Bulwark | The Bulwark Podcast | https://audioboom.com/channels/5114286.rss |
+| The Dispatch | Dispatch Podcast | https://feeds.megaphone.fm/DISPME9513417677 |
+| The Dispatch | Advisory Opinions | https://feeds.megaphone.fm/DISPME4573820108 |
+| Tortoise / The Observer | Slow Newscast | https://feeds.acast.com/public/shows/a8a5a759-8cb1-52ad-b50a-8e08dcee4d1f |
+| UnHerd | UnHerd with Freddie Sayers | https://feeds.acast.com/public/shows/5fad6d24bc034454b53fe011 |
+| The Hub | Hub Podcasts (Dialogues, Hits, Full Press, Headlines) | https://feeds.acast.com/public/shows/69cc1a3992d007a7658eee4e |
 
-**Economy & Finance:**
-- @TylerCowen (Marginal Revolution)
-- @Noahpinion (Noah Smith — Substack)
-- @adam_tooze (Adam Tooze — Chartbook Substack)
-- @M_C_Klein (Matthew Klein — The Overshoot Substack)
-- @JosephPolitano (Apricitas Economics Substack)
-- @ConorSen
-- @cullenroche
-- @soberlook
-- @C_Barraud (Christophe Barraud — macro)
+### 6.6 Independent Commentators — Substack / Blog / Podcast Feeds
 
-**Academic Economics:**
-- @Claudia_Sahm
-- @Brad_Setser
-- @BrankoMilan
-- @JustinWolfers
-- @JosephEStiglitz
-- @PaulKrugman
+A curated set of independent writers and analysts who publish via Substack, personal blog, or self-hosted podcast feed. **All entries are RSS/Atom — no Twitter/X scraping.** Authors who only publish on Twitter/X have been excluded (see "Excluded" note below). Email-only sources are bridged through the Cloudflare Email Worker — see §6.9.
 
-**US Politics:**
-- @mattyglesias (Slow Boring)
-- @ezraklein
-- @Yascha_Mounk
-- @derek_h_thompson
-- @perrybaconjr
+Authority is per-source and reflects independent commentator status. Weight is set lower than primary news outlets (§6.1) but higher than aggregated tier-2 signals.
 
-**China:**
-- @niubi (Bill Bishop — Sinocism)
-- @LingLingWei
-- @bonniegirard
-- @Sino_Market
-- @jordanschnyc (Jordan Schneider — ChinaTalk)
-- @IanDenisJohnson
+| Source | Author | Feed URL | Type | Authority | Domains |
+|--------|--------|----------|------|-----------|---------|
+| Marginal Revolution | Tyler Cowen | https://marginalrevolution.com/feed | blog | 70 | economics, economy |
+| Noahpinion | Noah Smith | https://www.noahpinion.blog/feed | substack | 70 | economy, economics |
+| Chartbook | Adam Tooze | https://adamtooze.substack.com/feed | substack | 75 | economy, geopolitics |
+| The Overshoot | Matthew Klein | https://theovershoot.co/feed | substack | 65 | economy |
+| Apricitas Economics | Joseph Politano | https://www.apricitas.io/feed | substack | 65 | economy |
+| Pragmatic Capitalism | Cullen Roche | https://www.pragcap.com/feed/ | blog | 60 | economy |
+| Christophe Barraud | Christophe Barraud | https://www.christophe-barraud.com/feed/ | blog | 60 | economy |
+| Stay-At-Home Macro | Claudia Sahm | https://stayathomemacro.substack.com/feed | substack | 70 | economy, economics |
+| globalinequality | Branko Milanovic | https://glineq.blogspot.com/feeds/posts/default | atom | 65 | economics |
+| Platypus Economics | Justin Wolfers | https://newsletter.platypuseconomics.com/feed | substack | 65 | economics |
+| Paul Krugman | Paul Krugman | https://paulkrugman.substack.com/feed | substack | 70 | economy, national (US) |
+| Slow Boring | Matt Yglesias | https://www.slowboring.com/feed | substack | 65 | national (US) |
+| The Ezra Klein Show | Ezra Klein | https://feeds.simplecast.com/kEKXbjuJ | podcast | 70 | national (US), geopolitics |
+| Persuasion | Yascha Mounk | https://www.persuasion.community/feed | substack | 65 | geopolitics, national (US) |
+| Yascha Mounk (personal) | Yascha Mounk | https://writing.yaschamounk.com/feed | substack | 65 | geopolitics |
+| The Good Fight | Yascha Mounk | https://feeds.megaphone.fm/thegoodfight | podcast | 65 | geopolitics |
+| Plain English | Derek Thompson | https://feeds.megaphone.fm/plain-english | podcast | 70 | scitech, economics, national (US) |
+| Bluegrass Beat | Perry Bacon Jr | https://bluegrassbeat.substack.com/feed | substack | 55 | national (US) |
+| Sinocism | Bill Bishop | https://sinocism.com/feed | substack | 80 | national (China), geopolitics |
+| ChinaTalk Newsletter | Jordan Schneider | https://www.chinatalk.media/feed | substack | 75 | national (China), scitech |
+| ChinaTalk Podcast | Jordan Schneider | https://feeds.megaphone.fm/CHTAL4990341033 | podcast | 75 | national (China), scitech |
+| Ian Johnson | Ian Johnson | https://ian-johnson.com/feed/ | blog | 60 | national (China) |
+| Works in Progress | Sam Bowman et al. | https://www.worksinprogress.news/feed | substack | 70 | scitech, economics |
+| Andrew Coyne (Globe and Mail) | Andrew Coyne | https://www.theglobeandmail.com/arc/outboundfeeds/rss/author/acoyne/?outputType=xml | author RSS | 65 | national (Canada) |
+| Worthwhile Canadian Initiative | Stephen Gordon | https://worthwhileblog.ca/feed/ | blog | 60 | national (Canada), economics |
+| John Quiggin | John Quiggin | https://johnquiggin.com/feed/ | blog | 60 | national (Australia), economics |
+| Saul Eslake | Saul Eslake | https://sauleslake.substack.com/feed | substack | 60 | national (Australia), economy |
+| Andrej Karpathy (Jekyll) | Andrej Karpathy | https://karpathy.github.io/feed.xml | blog | 75 | scitech |
+| Andrej Karpathy (bearblog) | Andrej Karpathy | https://karpathy.bearblog.dev/feed/ | atom | 75 | scitech |
+| Simon Willison | Simon Willison | https://simonwillison.net/atom/everything/ | atom | 75 | scitech |
+| Dwarkesh Patel | Dwarkesh Patel | https://www.dwarkesh.com/feed | substack+podcast | 70 | scitech |
+| EleutherAI blog | Stella Biderman et al. | https://blog.eleuther.ai/index.xml | atom | 70 | scitech |
+| Import AI | Jack Clark | https://importai.substack.com/feed | substack | 75 | scitech |
+| Volts | David Roberts | https://www.volts.wtf/feed | substack+podcast | 70 | scitech (energy), national (US) |
+| Doomberg | Doomberg (anon) | https://newsletter.doomberg.com/feed | substack | 65 | scitech (energy), economy |
+| Ground Truths | Eric Topol | https://erictopol.substack.com/feed | substack | 75 | scitech (bio/medical) |
 
-**UK:**
-- @HelenHet20 (Helen Thompson)
-- @rcolvile (Robert Colvile)
-- @s8mb (Sam Bowman)
+Language is English for all entries above unless noted.
 
-**Canada:**
-- @acoyne (Andrew Coyne)
-- @stephenfgordon (Stephen Gordon)
-- @trevortombe
+**Excluded (Twitter/X-only — no non-scraping feed):**
+Conor Sen, "soberlook" (Daily Shot), Lingling Wei, Bonnie Girard, Helen Thompson, Robert Colvile, Trevor Tombe (covered via The Hub in §6.5), Wen-Ti Sung, Lev Nachman, Sara Hooker.
 
-**Australia:**
-- @JohnQuiggin
-- @SaulEslake
+**Moved to §6.9 (Email-Only Sources):** Brad Setser, Heatmap News / Robinson Meyer, Derek Lowe (In the Pipeline), Anthropic news, Meta AI blog, Hugging Face Daily Papers.
 
-**Taiwan:**
-- @wenti_sung (Wen-Ti Sung)
-- @LevNachman
-
-**Frontier Tech — AI/CS:**
-- @karpathy (Andrej Karpathy)
-- @simonw (Simon Willison)
-- @dwarkesh_sp (Dwarkesh Patel)
-- @sarahookr (Sara Hooker)
-- @blancheminerva (Stella Biderman)
-- @jackclarkSF (Jack Clark — Import AI)
-
-**Frontier Tech — Energy:**
-- @drvolts (David Roberts — Volts)
-- @doomberg
-- @robinsonmeyer
-
-**Frontier Tech — Bio/Pharma:**
-- @Dereklowe (Derek Lowe)
-- @EricTopol
-
-> **Note for Simon:** Validate and expand this list on first run. The MCP tool `add_influencer` accepts handles/URLs and assigns them to domains.
+> **Note for Simon:** Validate and expand this list on first run. The MCP tool `add_influencer` accepts a feed URL (RSS/Atom only) and assigns it to one or more domains. Adding a Twitter/X handle directly is rejected by policy; use the email-bridge path in §6.9 if the writer publishes a newsletter.
 
 ### 6.7 Competitor Channels
 
-Simon maintains his own list of HK-diaspora competitor channels (predominantly YouTube, some Facebook). The schema (§5.1) supports both platforms. Seed via MCP tool `expand_competitor_list` on first run.
+Simon maintains his own list of HK-diaspora competitor channels. **v1 supports YouTube only** — YouTube exposes per-channel RSS feeds at `https://www.youtube.com/feeds/videos.xml?channel_id=<id>`, which satisfies the no-scraping policy. Facebook competitor pages require the Meta Graph API (Page access tokens are heavily restricted and unreliable for third-party arbitrary pages), and are deferred to v2.x. Seed via MCP tool `expand_competitor_list` on first run.
 
 Two priority tiers:
 
@@ -523,6 +570,38 @@ GDELT 2.0 GKG API is queried after clustering to enrich candidates, not before t
 
 GDELT is rate-limited (free tier) — cache responses for 6 hours per query.
 
+### 6.9 Email-Only Sources (Cloudflare Email Worker Bridge)
+
+Several high-value sources publish only via email newsletter, with no public RSS/Atom feed. To remain within the no-scraping policy, Socialisn2 ingests these via a **Cloudflare Email Worker bridge** running on the domain `socialisn.com` (Cloudflare-managed DNS, free Email Routing tier).
+
+**Mechanism:**
+
+1. The CF zone `socialisn.com` has Email Routing enabled with a catch-all rule routing every inbound message to an Email Worker.
+2. The Email Worker (TypeScript, deployed via Wrangler) parses each incoming message with `postal-mime`, strips boilerplate (unsubscribe footers, tracking pixels, list-management headers), and writes a row to a Cloudflare D1 database keyed by the local-part of the To: address.
+3. A second Worker exposes per-source Atom feeds at `https://inbox.socialisn.com/feeds/<slug>.xml`, reading from D1 with a `LIMIT 50` window. Socialisn2's ingestion worker polls those URLs like any other RSS source (`sources.kind = 'email_bridge'`).
+4. To add a new source: subscribe to the publisher's newsletter using `<slug>@socialisn.com`; the catch-all rule + Worker take it from there. No CF dashboard changes needed per source.
+
+**Seed addresses for v1:**
+
+| Source | Subscribe-as address | Worker feed URL | Authority | Domains |
+|--------|----------------------|-----------------|-----------|---------|
+| Anthropic news | anthropic@socialisn.com | https://inbox.socialisn.com/feeds/anthropic.xml | 80 | scitech |
+| Meta AI blog | meta-ai@socialisn.com | https://inbox.socialisn.com/feeds/meta-ai.xml | 75 | scitech |
+| Hugging Face Daily Papers | hf-papers@socialisn.com | https://inbox.socialisn.com/feeds/hf-papers.xml | 75 | scitech |
+| Brad Setser — Follow the Money | setser@socialisn.com | https://inbox.socialisn.com/feeds/setser.xml | 75 | economy, geopolitics |
+| Heatmap News | heatmap@socialisn.com | https://inbox.socialisn.com/feeds/heatmap.xml | 70 | scitech (energy/climate) |
+| Robinson Meyer — Shift Key | shift-key@socialisn.com | https://inbox.socialisn.com/feeds/shift-key.xml | 70 | scitech (energy/climate) |
+| Derek Lowe — In the Pipeline | derek-lowe@socialisn.com | https://inbox.socialisn.com/feeds/derek-lowe.xml | 75 | scitech (bio/pharma) |
+
+**Implementation notes:**
+
+- Feed URLs are technically guessable; if privacy of subscription state is desired, append a random suffix per source (`anthropic-a7k3@socialisn.com` → `/feeds/anthropic-a7k3.xml`).
+- D1 schema: `(slug TEXT, received_at INTEGER, message_id TEXT, subject TEXT, body_text TEXT, body_html TEXT, links JSONB)` with `PRIMARY KEY (slug, message_id)`.
+- The Email Worker can optionally call Cloudflare Workers AI on intake to pre-extract canonical URLs and a one-line summary, reducing downstream LLM cost. Decide at PR time whether to enable in v1.
+- The bridge is **the only sanctioned path** for non-RSS sources. New email-only subscriptions are added by Simon via the MCP tool `add_email_bridge_source(slug, publisher_name, domain, authority)`.
+
+**Architectural rationale:** the bridge runs at the Cloudflare edge, independent of the Hostinger VPS, so VPS reboots or socialisn2 redeploys do not lose incoming newsletters. Free tier covers projected volume (~10–30 emails/day) by 1000× margin. Output is plain Atom XML — exit cost is near-zero if the bridge is ever replaced.
+
 ---
 
 ## 7. Ingestion Pipeline
@@ -532,9 +611,11 @@ GDELT is rate-limited (free tier) — cache responses for 6 hours per query.
 The `ingestion-worker` consumes a BullMQ queue. Cron schedule populates the queue at staggered intervals based on each source's `fetch_interval_min`. Defaults:
 
 - News RSS: every 60 min
+- Substack / blog RSS (§6.6): every 60-120 min
+- Podcast RSS (§6.1–6.5 podcast subsections): every 120 min
 - arXiv / bioRxiv / medRxiv daily listings: once per day at 09:30 ET
 - NBER / SSRN: once per day at 10:00 ET
-- Twitter/X lists: every 90 min (rate-limited)
+- Email-bridge feeds (§6.9): every 30 min (cheap call, near-instant detection of new newsletter arrivals)
 - YouTube competitor channels: every 4 hours (RSS feed via YouTube channel feed URL)
 - GDELT GKG: on-demand per cluster, cached 6h
 
@@ -939,6 +1020,10 @@ Explicitly noted so they are not built in v1:
 - **v2.2 — Email digest layer.** Daily HTML email summary, configurable cadence.
 - **v2.3 — Classifier on feedback.** Train a small classifier on accumulated picks/passes to pre-filter before Sonnet.
 - **v2.4 — Push-on-publish hook.** When Simon publishes a new episode, automatically run `record_episode_link` to close the feedback loop.
+- **v2.5 — Podcast audio transcription.** Extend Whisper to ingest podcast audio enclosures from §6.1–6.5 podcast feeds. v1 uses only title + show notes; v2.5 would transcribe high-signal shows (Odd Lots, Plain English, ChinaTalk, etc.) for richer clustering input.
+- **v2.6 — Stratechery Plus subscriber feeds.** Ingest paywalled podcasts (Dithering, Sharp Tech, Sharp China) via authenticated subscriber RSS once Simon has a Passport login. Requires bearer-token handling in the ingestion adapter.
+- **v2.7 — Facebook competitor support via Meta Graph API.** Add Facebook page coverage to §6.7 once a stable Page access token path is established. Treat as best-effort; Graph API restrictions may keep this in roadmap indefinitely.
+- **v2.8 — Email-bridge AI pre-processing.** Enable Cloudflare Workers AI on the §6.9 Email Worker to extract canonical URLs and topic summaries at intake, reducing the cost of the §7.3 normalization stage for bridged sources.
 
 ---
 
@@ -964,7 +1049,18 @@ socialisn2/
 ├── migrations/
 │   ├── 001_init.sql
 │   ├── 002_seed_sources.sql
-│   └── 003_seed_competitors.sql
+│   ├── 003_seed_competitors.sql
+│   └── 004_seed_email_bridges.sql
+├── inbox-worker/                 (Cloudflare Email Worker — §6.9)
+│   ├── wrangler.toml
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── src/
+│   │   ├── email-handler.ts      (parses inbound email → D1)
+│   │   └── feed-handler.ts       (serves Atom XML per source slug)
+│   ├── migrations/
+│   │   └── 0001_inbox.sql        (D1 schema)
+│   └── tests/
 ├── src/
 │   ├── app.ts                    (Fastify entrypoint)
 │   ├── mcp/
@@ -974,11 +1070,11 @@ socialisn2/
 │   │   ├── bot.ts
 │   │   └── commands/
 │   ├── ingestion/
-│   │   ├── rss.ts
+│   │   ├── rss.ts                (handles rss/atom/substack/blog/podcast feeds)
 │   │   ├── youtube.ts
-│   │   ├── twitter.ts
 │   │   ├── arxiv.ts
 │   │   ├── gdelt.ts
+│   │   ├── email_bridge.ts       (polls https://inbox.socialisn.com/feeds/*.xml)
 │   │   └── whisper.ts
 │   ├── scoring/
 │   │   ├── dedup.ts
@@ -1045,8 +1141,8 @@ YOUTUBE_API_KEY=...
 # GDELT (no auth, but rate limit key)
 GDELT_USER_AGENT=socialisn2/1.0 (simon@...)
 
-# Twitter/X via nitter (no API key needed) or RSS-bridge
-NITTER_BASE=https://nitter.<simon-host>
+# Email-bridge (§6.9) — Cloudflare Email Worker output served as RSS
+EMAIL_BRIDGE_BASE=https://inbox.socialisn.com
 
 # Cost
 COST_CEILING_DAILY_USD=1.50
@@ -1087,7 +1183,7 @@ Socialisn2 v1 is shipped when:
 
 Items where Claude Code may need to make a call during build — flag and ask Simon if uncertain:
 
-- **Twitter/X ingestion mechanism.** API access requires paid tier and may be unreliable; nitter instances rotate; RSS-bridge is unofficial. Pick the most stable option at build time and document the fallback.
+- ~~**Twitter/X ingestion mechanism.**~~ **Resolved by policy** (§2): no scraping. Twitter/X-only voices are dropped; writers with parallel Substack/blog/podcast are listed in §6.6; email-only sources are ingested via the Cloudflare Email Worker bridge in §6.9.
 - **YouTube channel feed reliability.** The native RSS feed (`https://www.youtube.com/feeds/videos.xml?channel_id=...`) is reliable but lacks chapter timestamps. For Tier 2 (cheap signal) competitors, decide whether to additionally call YouTube Data API for chapter data (paid quota cost) or to skip chapters.
 - **GDELT rate limits.** The free GKG API has soft limits. If hit, fall back to GDELT 2.0 BigQuery (free, slower). Document the threshold at which fallback triggers.
 - **Whisper model size.** `faster-whisper` `large-v3` is best quality but slowest. `medium` is the practical balance for Cantonese audio. Benchmark on Simon's competitor sample at build time and pick.
@@ -1098,14 +1194,16 @@ Items where Claude Code may need to make a call during build — flag and ask Si
 
 ## 20. Handoff Notes for Claude Code
 
-- Build in feature branches off `main`. Open a PR per major component (`ingestion`, `scoring`, `mcp`, `telegram`, `rss`, `backfill`). Each PR includes its own test suite.
+- Build in feature branches off `main`. Open a PR per major component (`ingestion`, `scoring`, `mcp`, `telegram`, `rss`, `inbox-worker`, `backfill`). Each PR includes its own test suite. See `BUILD-PHASES.md` for the phased sequencing.
 - The `SPEC.md` you are reading is the source of truth. If a question arises that this document doesn't answer, raise it as an Open Question (§19) and ask Simon before assuming.
 - Do NOT migrate code from `unsubject/socialisn`. Start clean. The old repo is reference material only.
 - Match `2nd-brain` stylistic conventions: same TypeScript config, same Docker layout, same linting rules. If you need to make different choices, document why.
 - The Perplexity API integration referenced in the old socialisn repo is **explicitly removed** in v2 (see §2). Do not re-introduce it.
 - The cost ceiling (§12) is hard, not advisory. The system must halt gracefully at the ceiling, not panic.
 - Simon's positioning statement (§9.4) is treated as a config file, not a prompt string. It must be editable without code changes; the curation prompt loads it at runtime.
+- **No scraping** (§2). Sources must expose RSS/Atom or an official API. The Email Worker bridge in §6.9 is the only sanctioned path for newsletter-only sources, and it deploys to Cloudflare independently of the docker-compose stack on the Hostinger VPS (`cd inbox-worker && wrangler deploy`).
 
 ---
 
 **End of specification.**
+

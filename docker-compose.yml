@@ -1,0 +1,85 @@
+# Local + VPS dev compose.
+#
+# The Cloudflare Email Worker (inbox-worker/, SPEC §6.9) deploys independently
+# via `wrangler deploy` and is NOT in this file — VPS reboots must not affect
+# inbound newsletter intake.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: socialisn2
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: socialisn2
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U socialisn2"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    command: ["node", "dist/index.js"]
+    ports:
+      - "3000:3000"
+
+  ingestion-worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    # Phase 1 PR 1 replaces this stub with the BullMQ ingestion worker entrypoint.
+    command: ["node", "-e", "console.log('ingestion-worker placeholder'); setInterval(()=>{}, 1<<30)"]
+
+  scoring-worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    # Phase 2/3 replaces this stub with the normalise/cluster/curate pipeline.
+    command: ["node", "-e", "console.log('scoring-worker placeholder'); setInterval(()=>{}, 1<<30)"]
+
+  whisper-worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    # Phase 2 PR 1 (ADR-006 — Whisper model size for Cantonese) replaces this stub.
+    command: ["node", "-e", "console.log('whisper-worker placeholder'); setInterval(()=>{}, 1<<30)"]
+
+volumes:
+  postgres_data:
+  redis_data:

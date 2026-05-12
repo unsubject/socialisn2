@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: socialisn2
+          POSTGRES_PASSWORD: socialisn2
+          POSTGRES_DB: socialisn2_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U socialisn2"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://socialisn2:socialisn2@localhost:5432/socialisn2_test
+      REDIS_URL: redis://localhost:6379
+      TZ: America/New_York
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        # PR 1 ships no lockfile. PR 2 (Drizzle setup) will run `npm install` once
+        # locally, commit `package-lock.json`, and this step can switch to `npm ci`.
+        run: npm install --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test

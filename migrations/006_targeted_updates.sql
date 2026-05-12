@@ -12,21 +12,20 @@
 
 -- ---------------------------------------------------------------------------
 -- 1. Shift Key: email_bridge → §6.6 podcast feed
+--
+-- UPDATE in place so the source `id` is preserved and any existing
+-- `raw_items.source_id` references stay valid. A DELETE+INSERT would have
+-- failed the FK constraint on any DB that had already fetched at least one
+-- Shift Key item via the bridge. authority_score and domains are unchanged
+-- (both already 70 / ARRAY['scitech']) so they don't need to be in the SET.
 -- ---------------------------------------------------------------------------
-DELETE FROM sources
+UPDATE sources
+SET kind = 'rss',
+    url = 'https://feeds.acast.com/public/shows/shift-key',
+    name = 'Shift Key (Robinson Meyer & Jesse Jenkins)',
+    fetch_interval_min = 120,
+    updated_at = NOW()
 WHERE kind = 'email_bridge' AND name = 'Robinson Meyer — Shift Key';
-
-INSERT INTO sources (id, kind, url, name, language, domains, authority_score, fetch_interval_min)
-VALUES (
-  gen_random_uuid(),
-  'rss',
-  'https://feeds.acast.com/public/shows/shift-key',
-  'Shift Key (Robinson Meyer & Jesse Jenkins)',
-  'en',
-  ARRAY['scitech'],
-  70,
-  120
-);
 
 -- ---------------------------------------------------------------------------
 -- 2. §6.6 substack/blog/atom cadence 60 → 90

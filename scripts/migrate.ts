@@ -1,7 +1,10 @@
-// Minimal sequential migration runner. Reads `migrations/*.sql`, sorts by
-// filename (so `001_init.sql` runs before `002_…`), and executes each against
-// DATABASE_URL. No state tracking yet — every run replays every file. Adequate
-// for Phase 0; Phase 5 PR 2 swaps in a tracked-state migration runner.
+// State-tracked migration runner. Records each applied filename in
+// `_socialisn2_migrations`; subsequent runs skip files already there.
+// Each migration runs inside a single transaction so a failed file does
+// not leave a half-applied schema.
+//
+// Phase 5 PR 2 (deploy) may swap this for something fancier, but the
+// contract — idempotent re-runs against a persistent DB — stays the same.
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -23,10 +26,29 @@ const files = readdirSync(dir)
 const client = postgres(DATABASE_URL);
 
 try {
+  await client.unsafe(`
+    CREATE TABLE IF NOT EXISTS _socialisn2_migrations (
+      filename   TEXT PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  const appliedRows = await client<{ filename: string }[]>`
+    SELECT filename FROM _socialisn2_migrations
+  `;
+  const applied = new Set(appliedRows.map((r) => r.filename));
+
   for (const file of files) {
+    if (applied.has(file)) {
+      console.log(`Skipping ${file} (already applied)`);
+      continue;
+    }
     const sql = readFileSync(join(dir, file), 'utf-8');
     console.log(`Running ${file}…`);
-    await client.unsafe(sql);
+    await client.begin(async (tx) => {
+      await tx.unsafe(sql);
+      await tx`INSERT INTO _socialisn2_migrations (filename) VALUES (${file})`;
+    });
   }
   console.log('Migrations complete.');
 } finally {

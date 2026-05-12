@@ -96,6 +96,40 @@ describe.skipIf(!DATABASE_URL)('migrations 001-004 (schema + seeds)', () => {
     expect(rows[0]?.authority_score).toBe(80);
   });
 
+  it('sets fetch_interval_min per SPEC §7.1', async () => {
+    // arXiv daily listings: 1440 min for all 3 categories.
+    const arxiv = await client<{ fetch_interval_min: number }[]>`
+      SELECT fetch_interval_min FROM sources WHERE kind = 'arxiv'
+    `;
+    expect(arxiv.length).toBe(3);
+    expect(arxiv.every((r) => r.fetch_interval_min === 1440)).toBe(true);
+
+    // §6.1 podcast → 120 min.
+    const podcast = await client<{ fetch_interval_min: number }[]>`
+      SELECT fetch_interval_min FROM sources
+      WHERE url = 'https://feeds.megaphone.fm/reutersworldnews'
+    `;
+    expect(podcast[0]?.fetch_interval_min).toBe(120);
+
+    // §6.4 NBER academic digest → 1440 min.
+    const nber = await client<{ fetch_interval_min: number }[]>`
+      SELECT fetch_interval_min FROM sources WHERE name = 'NBER Working Papers'
+    `;
+    expect(nber[0]?.fetch_interval_min).toBe(1440);
+
+    // §6.6 substack default → 60 min (Sinocism).
+    const sinocism = await client<{ fetch_interval_min: number }[]>`
+      SELECT fetch_interval_min FROM sources WHERE url = 'https://sinocism.com/feed'
+    `;
+    expect(sinocism[0]?.fetch_interval_min).toBe(60);
+
+    // §6.6 podcast → 120 min (Ezra Klein Show).
+    const ezra = await client<{ fetch_interval_min: number }[]>`
+      SELECT fetch_interval_min FROM sources WHERE url = 'https://feeds.simplecast.com/kEKXbjuJ'
+    `;
+    expect(ezra[0]?.fetch_interval_min).toBe(120);
+  });
+
   it('seeds arXiv cs.AI / cs.CL / cs.LG with kind=arxiv', async () => {
     const rows = await client<{ name: string }[]>`
       SELECT name FROM sources WHERE kind = 'arxiv' ORDER BY name

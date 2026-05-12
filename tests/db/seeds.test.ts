@@ -128,6 +128,26 @@ describe.skipIf(!DATABASE_URL)('migrations 001-004 (schema + seeds)', () => {
       SELECT fetch_interval_min FROM sources WHERE url = 'https://feeds.simplecast.com/kEKXbjuJ'
     `;
     expect(ezra[0]?.fetch_interval_min).toBe(120);
+
+    // Editorial email-bridge → 30 min (post 005_fix). Anthropic = §6.9 newsletter.
+    const anthropicInterval = await client<{ fetch_interval_min: number }[]>`
+      SELECT fetch_interval_min FROM sources WHERE name = 'Anthropic news'
+    `;
+    expect(anthropicInterval[0]?.fetch_interval_min).toBe(30);
+
+    // §6.1 outlet bridged via §6.9 → also 30 min (Reuters editorial bridge).
+    const reutersBridge = await client<{ fetch_interval_min: number }[]>`
+      SELECT fetch_interval_min FROM sources
+      WHERE kind = 'email_bridge' AND name = 'Reuters'
+    `;
+    expect(reutersBridge[0]?.fetch_interval_min).toBe(30);
+
+    // §6.4 academic email-bridge stays at 1440 (already covered for NBER above,
+    // but assert at least one other so 005's filter scope is verified).
+    const voxeu = await client<{ fetch_interval_min: number }[]>`
+      SELECT fetch_interval_min FROM sources WHERE name = 'VoxEU'
+    `;
+    expect(voxeu[0]?.fetch_interval_min).toBe(1440);
   });
 
   it('seeds arXiv cs.AI / cs.CL / cs.LG with kind=arxiv', async () => {

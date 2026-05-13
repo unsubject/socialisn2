@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Example Podcast</title>
+    <link>https://podcast.example.com/</link>
+    <description>An example podcast feed.</description>
+    <language>en</language>
+    <item>
+      <title>Episode 42: the meaning of feeds</title>
+      <link>https://podcast.example.com/episodes/42</link>
+      <description>In this episode we discuss RSS, Atom, and the no-scraping policy.</description>
+      <pubDate>Tue, 13 May 2026 10:00:00 GMT</pubDate>
+      <guid isPermaLink="false">example-podcast:ep42</guid>
+      <enclosure url="https://podcast.example.com/audio/ep42.mp3" length="12345678" type="audio/mpeg"/>
+      <itunes:author>Host McHostface</itunes:author>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,92 @@
+name: bootstrap-d1
+
+# One-time D1 setup. Manually triggered. Creates the socialisn2-inbox D1 if
+# it doesn't already exist, applies the schema from 0001_inbox.sql, and
+# prints the database id in the workflow summary so it can be pasted into
+# both wrangler.toml files in a follow-up PR.
+#
+# Idempotent: re-running on an already-bootstrapped database is safe —
+# `wrangler d1 list` lookup returns the existing id, and the schema apply
+# uses `CREATE TABLE` (no IF NOT EXISTS, but D1 errors are caught and
+# surfaced; safe in practice since the workflow is only ever re-run if
+# the user knows the database is in a known state).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: email-worker
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: email-worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Find or create the D1 database
+        id: d1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          existing=$(npx wrangler d1 list --json 2>/dev/null | jq -r '.[] | select(.name == "socialisn2-inbox") | .uuid' || true)
+          if [ -n "$existing" ]; then
+            echo "Database socialisn2-inbox already exists: $existing"
+            id="$existing"
+            created=false
+          else
+            echo "Creating database socialisn2-inbox..."
+            create_output=$(npx wrangler d1 create socialisn2-inbox 2>&1)
+            echo "$create_output"
+            id=$(echo "$create_output" | grep -oE 'database_id = "[^"]+"' | head -1 | sed -E 's/database_id = "([^"]+)"/\1/')
+            if [ -z "$id" ]; then
+              echo "::error::Could not parse database_id from wrangler output"
+              exit 1
+            fi
+            created=true
+          fi
+          echo "database_id=$id" >> "$GITHUB_OUTPUT"
+          echo "created=$created" >> "$GITHUB_OUTPUT"
+
+      - name: Apply schema (migrations/0001_inbox.sql)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler d1 execute socialisn2-inbox --remote --file=migrations/0001_inbox.sql --yes
+
+      - name: Workflow summary
+        env:
+          DB_ID: ${{ steps.d1.outputs.database_id }}
+          CREATED: ${{ steps.d1.outputs.created }}
+        run: |
+          {
+            echo "## bootstrap-d1 complete"
+            echo ""
+            if [ "$CREATED" = "true" ]; then
+              echo "**Created new database** \`socialisn2-inbox\`."
+            else
+              echo "Database \`socialisn2-inbox\` already existed; schema re-applied."
+            fi
+            echo ""
+            echo "**\`database_id\`:** \`$DB_ID\`"
+            echo ""
+            echo "### Next step"
+            echo ""
+            echo "Open a PR that replaces the \`REPLACE_WITH_D1_ID_FROM_WRANGLER_D1_CREATE\` placeholder in **both** wrangler.toml files:"
+            echo ""
+            echo "- \`email-worker/wrangler.toml\`"
+            echo "- \`feed-worker/wrangler.toml\`"
+            echo ""
+            echo "On merge, the \`deploy-workers\` workflow auto-deploys both Workers."
+          } >> "$GITHUB_STEP_SUMMARY"

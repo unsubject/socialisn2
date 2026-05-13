@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example News</title>
+    <link>https://news.example.com/</link>
+    <description>An example RSS 2.0 news feed.</description>
+    <language>en-us</language>
+    <item>
+      <title>Headline one — about something important</title>
+      <link>https://news.example.com/articles/headline-one?utm_source=rss&amp;utm_campaign=feed</link>
+      <description>One-paragraph summary of the article.</description>
+      <pubDate>Mon, 12 May 2026 14:30:00 GMT</pubDate>
+      <guid isPermaLink="false">news-example:headline-one</guid>
+      <dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">Jane Reporter</dc:creator>
+      <category>policy</category>
+    </item>
+    <item>
+      <title>Headline two: a second story</title>
+      <link>https://news.example.com/articles/headline-two</link>
+      <description>Another summary.</description>
+      <pubDate>Mon, 12 May 2026 12:15:00 GMT</pubDate>
+      <guid isPermaLink="false">news-example:headline-two</guid>
+    </item>
+  </channel>
+</rss>

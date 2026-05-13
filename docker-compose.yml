@@ -53,8 +53,7 @@ services:
       redis:
         condition: service_healthy
     env_file: .env
-    # Phase 1 PR 1 replaces this stub with the BullMQ ingestion worker entrypoint.
-    command: ["node", "-e", "console.log('ingestion-worker placeholder'); setInterval(()=>{}, 1<<30)"]
+    command: ["node", "dist/workers/ingestion.js"]
 
   scoring-worker:
     build: .

@@ -5,11 +5,12 @@ name: bootstrap-d1
 # prints the database id in the workflow summary so it can be pasted into
 # both wrangler.toml files in a follow-up PR.
 #
-# Idempotent: re-running on an already-bootstrapped database is safe —
-# `wrangler d1 list` lookup returns the existing id, and the schema apply
-# uses `CREATE TABLE` (no IF NOT EXISTS, but D1 errors are caught and
-# surfaced; safe in practice since the workflow is only ever re-run if
-# the user knows the database is in a known state).
+# Idempotent end-to-end:
+#   - `wrangler d1 list` lookup returns the existing id if the database is
+#     already there, otherwise creates it.
+#   - migrations/0001_inbox.sql uses CREATE {TABLE,INDEX} IF NOT EXISTS for
+#     every statement, so re-applying against an already-initialised
+#     database is a no-op rather than a duplicate-table error.
 
 on:
   workflow_dispatch:

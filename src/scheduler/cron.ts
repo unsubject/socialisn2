@@ -10,14 +10,20 @@ import cron, { type ScheduledTask } from 'node-cron';
 
 import { env } from '../config/env.js';
 import type { Db } from '../db/client.js';
+import { loadDueCompetitors } from '../ingestion/competitor-loader.js';
 import { type DueSource, loadDueSources } from '../ingestion/source-loader.js';
 import type { IngestionJobData } from '../queue/ingestion-queue.js';
-import type { Queue } from 'bullmq';
+import type { JobsOptions, Queue } from 'bullmq';
 
-// Phase 1 PR 1 only enqueues `rss` sources. PR 2 widens this to arxiv,
-// youtube_channel, email_bridge; PR 3 adds gdelt (which is on-demand, not
-// cron-driven, so it'll be enqueued from elsewhere).
-const ENQUEUED_KINDS: ReadonlyArray<DueSource['kind']> = ['rss'];
+// PR 1 only enqueued `rss`; PR 2 widens to arxiv + email_bridge for sources
+// and adds the parallel competitor path (youtube only in v1 per SPEC §6.7).
+// PR 3 will add gdelt — that's on-demand per cluster, not cron-driven, so
+// it'll be enqueued from elsewhere.
+const ENQUEUED_SOURCE_KINDS: ReadonlyArray<DueSource['kind']> = [
+  'rss',
+  'arxiv',
+  'email_bridge',
+];
 
 export interface SchedulerHandle {
   task: ScheduledTask;
@@ -30,18 +36,40 @@ export function startScheduler(
   queue: Queue<IngestionJobData>,
 ): SchedulerHandle {
   const tickOnce = async (): Promise<number> => {
-    const due = await loadDueSources(db, ENQUEUED_KINDS);
-    if (due.length === 0) return 0;
-    await queue.addBulk(
-      due.map((s) => ({
-        name: `fetch:${s.kind}`,
-        data: { sourceId: s.id, kind: s.kind },
-        // jobId per source per minute prevents the same source being enqueued
-        // twice if a tick overlaps a slow previous tick.
-        opts: { jobId: `${s.id}:${Math.floor(Date.now() / 60_000)}` },
-      })),
-    );
-    return due.length;
+    const [dueSources, dueCompetitors] = await Promise.all([
+      loadDueSources(db, ENQUEUED_SOURCE_KINDS),
+      loadDueCompetitors(db),
+    ]);
+
+    const minuteBucket = Math.floor(Date.now() / 60_000);
+    const sourceJobs = dueSources
+      .filter((s): s is DueSource & { kind: 'rss' | 'arxiv' | 'email_bridge' } =>
+        s.kind === 'rss' || s.kind === 'arxiv' || s.kind === 'email_bridge',
+      )
+      .map((s) => ({
+        name: `fetch:source:${s.kind}`,
+        data: {
+          target: 'source' as const,
+          sourceId: s.id,
+          kind: s.kind,
+        } satisfies IngestionJobData,
+        opts: { jobId: `src:${s.id}:${minuteBucket}` } satisfies JobsOptions,
+      }));
+
+    const competitorJobs = dueCompetitors.map((c) => ({
+      name: `fetch:competitor:${c.platform}`,
+      data: {
+        target: 'competitor' as const,
+        competitorId: c.id,
+        platform: c.platform,
+      } satisfies IngestionJobData,
+      opts: { jobId: `cmp:${c.id}:${minuteBucket}` } satisfies JobsOptions,
+    }));
+
+    const allJobs = [...sourceJobs, ...competitorJobs];
+    if (allJobs.length === 0) return 0;
+    await queue.addBulk(allJobs);
+    return allJobs.length;
   };
 
   const task = cron.schedule(

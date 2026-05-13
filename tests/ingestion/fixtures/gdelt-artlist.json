@@ -1,0 +1,49 @@
+{
+  "articles": [
+    {
+      "url": "https://www.reuters.com/article/abc",
+      "title": "Central bank holds rates",
+      "seendate": "20260512T103000Z",
+      "language": "English",
+      "sourcecountry": "United States",
+      "sourcecommonname": "Reuters",
+      "themes": "ECON_CENTRALBANK;FINANCE;USA_GOV"
+    },
+    {
+      "url": "https://www.bloomberg.com/article/def",
+      "title": "Markets respond to Fed decision",
+      "seendate": "20260512T110000Z",
+      "language": "English",
+      "sourcecountry": "United States",
+      "sourcecommonname": "Bloomberg",
+      "themes": "ECON_CENTRALBANK;FINANCE"
+    },
+    {
+      "url": "https://www.ft.com/article/ghi",
+      "title": "UK reaction to US Fed",
+      "seendate": "20260511T230000Z",
+      "language": "English",
+      "sourcecountry": "United Kingdom",
+      "sourcecommonname": "Financial Times",
+      "themes": "ECON_CENTRALBANK;UK_GOV"
+    },
+    {
+      "url": "https://www.nikkei.com/article/jkl",
+      "title": "Asia markets follow US lead",
+      "seendate": "20260512T020000Z",
+      "language": "Japanese",
+      "sourcecountry": "Japan",
+      "sourcecommonname": "Nikkei",
+      "themes": "FINANCE;ASIA_MARKETS"
+    },
+    {
+      "url": "https://www.reuters.com/article/mno",
+      "title": "Follow-up on Fed",
+      "seendate": "20260512T140000Z",
+      "language": "English",
+      "sourcecountry": "United States",
+      "sourcecommonname": "Reuters",
+      "themes": "ECON_CENTRALBANK"
+    }
+  ]
+}

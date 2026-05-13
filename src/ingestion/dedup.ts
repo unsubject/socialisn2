@@ -22,6 +22,8 @@ const TRACKING_PARAM_PATTERNS = [
   /^igshid$/i,
   /^_hsmi$/i,
   /^_hsenc$/i,
+  // BBC News uses at_medium / at_campaign / at_link_origin etc. on every RSS link.
+  /^at_/i,
 ];
 
 function isTrackingParam(name: string): boolean {

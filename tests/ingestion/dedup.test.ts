@@ -37,6 +37,14 @@ describe('canonicaliseUrl', () => {
     expect(canonicaliseUrl(u)).toBe('https://example.com/p?keep=yes');
   });
 
+  it("strips BBC's at_* tracking params", () => {
+    const u =
+      'https://www.bbc.com/news/articles/c1w28qw1e0xo?at_medium=RSS&at_campaign=rss&at_link_origin=feed';
+    expect(canonicaliseUrl(u)).toBe(
+      'https://www.bbc.com/news/articles/c1w28qw1e0xo',
+    );
+  });
+
   it('falls back to a trimmed string for malformed input', () => {
     expect(canonicaliseUrl('  /relative/path  ')).toBe('/relative/path');
   });

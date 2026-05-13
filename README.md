@@ -27,8 +27,10 @@ The `app`, `ingestion-worker`, `scoring-worker`, and `whisper-worker` compose
 services share one image — their commands are stubs in Phase 0 and become
 real in Phase 1 / Phase 2 PRs.
 
-The Cloudflare Email Worker (`inbox-worker/`, SPEC §6.9) deploys independently
-via `wrangler deploy` and is not part of docker-compose.
+The Cloudflare Workers behind SPEC §6.9 — `email-worker/` (inbound mail
+handler) and `feed-worker/` (Atom feed reader) — deploy independently via
+`wrangler deploy` against a shared D1 database. Neither is part of
+docker-compose.
 
 ## Conventions
 

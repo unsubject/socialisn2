@@ -1,0 +1,14 @@
+name = "socialisn2-email-worker"
+main = "src/index.ts"
+compatibility_date = "2024-09-25"
+compatibility_flags = ["nodejs_compat"]
+
+# Invoked by Cloudflare Email Routing — the catch-all rule on socialisn.com
+# forwards `inbox@socialisn.com` to this Worker (configured per
+# email-worker/README.md). No HTTP route on this Worker; that lives on
+# feed-worker.
+
+[[d1_databases]]
+binding = "INBOX_DB"
+database_name = "socialisn2-inbox"
+database_id = "REPLACE_WITH_D1_ID_FROM_WRANGLER_D1_CREATE"

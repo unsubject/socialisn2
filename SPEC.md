@@ -584,14 +584,19 @@ A meaningful share of high-value sources don't expose public RSS/Atom feeds:
 
 To remain within the no-scraping policy, Socialisn2 ingests both categories via a **Cloudflare Email Worker bridge** running on the domain `socialisn.com` (Cloudflare-managed DNS, free Email Routing tier).
 
-**Mechanism:**
+**Mechanism (revised in Phase 0 PR 4 — single inbox + List-Id):**
 
-1. The CF zone `socialisn.com` has Email Routing enabled with a catch-all rule routing every inbound message to an Email Worker.
-2. The Email Worker (TypeScript, deployed via Wrangler) parses each incoming message with `postal-mime`, strips boilerplate (unsubscribe footers, tracking pixels, list-management headers), and writes a row to a Cloudflare D1 database keyed by the local-part of the To: address.
-3. A second Worker exposes per-source Atom feeds at `https://inbox.socialisn.com/feeds/<slug>.xml`, reading from D1 with a `LIMIT 50` window. Socialisn2's ingestion worker polls those URLs like any other RSS source (`sources.kind = 'email_bridge'`).
-4. To add a new source: subscribe to the publisher's newsletter using `<slug>@socialisn.com`; the catch-all rule + Worker take it from there. No CF dashboard changes needed per source.
+Two Cloudflare Workers share one D1 database. All newsletter subscriptions use the single address `inbox@socialisn.com`; source identity is resolved post-receipt from the message's own headers.
 
-**Seed addresses (v1):**
+1. A single Email Routing rule on the zone `socialisn.com` forwards `inbox@socialisn.com` to the **email-worker** Cloudflare Worker.
+2. email-worker (TypeScript, deployed via Wrangler) parses each inbound message with `postal-mime` and looks up the source slug in the D1 `sender_map` table using a three-step priority: **List-Id** header (preferred — RFC 2919, set by virtually every legitimate newsletter) → full **From:** address → **From:** domain.
+3. On match, email-worker strips boilerplate and inserts the message into the `inbox` table; extracted links are inserted into the `inbox_links` join table (FK → inbox with `ON DELETE CASCADE`). On no match, the message lands in the `unmatched` triage table preserving `List-Id`, `From:`, and subject.
+4. **feed-worker** — a separate Cloudflare Worker on the route `inbox.socialisn.com/feeds/*` — exposes per-source Atom feeds at `https://inbox.socialisn.com/feeds/<slug>.xml`, reading the same D1 with a `LIMIT 50` window. Socialisn2's ingestion-worker polls those URLs like any other RSS source (`sources.kind = 'email_bridge'`).
+5. To add a new source: subscribe to the publisher's newsletter using `inbox@socialisn.com`. The first email lands in `unmatched`. Inspect the captured `List-Id`, then register it via one `sender_map` insert + one `sources` insert (or call the Phase 4 MCP tool `add_email_bridge_source(slug, publisher_name, list_id, domain, authority)`). Subsequent emails route correctly; the email-worker also re-processes earlier `unmatched` rows for that List-Id into `inbox`.
+
+**Seed sources (v1):**
+
+> All subscriptions use the single address `inbox@socialisn.com`. The "Slug" column below identifies each source in the feed URL (`https://inbox.socialisn.com/feeds/<slug>.xml`) and in the `sender_map.slug` value. The legacy "Subscribe-as address" column from PR #6 (e.g. `anthropic@socialisn.com`) is retained below for human reference but is no longer the operative path — the email-worker uses the inbound message's `List-Id` to determine slug.
 
 Newsletter-only publishers:
 
@@ -645,10 +650,14 @@ Newsletter-only publishers:
 
 **Implementation notes:**
 
-- Feed URLs are technically guessable; if privacy of subscription state is desired, append a random suffix per source (`anthropic-a7k3@socialisn.com` → `/feeds/anthropic-a7k3.xml`).
-- D1 schema: `(slug TEXT, received_at INTEGER, message_id TEXT, subject TEXT, body_text TEXT, body_html TEXT, links JSONB)` with `PRIMARY KEY (slug, message_id)`.
-- The Email Worker can optionally call Cloudflare Workers AI on intake to pre-extract canonical URLs and a one-line summary, reducing downstream LLM cost. Decide at PR time whether to enable in v1.
-- The bridge is **the only sanctioned path** for non-RSS sources. New email-only subscriptions are added by Simon via the MCP tool `add_email_bridge_source(slug, publisher_name, domain, authority)`.
+- Atom feed URLs are technically guessable; if privacy of subscription state is desired, randomise the slug at registration time (`anthropic-a7k3` instead of `anthropic`).
+- D1 schema (four tables):
+  - `inbox(slug, message_id, received_at, subject, body_text, body_html)` PK `(slug, message_id)`
+  - `inbox_links(slug, message_id, link_pos, link_url)` PK `(slug, message_id, link_pos)`, FK→inbox with `ON DELETE CASCADE`
+  - `sender_map(match_field, match_value, slug, created_at)` PK `(match_field, match_value)` — drives the List-Id / From: lookup
+  - `unmatched(id, received_at, list_id, from_addr, subject)` — operator triage queue
+- email-worker can optionally call Cloudflare Workers AI on intake to pre-extract canonical URLs and a one-line summary, reducing downstream LLM cost. Decide at Phase 1 PR 4 whether to enable in v1.
+- The bridge is **the only sanctioned path** for non-RSS sources. New email-only subscriptions are added by Simon via the MCP tool `add_email_bridge_source(slug, publisher_name, list_id, domain, authority)`.
 
 **Architectural rationale:** the bridge runs at the Cloudflare edge, independent of the Hostinger VPS, so VPS reboots or socialisn2 redeploys do not lose incoming newsletters. Free tier covers projected volume (~10–30 emails/day) by 1000× margin. Output is plain Atom XML — exit cost is near-zero if the bridge is ever replaced.
 

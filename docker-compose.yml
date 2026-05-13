@@ -1,8 +1,8 @@
 # Local + VPS dev compose.
 #
-# The Cloudflare Email Worker (inbox-worker/, SPEC §6.9) deploys independently
-# via `wrangler deploy` and is NOT in this file — VPS reboots must not affect
-# inbound newsletter intake.
+# The Cloudflare Workers behind SPEC §6.9 — email-worker/ and feed-worker/ —
+# deploy independently via `wrangler deploy` against a shared D1 database and
+# are NOT in this file. VPS reboots must not affect inbound newsletter intake.
 
 services:
   postgres:

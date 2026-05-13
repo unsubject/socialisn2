@@ -7,5 +7,5 @@
     "sourceMap": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests", "scripts", "inbox-worker"]
+  "exclude": ["node_modules", "dist", "tests", "scripts", "email-worker", "feed-worker"]
 }

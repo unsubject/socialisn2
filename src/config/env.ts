@@ -37,4 +37,11 @@ export const env = {
       'socialisn2/0.1 (+https://github.com/unsubject/socialisn2)',
     ),
   httpTimeoutMs: () => Number(optional('HTTP_TIMEOUT_MS', '30000')),
+  // GDELT requires an identifying User-Agent per their terms (no API key —
+  // the UA + low traffic profile is the rate-limit budget). See ADR-005.
+  gdeltUserAgent: () =>
+    optional(
+      'GDELT_USER_AGENT',
+      'socialisn2/0.1 (+https://github.com/unsubject/socialisn2)',
+    ),
 };

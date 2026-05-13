@@ -1,0 +1,88 @@
+name: deploy-workers
+
+# Auto-deploys both Cloudflare Workers (email-worker + feed-worker) on push
+# to main, gated by path filter. Also exposes workflow_dispatch for manual
+# redeploy without a code change.
+#
+# Both jobs run in parallel; each fails fast if its wrangler.toml still
+# has the bootstrap placeholder, so a stray `git revert` of the id-patch PR
+# can't accidentally redeploy a Worker pointed at no database.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'email-worker/**'
+      - 'feed-worker/**'
+      - '.github/workflows/deploy-workers.yml'
+  workflow_dispatch:
+
+concurrency:
+  # Serialise deploys of the same branch to avoid two CI runs racing on
+  # `wrangler deploy`. Don't cancel in-progress — partial deploys are worse
+  # than queued ones.
+  group: deploy-workers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-email-worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: email-worker
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: email-worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Refuse to deploy with placeholder D1 binding
+        run: |
+          if grep -q 'REPLACE_WITH_D1_ID_FROM_WRANGLER_D1_CREATE' wrangler.toml; then
+            echo "::error::email-worker/wrangler.toml still has the placeholder database_id. Run the bootstrap-d1 workflow first, then merge a PR that pastes the returned id into wrangler.toml."
+            exit 1
+          fi
+
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: email-worker
+          command: deploy
+
+  deploy-feed-worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: feed-worker
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: feed-worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Refuse to deploy with placeholder D1 binding
+        run: |
+          if grep -q 'REPLACE_WITH_D1_ID_FROM_WRANGLER_D1_CREATE' wrangler.toml; then
+            echo "::error::feed-worker/wrangler.toml still has the placeholder database_id. Run the bootstrap-d1 workflow first, then merge a PR that pastes the returned id into wrangler.toml."
+            exit 1
+          fi
+
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: feed-worker
+          command: deploy

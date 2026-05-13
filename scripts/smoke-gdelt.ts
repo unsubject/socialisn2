@@ -1,7 +1,12 @@
 // Manual smoke against the live GDELT GKG API. Not part of CI. Verifies
 // the URL builder + response summariser handle real GKG data.
 
-import { fetchGkg, hashGdeltQuery, buildGkgUrl } from '../src/ingestion/gdelt.js';
+import {
+  buildGkgArtListUrl,
+  buildGkgTimelineUrl,
+  fetchGkg,
+  hashGdeltQuery,
+} from '../src/ingestion/gdelt.js';
 
 const input = {
   query: 'Federal Reserve',
@@ -10,7 +15,8 @@ const input = {
 };
 
 console.log('query hash:', hashGdeltQuery(input));
-console.log('url:', buildGkgUrl(input));
+console.log('timeline url:', buildGkgTimelineUrl(input));
+console.log('artlist url: ', buildGkgArtListUrl(input));
 
 const t = Date.now();
 const coverage = await fetchGkg(input);

@@ -130,7 +130,7 @@ socialisn2/
 
 ## 5. Data Model
 
-All tables use UUIDv7 primary keys (sortable, time-ordered). Timestamps in UTC, displayed in US Eastern at the UI layer.
+Application-inserted rows use UUIDv7 primary keys (sortable, time-ordered). Pre-deploy seed rows in `sources` and `competitors` may use UUIDv4 (`gen_random_uuid()`) — the v7 time-ordering rationale doesn't apply to seed data that materialises at migration time. Timestamps in UTC, displayed in US Eastern at the UI layer.
 
 ### 5.1 Core Tables
 
@@ -538,6 +538,7 @@ Authority is per-source and reflects independent commentator status. Weight is s
 | EleutherAI blog | Stella Biderman et al. | https://blog.eleuther.ai/index.xml | atom | 70 | scitech |
 | Import AI | Jack Clark | https://importai.substack.com/feed | substack | 75 | scitech |
 | Volts | David Roberts | https://www.volts.wtf/feed | substack+podcast | 70 | scitech (energy), national (US) |
+| Shift Key | Robinson Meyer & Jesse Jenkins | https://feeds.acast.com/public/shows/shift-key | podcast | 70 | scitech (energy/climate) |
 | Doomberg | Doomberg (anon) | https://newsletter.doomberg.com/feed | substack | 65 | scitech (energy), economy |
 | Ground Truths | Eric Topol | https://erictopol.substack.com/feed | substack | 75 | scitech (bio/medical) |
 
@@ -546,7 +547,7 @@ Language is English for all entries above unless noted.
 **Excluded (Twitter/X-only — no non-scraping feed):**
 Conor Sen, "soberlook" (Daily Shot), Lingling Wei, Bonnie Girard, Helen Thompson, Robert Colvile, Trevor Tombe (covered via The Hub in §6.5), Wen-Ti Sung, Lev Nachman, Sara Hooker.
 
-**Moved to §6.9 (Email-Only Sources):** Brad Setser, Heatmap News / Robinson Meyer, Derek Lowe (In the Pipeline), Anthropic news, Meta AI blog, Hugging Face Daily Papers.
+**Moved to §6.9 (Email Worker Bridge):** Brad Setser, Heatmap News, Derek Lowe (In the Pipeline), Anthropic news, Meta AI blog, Hugging Face Daily Papers. (Shift Key was bridged in PR #6 but moved back to §6.6 in migration 006 — open Acast feed exists.)
 
 > **Note for Simon:** Validate and expand this list on first run. The MCP tool `add_influencer` accepts a feed URL (RSS/Atom only) and assigns it to one or more domains. Adding a Twitter/X handle directly is rejected by policy; use the email-bridge path in §6.9 if the writer publishes a newsletter.
 
@@ -578,7 +579,7 @@ GDELT is rate-limited (free tier) — cache responses for 6 hours per query.
 
 A meaningful share of high-value sources don't expose public RSS/Atom feeds:
 
-- **Newsletter-only publishers** — Anthropic news, Meta AI blog, Hugging Face Daily Papers, Brad Setser (Follow the Money), Heatmap News, Robinson Meyer (Shift Key), Derek Lowe (In the Pipeline). No RSS exists.
+- **Newsletter-only publishers** — Anthropic news, Meta AI blog, Hugging Face Daily Papers, Brad Setser (Follow the Money), Heatmap News, Derek Lowe (In the Pipeline). No RSS exists.
 - **Primary news outlets named in §6.1, §6.2, §6.4** — Reuters, Bloomberg, FT, The Economist, WSJ, The Information, Politico, Foreign Affairs, Foreign Policy, SCMP, Wired, MIT Tech Review, Ars Technica, The Verge, Nature News, Stat News, Endpoints News, Canary Media, NBER, SSRN, VoxEU, AEA, Behavioral Scientist, ASR. RSS may not exist at article level but every one of these offers a free email digest with headlines + excerpts + links.
 
 To remain within the no-scraping policy, Socialisn2 ingests both categories via a **Cloudflare Email Worker bridge** running on the domain `socialisn.com` (Cloudflare-managed DNS, free Email Routing tier).
@@ -601,7 +602,6 @@ Newsletter-only publishers:
 | Hugging Face Daily Papers | hf-papers@socialisn.com | https://inbox.socialisn.com/feeds/hf-papers.xml | 75 | scitech |
 | Brad Setser — Follow the Money | setser@socialisn.com | https://inbox.socialisn.com/feeds/setser.xml | 75 | economy, geopolitics |
 | Heatmap News | heatmap@socialisn.com | https://inbox.socialisn.com/feeds/heatmap.xml | 70 | scitech (energy/climate) |
-| Robinson Meyer — Shift Key | shift-key@socialisn.com | https://inbox.socialisn.com/feeds/shift-key.xml | 70 | scitech (energy/climate) |
 | Derek Lowe — In the Pipeline | derek-lowe@socialisn.com | https://inbox.socialisn.com/feeds/derek-lowe.xml | 75 | scitech (bio/pharma) |
 
 §6.1 news outlets routed through the bridge:
@@ -636,12 +636,12 @@ Newsletter-only publishers:
 
 | Source | Subscribe-as address | Worker feed URL | Authority | Domains |
 |--------|----------------------|-----------------|-----------|---------|
-| NBER Working Papers | nber@socialisn.com | https://inbox.socialisn.com/feeds/nber.xml | 70 | economics |
+| NBER Working Papers | nber@socialisn.com | https://inbox.socialisn.com/feeds/nber.xml | 80 | economics |
 | SSRN top downloads | ssrn@socialisn.com | https://inbox.socialisn.com/feeds/ssrn.xml | 65 | economics |
-| VoxEU | voxeu@socialisn.com | https://inbox.socialisn.com/feeds/voxeu.xml | 65 | economics |
-| AEA papers & proceedings | aea@socialisn.com | https://inbox.socialisn.com/feeds/aea.xml | 70 | economics |
+| VoxEU | voxeu@socialisn.com | https://inbox.socialisn.com/feeds/voxeu.xml | 70 | economics |
+| AEA papers & proceedings | aea@socialisn.com | https://inbox.socialisn.com/feeds/aea.xml | 85 | economics |
 | Behavioral Scientist | behavioral-scientist@socialisn.com | https://inbox.socialisn.com/feeds/behavioral-scientist.xml | 60 | scitech, economics |
-| American Sociological Review | asr@socialisn.com | https://inbox.socialisn.com/feeds/asr.xml | 65 | scitech |
+| American Sociological Review | asr@socialisn.com | https://inbox.socialisn.com/feeds/asr.xml | 80 | scitech |
 
 **Implementation notes:**
 
@@ -661,8 +661,8 @@ Newsletter-only publishers:
 The `ingestion-worker` consumes a BullMQ queue. Cron schedule populates the queue at staggered intervals based on each source's `fetch_interval_min`. Defaults:
 
 - News RSS: every 60 min
-- Substack / blog RSS (§6.6): every 60-120 min
-- Podcast RSS (§6.1–6.5 podcast subsections): every 120 min
+- Substack / blog RSS (§6.6): every 90 min
+- Podcast RSS (§6.1–6.5 podcast subsections, §6.6 podcast / substack+podcast): every 120 min
 - arXiv / bioRxiv / medRxiv daily listings: once per day at 09:30 ET
 - NBER / SSRN: once per day at 10:00 ET
 - Email-bridge feeds (§6.9): every 30 min (cheap call, near-instant detection of new newsletter arrivals)

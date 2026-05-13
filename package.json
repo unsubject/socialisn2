@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Editorial intelligence agent — successor to socialisn. See SPEC.md.",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

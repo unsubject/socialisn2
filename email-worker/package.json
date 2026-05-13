@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Cloudflare Email Worker — inbound newsletter handler for SPEC §6.9. Parses mail, maps to a source slug via D1 sender_map, writes to inbox or unmatched.",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

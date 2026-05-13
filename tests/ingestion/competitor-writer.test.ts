@@ -115,19 +115,26 @@ describe.skipIf(!DATABASE_URL)('writeCompetitorVideos', () => {
   it('markCompetitorFetched updates last_video_at', async () => {
     const now = new Date('2026-05-12T18:00:00Z');
     await markCompetitorFetched(db, competitorA, now);
-    const rows = await client<{ last_video_at: Date }[]>`
+    // postgres.js v3 returns timestamptz as strings (drizzle adds a type
+    // parser, but raw tagged-template queries use the default). Wrap with
+    // `new Date()` so the assertion is independent of the parser config.
+    const rows = await client<{ last_video_at: string | Date }[]>`
       SELECT last_video_at FROM competitors WHERE id = ${competitorA}
     `;
-    expect(rows[0]?.last_video_at?.toISOString()).toBe(now.toISOString());
+    const got = rows[0]?.last_video_at;
+    expect(got).toBeTruthy();
+    expect(new Date(got!).toISOString()).toBe(now.toISOString());
   });
 
   it('markCompetitorFetched with null leaves last_video_at unchanged', async () => {
     const before = new Date('2026-05-10T00:00:00Z');
     await markCompetitorFetched(db, competitorA, before);
     await markCompetitorFetched(db, competitorA, null);
-    const rows = await client<{ last_video_at: Date }[]>`
+    const rows = await client<{ last_video_at: string | Date }[]>`
       SELECT last_video_at FROM competitors WHERE id = ${competitorA}
     `;
-    expect(rows[0]?.last_video_at?.toISOString()).toBe(before.toISOString());
+    const got = rows[0]?.last_video_at;
+    expect(got).toBeTruthy();
+    expect(new Date(got!).toISOString()).toBe(before.toISOString());
   });
 });

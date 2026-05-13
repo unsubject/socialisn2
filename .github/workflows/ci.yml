@@ -49,3 +49,37 @@ jobs:
 
       - name: Test
         run: npm test
+
+  email-worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: email-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: email-worker/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+
+  feed-worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: feed-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: feed-worker/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck

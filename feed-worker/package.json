@@ -1,0 +1,17 @@
+{
+  "name": "socialisn2-feed-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker — Atom-feed reader half of the SPEC §6.9 bridge. Serves https://inbox.socialisn.com/feeds/<slug>.xml from the shared D1 inbox.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240924.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^3.78.0"
+  }
+}

@@ -1,0 +1,15 @@
+name = "socialisn2-feed-worker"
+main = "src/index.ts"
+compatibility_date = "2024-09-25"
+
+# Serves per-source Atom feeds at https://inbox.socialisn.com/feeds/<slug>.xml.
+# Read-only over the shared `socialisn2-inbox` D1 database (writer is the
+# sibling email-worker).
+routes = [
+  { pattern = "inbox.socialisn.com/feeds/*", zone_name = "socialisn.com" },
+]
+
+[[d1_databases]]
+binding = "INBOX_DB"
+database_name = "socialisn2-inbox"
+database_id = "REPLACE_WITH_D1_ID_FROM_WRANGLER_D1_CREATE"

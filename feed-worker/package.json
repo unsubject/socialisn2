@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Cloudflare Worker — Atom-feed reader half of the SPEC §6.9 bridge. Serves https://inbox.socialisn.com/feeds/<slug>.xml from the shared D1 inbox.",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns:media="http://search.yahoo.com/mrss/"
+      xmlns="http://www.w3.org/2005/Atom">
+  <link rel="self" href="http://www.youtube.com/feeds/videos.xml?channel_id=UCexample"/>
+  <id>yt:channel:UCexample</id>
+  <yt:channelId>UCexample</yt:channelId>
+  <title>Example Channel</title>
+  <link rel="alternate" href="https://www.youtube.com/channel/UCexample"/>
+  <author>
+    <name>Example Channel</name>
+    <uri>https://www.youtube.com/channel/UCexample</uri>
+  </author>
+  <published>2020-01-01T00:00:00+00:00</published>
+  <entry>
+    <id>yt:video:VIDEO_AAA</id>
+    <yt:videoId>VIDEO_AAA</yt:videoId>
+    <yt:channelId>UCexample</yt:channelId>
+    <title>Episode one: the news today</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=VIDEO_AAA"/>
+    <author>
+      <name>Example Channel</name>
+      <uri>https://www.youtube.com/channel/UCexample</uri>
+    </author>
+    <published>2026-05-12T12:00:00+00:00</published>
+    <updated>2026-05-12T12:30:00+00:00</updated>
+    <media:group>
+      <media:title>Episode one: the news today</media:title>
+      <media:content url="https://www.youtube.com/v/VIDEO_AAA?version=3" type="application/x-shockwave-flash" width="640" height="390"/>
+      <media:thumbnail url="https://i.ytimg.com/vi/VIDEO_AAA/hqdefault.jpg" width="480" height="360"/>
+      <media:description>Today we discuss the macro headlines and what the central bank decision means for emerging markets.</media:description>
+      <media:community>
+        <media:starRating count="100" average="4.50" min="1" max="5"/>
+        <media:statistics views="12345"/>
+      </media:community>
+    </media:group>
+  </entry>
+  <entry>
+    <id>yt:video:VIDEO_BBB</id>
+    <yt:videoId>VIDEO_BBB</yt:videoId>
+    <yt:channelId>UCexample</yt:channelId>
+    <title>Episode two: a sequel</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=VIDEO_BBB"/>
+    <author>
+      <name>Example Channel</name>
+      <uri>https://www.youtube.com/channel/UCexample</uri>
+    </author>
+    <published>2026-05-11T12:00:00+00:00</published>
+    <updated>2026-05-11T12:30:00+00:00</updated>
+    <media:group>
+      <media:title>Episode two: a sequel</media:title>
+      <media:content url="https://www.youtube.com/v/VIDEO_BBB?version=3" type="application/x-shockwave-flash" width="640" height="390"/>
+      <media:thumbnail url="https://i.ytimg.com/vi/VIDEO_BBB/hqdefault.jpg" width="480" height="360"/>
+      <media:description>Continuing yesterday's thread on emerging-market policy.</media:description>
+      <media:community>
+        <media:statistics views="9876"/>
+      </media:community>
+    </media:group>
+  </entry>
+</feed>

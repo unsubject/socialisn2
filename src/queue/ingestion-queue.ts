@@ -1,18 +1,20 @@
 // BullMQ queue + job-data type for the ingestion pipeline. The scheduler
 // produces jobs; the ingestion-worker consumes them. The shape is kept thin —
-// jobs carry only the source id; the worker re-reads the source row to get
-// current url/kind/etc, which keeps cron-enqueued jobs idempotent across
-// source-config edits.
+// jobs carry only the identifier of the row to fetch; the worker re-reads
+// the row to get current url / kind / enabled state, which keeps cron-
+// enqueued jobs idempotent across config edits between enqueue and pickup.
+//
+// `target` discriminates the two parallel ingestion paths:
+//   - `source` jobs (kind in rss / arxiv / email_bridge) write raw_items
+//   - `competitor` jobs (youtube in v1) write competitor_videos
 
 import { Queue, type ConnectionOptions } from 'bullmq';
 
 export const INGESTION_QUEUE = 'socialisn2:ingestion';
 
-export interface IngestionJobData {
-  sourceId: string;
-  // Carried for logging only — the worker re-queries the row.
-  kind: 'rss' | 'youtube_channel' | 'arxiv' | 'email_bridge';
-}
+export type IngestionJobData =
+  | { target: 'source'; sourceId: string; kind: 'rss' | 'arxiv' | 'email_bridge' }
+  | { target: 'competitor'; competitorId: string; platform: 'youtube' };
 
 export function createIngestionQueue(connection: ConnectionOptions): Queue<IngestionJobData> {
   return new Queue<IngestionJobData>(INGESTION_QUEUE, {

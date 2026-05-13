@@ -45,6 +45,20 @@ That's ~1 person-week of engineering vs the marginal benefit of "have a fallback
 
 A single 429 in 24 h is well within transient-failure budget — the BullMQ retry handles it (3 attempts, exponential backoff). The trigger is *patterned* failure, not isolated. Two-plus-per-day means GKG is consistently struggling at the volume we're sending; that's when investment in the fallback pays off.
 
+## Addendum (2026-05-13) — two-fetch model + themes deferral
+
+Code review on PR #13 surfaced two GDELT API specifics worth pinning down in this ADR:
+
+1. **`ArtList&maxrecords=250` truncates at 250 records.** Using it as the sole volume source caps `total_article_count` at 250 and biases `first_seen_gdelt` to the earliest article *in the page*, not in the window. The adapter now makes **two GKG calls per coverage fetch**:
+   - `mode=TimelineVolRaw` — uncapped per-15-min raw counts across the full window → drives `total_article_count` (sum) and `first_seen_gdelt` (earliest non-zero bucket).
+   - `mode=ArtList&maxrecords=250` — a sample of up to 250 article records → drives the cardinality estimators `country_count` / `language_count` / `source_outlets`. Sampling is acceptable here because cardinality estimators converge fast.
+
+   Cost impact: 2× requests per uncached lookup, but the 6h cache absorbs almost all fan-in from the scoring stage. The rate-limit threshold above counts a *successful coverage fetch* — either of the two underlying requests returning a non-OK response counts as one event toward the threshold.
+
+2. **GKG `themes` is not available via the DOC API.** Themes live in the GKG-table raw CSVs / BigQuery export, not in DOC `ArtList` responses. The adapter therefore writes `themes: []` on every successful coverage row in v1. The column remains on `gdelt_coverage` so the eventual v2 BigQuery loader can populate it without a schema migration. Scoring code that depends on themes must treat them as nullable / empty in v1 (or wait for v2).
+
+   Trigger to graduate themes from "deferred" to "build it" is the same set of conditions listed above — the BigQuery loader serves both rate-limit fallback and themes population in one piece of v2 work.
+
 ## Consequences
 
 - `src/ingestion/gdelt.ts` does **not** import any BigQuery client in v1. The adapter's only outbound dependency is the GKG DOC HTTP endpoint.

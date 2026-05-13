@@ -9,7 +9,7 @@
 // (source_id, external_id) unique index — catches republishes of the same
 // feed-item id within the same source.
 
-import { sql } from 'drizzle-orm';
+import { inArray, or } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
 
 import { rawItems } from '../db/schema.js';
@@ -79,16 +79,23 @@ export async function writeRawItems(
   const urlHashes = prepared.map((r) => r.urlHash);
   const titleHashes = prepared.map((r) => r.titleHash);
 
-  const existing = await db.execute<{ url_hash: string; title_hash: string }>(
-    sql`SELECT url_hash, title_hash FROM raw_items
-        WHERE url_hash = ANY(${urlHashes}::text[])
-           OR title_hash = ANY(${titleHashes}::text[])`,
-  );
+  // `sql\`... ANY(${arr}::text[])\`` binds postgres.js a record, not an array,
+  // so the cast fails ("cannot cast type record to text[]"). Use the typed
+  // inArray operator instead — drizzle expands it to a parameterised IN list.
+  const existing = await db
+    .select({
+      urlHash: rawItems.urlHash,
+      titleHash: rawItems.titleHash,
+    })
+    .from(rawItems)
+    .where(
+      or(inArray(rawItems.urlHash, urlHashes), inArray(rawItems.titleHash, titleHashes)),
+    );
   const existingUrlHashes = new Set<string>();
   const existingTitleHashes = new Set<string>();
   for (const row of existing) {
-    existingUrlHashes.add(row.url_hash);
-    existingTitleHashes.add(row.title_hash);
+    existingUrlHashes.add(row.urlHash);
+    existingTitleHashes.add(row.titleHash);
   }
 
   const fresh = prepared.filter(

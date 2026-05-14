@@ -12,15 +12,21 @@ export async function findSlugByHeaders(
   db: D1Database,
   headers: SenderHeaders,
 ): Promise<string | null> {
+  // Lowercase both sides of the comparison so a publisher sending
+  // `Reply-To: News@Anthropic.com` matches a mapping registered as
+  // `news@anthropic.com`. domainOf() already lowercases from_domain;
+  // doing it here for list_id and from_addr keeps all three paths
+  // consistent. LOWER(match_value) in SQL handles existing mixed-case
+  // rows from before this fix landed (migration 0004 normalises them).
   const candidates: Array<[string, string | null]> = [
-    ['list_id', headers.listId],
-    ['from_addr', headers.fromAddr],
+    ['list_id', headers.listId?.toLowerCase() ?? null],
+    ['from_addr', headers.fromAddr?.toLowerCase() ?? null],
     ['from_domain', headers.fromDomain],
   ];
   for (const [field, value] of candidates) {
     if (!value) continue;
     const row = await db
-      .prepare('SELECT slug FROM sender_map WHERE match_field = ? AND match_value = ?')
+      .prepare('SELECT slug FROM sender_map WHERE match_field = ? AND LOWER(match_value) = ?')
       .bind(field, value)
       .first<{ slug: string }>();
     if (row) return row.slug;

@@ -78,13 +78,18 @@ jobs:
         run: |
           set -euo pipefail
           NOW_MS=$(($(date +%s) * 1000))
+          # Lowercase match_value at write time so the index is case-folded
+          # consistent with the lookup path in email-worker/src/sender-map.ts.
+          # Domain names + email locals are case-insensitive at the protocol
+          # level; List-Id values vary by ML software.
+          MATCH_VALUE_LC=$(printf '%s' "$MATCH_VALUE" | tr '[:upper:]' '[:lower:]')
           # jq -n with --arg builds the JSON payload with proper escaping for
           # any character in the inputs. The SQL string is a constant; the
           # values flow only through the `params` array, bound server-side.
           PAYLOAD=$(jq -n \
             --arg sql "INSERT INTO sender_map (match_field, match_value, slug, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING" \
             --arg field "$MATCH_FIELD" \
-            --arg value "$MATCH_VALUE" \
+            --arg value "$MATCH_VALUE_LC" \
             --arg slug "$SLUG" \
             --argjson ts "$NOW_MS" \
             '{sql: $sql, params: [$field, $value, $slug, $ts]}')
@@ -115,10 +120,12 @@ jobs:
           MATCH_VALUE: ${{ inputs.match_value }}
         run: |
           set -euo pipefail
+          # Verify against the same lowercased value we just wrote.
+          MATCH_VALUE_LC=$(printf '%s' "$MATCH_VALUE" | tr '[:upper:]' '[:lower:]')
           PAYLOAD=$(jq -n \
             --arg sql "SELECT match_field, match_value, slug, datetime(created_at/1000, 'unixepoch') AS created FROM sender_map WHERE match_field = ? AND match_value = ?" \
             --arg field "$MATCH_FIELD" \
-            --arg value "$MATCH_VALUE" \
+            --arg value "$MATCH_VALUE_LC" \
             '{sql: $sql, params: [$field, $value]}')
 
           response=$(curl -fsS \

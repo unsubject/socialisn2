@@ -17,7 +17,7 @@
 // 7-day semantic-dedup window but is much tighter; cross-source title
 // collision after 48h is dominated by templates, not re-syndication.
 
-import { and, gte, inArray, or, sql } from 'drizzle-orm';
+import { and, gte, inArray, or } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
 
 import { rawItems } from '../db/schema.js';
@@ -93,8 +93,9 @@ export async function writeRawItems(
   // url_hash matches any age (same canonical URL is always a dup).
   // title_hash matches only against rows in the recent window — anything
   // older is treated as coincidental template reuse rather than
-  // syndication. `sql\`... ANY(${arr}::text[])\`` binds as a record under
-  // postgres.js v3, so use drizzle's typed inArray instead.
+  // syndication. Use drizzle's typed inArray + gte — wrapping the Date
+  // in `sql\`${cutoff}\`` makes postgres.js choke on the bind format;
+  // gte takes the column's TS type directly (Date for timestamptz).
   const existing = await db
     .select({
       urlHash: rawItems.urlHash,
@@ -107,7 +108,7 @@ export async function writeRawItems(
         inArray(rawItems.urlHash, urlHashes),
         and(
           inArray(rawItems.titleHash, titleHashes),
-          gte(rawItems.publishedAt, sql`${titleWindowCutoff}`),
+          gte(rawItems.publishedAt, titleWindowCutoff),
         ),
       ),
     );

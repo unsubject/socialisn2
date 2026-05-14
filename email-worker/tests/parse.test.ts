@@ -131,4 +131,35 @@ describe('extractLinks', () => {
     const html = `<a href="https://example.com/Unsubscribe?x=y">u</a>`;
     expect(extractLinks({ html })).toEqual([]);
   });
+
+  it('handles CRLF line endings in plain text', () => {
+    const text = `Check out https://example.com/news\r\nand https://example.com/post for more.`;
+    expect(extractLinks({ html: null, text })).toEqual([
+      { url: 'https://example.com/news', pos: 0 },
+      { url: 'https://example.com/post', pos: 1 },
+    ]);
+  });
+
+  it('parses <a> tags split across lines', () => {
+    const html = `<a\n  class="x"\n  href="https://example.com/multiline"\n  target="_blank">click</a>`;
+    expect(extractLinks({ html })).toEqual([
+      { url: 'https://example.com/multiline', pos: 0 },
+    ]);
+  });
+
+  it('captures hrefs with HTML entities (does not decode)', () => {
+    // The URL retains &amp; — downstream consumers normalise on retrieval.
+    // We just verify the extractor does not crash and emits something stable.
+    const html = `<a href="https://example.com/?a=1&amp;b=2">x</a>`;
+    const links = extractLinks({ html });
+    expect(links).toHaveLength(1);
+    expect(links[0]!.url).toContain('example.com');
+  });
+});
+
+describe('stripBoilerplate — CRLF', () => {
+  it('cuts on CRLF-terminated unsubscribe line', () => {
+    const text = `Story body\r\nMore body\r\n\r\nUnsubscribe | Manage preferences\r\nFooter`;
+    expect(stripBoilerplate(text)).toBe('Story body\r\nMore body');
+  });
 });

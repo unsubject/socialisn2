@@ -20,6 +20,7 @@ import { domainOf, findSlugByHeaders } from './sender-map';
 import type { Env } from './index';
 
 const SNIPPET_MAX_CHARS = 8_000;
+const BODY_HTML_MAX_CHARS = 200_000;
 
 const CONTEXT_HEADERS = [
   'list-post',
@@ -66,8 +67,15 @@ async function ingestToD1(
   // outer try/catch in handleEmail, which logs but doesn't bounce the
   // message (personal-mirror forward still happens).
   const parsed = await PostalMime.parse(message.raw);
-  const bodyText = parsed.text ? stripBoilerplate(parsed.text).slice(0, SNIPPET_MAX_CHARS) : null;
-  const bodyHtml = parsed.html ?? null;
+  // Extract links from the FULL body before truncation — otherwise plain-text-only
+  // emails over SNIPPET_MAX_CHARS would silently lose links past the cutoff.
+  const fullText = parsed.text ?? null;
+  const fullHtml = parsed.html ?? null;
+  const links = extractLinks({ html: fullHtml, text: fullText });
+
+  const bodyText = fullText ? stripBoilerplate(fullText).slice(0, SNIPPET_MAX_CHARS) : null;
+  // Cap body_html too — a 30 MB marketing email otherwise blows D1 row size.
+  const bodyHtml = fullHtml ? fullHtml.slice(0, BODY_HTML_MAX_CHARS) : null;
 
   await env.INBOX_DB.prepare(
     'INSERT INTO inbox (slug, message_id, received_at, subject, body_text, body_html) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
@@ -75,11 +83,10 @@ async function ingestToD1(
     .bind(slug, meta.messageId, meta.receivedAt, meta.subject, bodyText, bodyHtml)
     .run();
 
-  const links = extractLinks({ html: bodyHtml, text: bodyText });
   if (links.length > 0) {
-    // D1 batch — one round-trip for N inserts. ON CONFLICT DO NOTHING in
-    // case the inbox INSERT skipped via the (slug, message_id) PK
-    // collision: we'd still try to insert links and would race the FK.
+    // D1 batch — one round-trip for N inserts. ON CONFLICT DO NOTHING guards
+    // the composite PK (slug, message_id, link_pos) in case of replays;
+    // FKs aren't enforced by D1 unless PRAGMA foreign_keys=ON.
     const stmts = links.map((link) =>
       env.INBOX_DB.prepare(
         'INSERT INTO inbox_links (slug, message_id, link_pos, link_url) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',

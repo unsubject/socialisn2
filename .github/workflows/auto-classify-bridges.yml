@@ -1,0 +1,45 @@
+name: auto-classify-bridges
+
+# Periodically classifies any unknown senders accumulated in D1's
+# `unmatched` table by asking an LLM with web-search to identify the
+# publisher. Inserts discovered_publishers + sender_map rows so the
+# next inbound from that sender routes correctly.
+#
+# Hands-off in the steady state: subscribing inbox@socialisn.com to a
+# new newsletter just works after one cron tick (~30 min worst case).
+#
+# Failures are non-blocking: invalid LLM JSON, model errors, malformed
+# slugs etc. leave the row in unmatched; next tick retries.
+
+on:
+  schedule:
+    # Every 30 minutes. Matches the §7.1 editorial-bridge fetch
+    # cadence, so a newly-classified sender starts routing on the
+    # next inbound rather than waiting a full hour.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: auto-classify-bridges
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run classifier
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: npx tsx scripts/auto-classify-bridges.ts

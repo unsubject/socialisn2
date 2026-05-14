@@ -24,13 +24,15 @@ import { assertDestructiveAllowed } from '../helpers/destructive-guard.js';
 const DATABASE_URL = process.env.DATABASE_URL;
 
 function makeItem(overrides: Partial<RawItemInput> = {}): RawItemInput {
+  // Default to "now" so the title-hash 48h dedup window matches by default.
+  // Tests that specifically need an older publishedAt pass it via overrides.
   return {
     externalId: 'ext-' + Math.random().toString(36).slice(2),
     url: 'https://example.com/post-' + Math.random().toString(36).slice(2),
     title: 'Some title ' + Math.random().toString(36).slice(2),
     content: null,
     author: null,
-    publishedAt: new Date('2026-05-12T12:00:00Z'),
+    publishedAt: new Date(),
     language: 'en',
     rawMeta: {},
     ...overrides,
@@ -158,6 +160,63 @@ describe.skipIf(!DATABASE_URL)('writeRawItems dedup', () => {
       makeItem({ externalId: 'b-3', url: 'https://b.example/y', title: 'Reuters - Big news' }),
     ]);
     expect(second.insertedCount).toBe(0);
+  });
+
+  it('does not leak a stale title_hash into the dedup set via the url_hash branch', async () => {
+    // Regression for review on PR #25: a stale row matched by url_hash
+    // also exposed its title_hash to the dedup set, even when the row
+    // was older than the title window. A different new item with the
+    // same recurring title and a different URL would then get rejected.
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    await writeRawItems(db, sourceA, [
+      makeItem({
+        externalId: 'stale-1',
+        url: 'https://shared.example/article',
+        title: 'Daily Briefing',
+        publishedAt: threeDaysAgo,
+      }),
+    ]);
+    // Batch with two new items: A collides on url (any age — should be
+    // dropped); B has the same template title but a fresh URL — title
+    // collision is older than the window — should land.
+    const result = await writeRawItems(db, sourceB, [
+      makeItem({
+        externalId: 'b-url-collide',
+        url: 'https://shared.example/article?utm_source=feed',
+        title: 'Different title',
+      }),
+      makeItem({
+        externalId: 'b-title-recurring',
+        url: 'https://b.example/today',
+        title: 'Daily Briefing',
+      }),
+    ]);
+    expect(result.insertedCount).toBe(1);
+    expect(result.duplicateCount).toBe(1);
+  });
+
+  it('does NOT dedup by title_hash when the existing row is older than the 48h window', async () => {
+    // Older row pinned to 3 days ago — outside the title-hash window.
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    await writeRawItems(db, sourceA, [
+      makeItem({
+        externalId: 'a-old',
+        url: 'https://a.example/edition-1',
+        title: 'Morning Briefing',
+        publishedAt: threeDaysAgo,
+      }),
+    ]);
+    // New row with the same recurring template title is intentionally NOT
+    // a dup — different edition, different content.
+    const second = await writeRawItems(db, sourceB, [
+      makeItem({
+        externalId: 'b-new',
+        url: 'https://b.example/edition-2',
+        title: 'Morning Briefing',
+      }),
+    ]);
+    expect(second.insertedCount).toBe(1);
+    expect(second.duplicateCount).toBe(0);
   });
 
   it('folds intra-batch hash collisions before insert', async () => {

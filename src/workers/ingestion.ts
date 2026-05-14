@@ -117,16 +117,30 @@ async function processCompetitorJob(db: Db, data: CompetitorJob): Promise<void> 
     return;
   }
 
-  const videos = await fetchAndParseYouTube(row.externalId);
-  const result = await writeCompetitorVideos(db, row.id, videos);
-  const newest = videos.reduce<Date | null>(
-    (acc, v) => (acc === null || v.publishedAt > acc ? v.publishedAt : acc),
-    null,
-  );
-  await markCompetitorFetched(db, row.id, newest);
-  console.log(
-    `[ingestion-worker] youtube ${row.name} fetched=${result.fetched} inserted=${result.insertedCount} dup=${result.duplicateCount}`,
-  );
+  try {
+    const videos = await fetchAndParseYouTube(row.externalId);
+    const result = await writeCompetitorVideos(db, row.id, videos);
+    const newest = videos.reduce<Date | null>(
+      (acc, v) => (acc === null || v.publishedAt > acc ? v.publishedAt : acc),
+      null,
+    );
+    await markCompetitorFetched(db, row.id, {
+      status: `ok:${result.insertedCount}/${result.fetched}`,
+      newestVideoAt: newest,
+    });
+    console.log(
+      `[ingestion-worker] youtube ${row.name} fetched=${result.fetched} inserted=${result.insertedCount} dup=${result.duplicateCount}`,
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Always stamp last_fetched_at, even on failure — otherwise a
+    // perpetually-failing channel keeps re-enqueuing on every tick.
+    await markCompetitorFetched(db, row.id, {
+      status: `err:${msg.slice(0, 240)}`,
+      newestVideoAt: null,
+    });
+    throw err;
+  }
 }
 
 async function processJob(db: Db, job: Job<IngestionJobData>): Promise<void> {

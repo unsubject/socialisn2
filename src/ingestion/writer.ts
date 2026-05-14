@@ -1,21 +1,31 @@
 // Dedup pass 1 + bulk INSERT into raw_items per SPEC §7.2 step 1.
 //
-// Two dedup layers, in order:
-//   1. In-batch: hash-collisions within the same fetch (same article emitted
-//      under two <item> entries) are folded.
-//   2. Cross-source: SELECT existing url_hash + title_hash from raw_items;
-//      any new item whose hash is already in the table is skipped.
-// Then INSERT remaining rows with ON CONFLICT DO NOTHING against the
-// (source_id, external_id) unique index — catches republishes of the same
-// feed-item id within the same source.
+// Layers:
+//   1. In-batch fold — hash collisions within the same fetch (same article
+//      emitted under two <item> entries) are collapsed.
+//   2. Cross-source url_hash — always matches, any age. Same canonical URL
+//      across sources is unambiguously a re-syndication.
+//   3. Cross-source title_hash — only matches against rows in the recent
+//      window (default 48h). Catches near-simultaneous re-syndication
+//      under the same headline; doesn't reject legitimate recurring titles
+//      ("Morning Briefing", podcast episode templates, "Live Updates")
+//      whose previous edition was days/weeks ago.
+//   4. INSERT with ON CONFLICT (source_id, external_id) DO NOTHING —
+//      catches republishes of the same feed-item id within the same source.
+//
+// The title-window default mirrors the spirit of SPEC §7.2 step 2's
+// 7-day semantic-dedup window but is much tighter; cross-source title
+// collision after 48h is dominated by templates, not re-syndication.
 
-import { inArray, or } from 'drizzle-orm';
+import { and, gte, inArray, or } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
 
 import { rawItems } from '../db/schema.js';
 import type { Db } from '../db/client.js';
 import { titleHash, urlHash } from './dedup.js';
 import type { RawItemInput } from './types.js';
+
+export const TITLE_DEDUP_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 export interface WriteResult {
   fetched: number;
@@ -78,24 +88,44 @@ export async function writeRawItems(
 
   const urlHashes = prepared.map((r) => r.urlHash);
   const titleHashes = prepared.map((r) => r.titleHash);
+  const titleWindowCutoff = new Date(Date.now() - TITLE_DEDUP_WINDOW_MS);
 
-  // `sql\`... ANY(${arr}::text[])\`` binds postgres.js a record, not an array,
-  // so the cast fails ("cannot cast type record to text[]"). Use the typed
-  // inArray operator instead — drizzle expands it to a parameterised IN list.
+  // url_hash matches any age (same canonical URL is always a dup).
+  // title_hash matches only against rows in the recent window — anything
+  // older is treated as coincidental template reuse rather than
+  // syndication. Use drizzle's typed inArray + gte — wrapping the Date
+  // in `sql\`${cutoff}\`` makes postgres.js choke on the bind format;
+  // gte takes the column's TS type directly (Date for timestamptz).
   const existing = await db
     .select({
       urlHash: rawItems.urlHash,
       titleHash: rawItems.titleHash,
+      publishedAt: rawItems.publishedAt,
     })
     .from(rawItems)
     .where(
-      or(inArray(rawItems.urlHash, urlHashes), inArray(rawItems.titleHash, titleHashes)),
+      or(
+        inArray(rawItems.urlHash, urlHashes),
+        and(
+          inArray(rawItems.titleHash, titleHashes),
+          gte(rawItems.publishedAt, titleWindowCutoff),
+        ),
+      ),
     );
   const existingUrlHashes = new Set<string>();
   const existingTitleHashes = new Set<string>();
   for (const row of existing) {
+    // url_hash collision is unconditional. Always add it to the dedup set.
     existingUrlHashes.add(row.urlHash);
-    existingTitleHashes.add(row.titleHash);
+    // title_hash collision only counts when the existing row is itself
+    // within the window. The URL-match branch of the WHERE clause
+    // intentionally returns rows of any age, so without this guard a
+    // stale row pulled in by a url-hash match would leak its title-hash
+    // into the title-dedup set and reject a legitimate recurring-title
+    // entry from a different URL.
+    if (row.publishedAt >= titleWindowCutoff) {
+      existingTitleHashes.add(row.titleHash);
+    }
   }
 
   const fresh = prepared.filter(

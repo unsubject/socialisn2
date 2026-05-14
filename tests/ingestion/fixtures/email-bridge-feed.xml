@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>anthropic</title>
+  <id>https://inbox.socialisn.com/feeds/anthropic.xml</id>
+  <updated>2026-05-13T12:00:00.000Z</updated>
+  <entry>
+    <id>urn:socialisn2-inbox:anthropic:&lt;abc-123@news.anthropic.com&gt;</id>
+    <title>News from Anthropic: weekly update</title>
+    <link rel="alternate" href="https://inbox.socialisn.com/items/anthropic/%3Cabc-123%40news.anthropic.com%3E"/>
+    <updated>2026-05-13T11:30:00.000Z</updated>
+    <content type="text">This week we launched a new model, plus updates from the safety team.</content>
+  </entry>
+  <entry>
+    <id>urn:socialisn2-inbox:anthropic:&lt;def-456@news.anthropic.com&gt;</id>
+    <title>News from Anthropic: research highlights</title>
+    <link rel="alternate" href="https://inbox.socialisn.com/items/anthropic/%3Cdef-456%40news.anthropic.com%3E"/>
+    <updated>2026-05-12T11:30:00.000Z</updated>
+    <content type="text">Three new papers on alignment evaluations.</content>
+  </entry>
+</feed>

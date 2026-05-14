@@ -112,29 +112,72 @@ describe.skipIf(!DATABASE_URL)('writeCompetitorVideos', () => {
     expect(result).toEqual({ fetched: 0, insertedCount: 0, duplicateCount: 0 });
   });
 
-  it('markCompetitorFetched updates last_video_at', async () => {
-    const now = new Date('2026-05-12T18:00:00Z');
-    await markCompetitorFetched(db, competitorA, now);
-    // postgres.js v3 returns timestamptz as strings (drizzle adds a type
-    // parser, but raw tagged-template queries use the default). Wrap with
-    // `new Date()` so the assertion is independent of the parser config.
-    const rows = await client<{ last_video_at: string | Date }[]>`
-      SELECT last_video_at FROM competitors WHERE id = ${competitorA}
+  it('markCompetitorFetched always advances last_fetched_at + last_status', async () => {
+    const before = Date.now();
+    await markCompetitorFetched(db, competitorA, {
+      status: 'ok:1/1',
+      newestVideoAt: new Date('2026-05-12T18:00:00Z'),
+    });
+    const rows = await client<{
+      last_fetched_at: string | Date | null;
+      last_status: string | null;
+      last_video_at: string | Date | null;
+    }[]>`
+      SELECT last_fetched_at, last_status, last_video_at FROM competitors WHERE id = ${competitorA}
     `;
-    const got = rows[0]?.last_video_at;
-    expect(got).toBeTruthy();
-    expect(new Date(got!).toISOString()).toBe(now.toISOString());
+    const row = rows[0]!;
+    expect(row.last_status).toBe('ok:1/1');
+    expect(new Date(row.last_fetched_at!).getTime()).toBeGreaterThanOrEqual(before);
+    expect(new Date(row.last_video_at!).toISOString()).toBe('2026-05-12T18:00:00.000Z');
   });
 
-  it('markCompetitorFetched with null leaves last_video_at unchanged', async () => {
-    const before = new Date('2026-05-10T00:00:00Z');
-    await markCompetitorFetched(db, competitorA, before);
-    await markCompetitorFetched(db, competitorA, null);
-    const rows = await client<{ last_video_at: string | Date }[]>`
-      SELECT last_video_at FROM competitors WHERE id = ${competitorA}
+  it('markCompetitorFetched with newestVideoAt=null leaves last_video_at unchanged', async () => {
+    // First call lands a video timestamp.
+    await markCompetitorFetched(db, competitorA, {
+      status: 'ok:1/1',
+      newestVideoAt: new Date('2026-05-10T00:00:00Z'),
+    });
+    // Second call (fetch saw no new videos) advances last_fetched_at but
+    // must NOT clobber last_video_at.
+    await markCompetitorFetched(db, competitorA, {
+      status: 'ok:0/0',
+      newestVideoAt: null,
+    });
+    const rows = await client<{
+      last_status: string | null;
+      last_video_at: string | Date | null;
+    }[]>`
+      SELECT last_status, last_video_at FROM competitors WHERE id = ${competitorA}
     `;
-    const got = rows[0]?.last_video_at;
-    expect(got).toBeTruthy();
-    expect(new Date(got!).toISOString()).toBe(before.toISOString());
+    expect(rows[0]?.last_status).toBe('ok:0/0');
+    expect(new Date(rows[0]!.last_video_at!).toISOString()).toBe('2026-05-10T00:00:00.000Z');
+  });
+
+  it('markCompetitorFetched stamps last_fetched_at on failure too (no scheduler hot-loop)', async () => {
+    // Initial successful fetch.
+    await markCompetitorFetched(db, competitorA, {
+      status: 'ok:1/1',
+      newestVideoAt: new Date('2026-05-10T00:00:00Z'),
+    });
+    const firstStamp = await client<{ last_fetched_at: string | Date }[]>`
+      SELECT last_fetched_at FROM competitors WHERE id = ${competitorA}
+    `;
+    const t1 = new Date(firstStamp[0]!.last_fetched_at).getTime();
+
+    // Tiny sleep so the second stamp is strictly newer.
+    await new Promise((r) => setTimeout(r, 10));
+
+    await markCompetitorFetched(db, competitorA, {
+      status: 'err:transient HTTP 503',
+      newestVideoAt: null,
+    });
+    const rows = await client<{
+      last_fetched_at: string | Date;
+      last_status: string;
+    }[]>`
+      SELECT last_fetched_at, last_status FROM competitors WHERE id = ${competitorA}
+    `;
+    expect(rows[0]?.last_status).toBe('err:transient HTTP 503');
+    expect(new Date(rows[0]!.last_fetched_at).getTime()).toBeGreaterThan(t1);
   });
 });

@@ -16,6 +16,24 @@ function optional(name: string, fallback: string): string {
   return process.env[name] ?? fallback;
 }
 
+/**
+ * Parse an env var as a positive integer, falling back to `fallback` when
+ * unset. Throws on NaN, zero, negative, or non-integer — values that would
+ * lead to silent runtime weirdness (zero-concurrency BullMQ worker, zero-ms
+ * fetch timeout) if `Number()` had been used directly.
+ */
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid env var ${name}=${JSON.stringify(raw)} — must be a positive integer`,
+    );
+  }
+  return parsed;
+}
+
 export const env = {
   databaseUrl: () => required('DATABASE_URL'),
   redisUrl: () => required('REDIS_URL'),
@@ -27,7 +45,7 @@ export const env = {
   schedulerTickCron: () => optional('INGESTION_SCHEDULER_TICK_CRON', '* * * * *'),
   // Cap on concurrent fetches the BullMQ worker processes. RSS fetches are
   // I/O bound; 8 is a safe default for a small VPS.
-  ingestionConcurrency: () => Number(optional('INGESTION_CONCURRENCY', '8')),
+  ingestionConcurrency: () => positiveIntEnv('INGESTION_CONCURRENCY', 8),
   // User-Agent string for outbound HTTP fetches. Some publishers gate non-
   // browser UAs (Caixin returned 406 to the verifier in PR #1). Override
   // per-deployment if needed.
@@ -36,7 +54,7 @@ export const env = {
       'HTTP_USER_AGENT',
       'socialisn2/0.1 (+https://github.com/unsubject/socialisn2)',
     ),
-  httpTimeoutMs: () => Number(optional('HTTP_TIMEOUT_MS', '30000')),
+  httpTimeoutMs: () => positiveIntEnv('HTTP_TIMEOUT_MS', 30_000),
   // GDELT requires an identifying User-Agent per their terms (no API key —
   // the UA + low traffic profile is the rate-limit budget). See ADR-005.
   gdeltUserAgent: () =>

@@ -1,0 +1,95 @@
+name: inspect-d1
+
+# Manually triggered D1 read-only inspection. Reports row counts + the
+# most recent rows in each of the four bridge tables, plus optionally
+# runs a custom SELECT supplied at dispatch time.
+#
+# Intended for operator triage:
+#   - confirm an inbound email landed in inbox / unmatched
+#   - see which sender_map mappings exist
+#   - eyeball link extraction (Phase 1 PR 4 onwards)
+#
+# Refuses to run anything other than a SELECT in the custom-query slot —
+# bootstrap-d1 + deploy-workers handle writes; this workflow is read-only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      custom_query:
+        description: 'Optional SELECT … query to run against socialisn2-inbox (read-only). Leave blank for default summary.'
+        required: false
+        default: ''
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: email-worker
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: email-worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Default summary — row counts + most-recent rows per table
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          run_query() {
+            local label="$1"
+            local query="$2"
+            {
+              echo ""
+              echo "### $label"
+              echo ""
+              echo '```'
+              npx wrangler d1 execute socialisn2-inbox --remote --command "$query" 2>&1 | tail -n +5
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          {
+            echo "## D1 inspection — socialisn2-inbox"
+          } >> "$GITHUB_STEP_SUMMARY"
+          run_query "Row counts" "SELECT 'inbox' AS tbl, COUNT(*) AS n FROM inbox UNION ALL SELECT 'inbox_links', COUNT(*) FROM inbox_links UNION ALL SELECT 'sender_map', COUNT(*) FROM sender_map UNION ALL SELECT 'unmatched', COUNT(*) FROM unmatched;"
+          run_query "10 most recent unmatched" "SELECT id, datetime(received_at/1000, 'unixepoch') AS received, list_id, from_addr, substr(subject, 1, 60) AS subject FROM unmatched ORDER BY received_at DESC LIMIT 10;"
+          run_query "10 most recent inbox" "SELECT slug, datetime(received_at/1000, 'unixepoch') AS received, substr(subject, 1, 60) AS subject FROM inbox ORDER BY received_at DESC LIMIT 10;"
+          run_query "All sender_map" "SELECT match_field, match_value, slug, datetime(created_at/1000, 'unixepoch') AS created FROM sender_map ORDER BY created_at DESC LIMIT 50;"
+
+      - name: Custom query (read-only)
+        if: ${{ inputs.custom_query != '' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          QUERY: ${{ inputs.custom_query }}
+        run: |
+          set -euo pipefail
+          # Reject anything that isn't a SELECT statement. Bootstrap-d1 and
+          # deploy-workers handle writes; this workflow stays read-only so
+          # the dispatch input can't be used to mutate state.
+          trimmed=$(echo "$QUERY" | sed -E 's/^[[:space:]]+//')
+          first_word=$(echo "$trimmed" | awk '{print toupper($1)}')
+          if [ "$first_word" != "SELECT" ]; then
+            echo "::error::Custom query must start with SELECT (got first word: ${first_word:-empty}). This workflow is read-only."
+            exit 1
+          fi
+          {
+            echo ""
+            echo "### Custom query"
+            echo ""
+            echo '```sql'
+            echo "$QUERY"
+            echo '```'
+            echo ""
+            echo '```'
+            npx wrangler d1 execute socialisn2-inbox --remote --command "$QUERY" 2>&1 | tail -n +5
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

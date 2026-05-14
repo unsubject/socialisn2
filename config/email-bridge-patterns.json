@@ -1,0 +1,50 @@
+{
+  "$comment": "Maps publisher slugs (must match sources.kind='email_bridge' rows) to the sender-header values we expect to see when their emails arrive. Used by scripts/auto-register-bridges.ts (run on cron via .github/workflows/auto-register-bridges.yml). New publisher? Add a block here; the next auto-register tick promotes its unmatched rows into sender_map. Wrong values cause no harm — unmatched rows stay in unmatched until corrected.",
+  "patterns": [
+    {
+      "slug": "nature-news",
+      "match_field": "from_domain",
+      "values": [
+        "nature.com",
+        "e-alerts.nature.com",
+        "list.nature.com",
+        "newsletter.nature.com"
+      ]
+    },
+    {
+      "slug": "scmp",
+      "match_field": "from_domain",
+      "values": [
+        "scmp.com",
+        "email.scmp.com",
+        "news.scmp.com",
+        "newsletters.scmp.com"
+      ]
+    },
+    {
+      "slug": "meta-ai",
+      "match_field": "from_domain",
+      "values": [
+        "meta.com",
+        "ai.meta.com",
+        "metamail.com",
+        "facebookmail.com"
+      ]
+    },
+    {
+      "slug": "hf-papers",
+      "match_field": "from_domain",
+      "values": [
+        "huggingface.co",
+        "hf.co"
+      ]
+    },
+    {
+      "slug": "heatmap",
+      "match_field": "from_domain",
+      "values": [
+        "heatmap.news"
+      ]
+    }
+  ]
+}

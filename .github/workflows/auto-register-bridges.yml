@@ -1,0 +1,42 @@
+name: auto-register-bridges
+
+# Periodically scans D1's unmatched table and auto-registers sender_map
+# rows for any inbound that matches a pattern in
+# config/email-bridge-patterns.json. Hands-off operation for the seeded
+# bridges; ops only needs to touch this when adding a NEW publisher
+# (add a pattern block, merge, wait one tick).
+#
+# Idempotent: ON CONFLICT DO NOTHING in scripts/auto-register-bridges.ts
+# means re-runs are no-ops. Safe to run on a tight cadence.
+
+on:
+  schedule:
+    # Every 30 minutes. Matches the editorial-bridge fetch cadence
+    # (migration 005), so a newly-registered mapping starts routing the
+    # next inbound rather than waiting a full hour.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: auto-register-bridges
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run auto-register
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx tsx scripts/auto-register-bridges.ts

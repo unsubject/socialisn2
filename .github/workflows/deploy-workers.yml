@@ -4,8 +4,13 @@ name: deploy-workers
 # to main, gated by path filter. Also exposes workflow_dispatch for manual
 # redeploy without a code change.
 #
-# Both jobs run in parallel; each fails fast if its wrangler.toml still
-# has the bootstrap placeholder, so a stray `git revert` of the id-patch PR
+# apply-migrations runs FIRST as a shared prerequisite so a code change
+# that depends on a new column (e.g. unmatched.raw_headers added by
+# 0003_unmatched_raw_headers.sql) can't get deployed before the schema
+# is current. Both deploys run in parallel after migrations succeed.
+#
+# Each deploy job also fails fast if its wrangler.toml still has the
+# bootstrap placeholder, so a stray `git revert` of the id-patch PR
 # can't accidentally redeploy a Worker pointed at no database.
 
 on:
@@ -15,6 +20,7 @@ on:
       - 'email-worker/**'
       - 'feed-worker/**'
       - '.github/workflows/deploy-workers.yml'
+      - 'scripts/apply-d1-migrations.sh'
   workflow_dispatch:
 
 concurrency:
@@ -25,8 +31,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  apply-migrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: email-worker/package-lock.json
+
+      - name: Install email-worker dependencies (for wrangler)
+        working-directory: email-worker
+        run: npm ci
+
+      - name: Refuse to migrate against a placeholder D1 binding
+        run: |
+          if grep -q 'REPLACE_WITH_D1_ID_FROM_WRANGLER_D1_CREATE' email-worker/wrangler.toml; then
+            echo "::error::email-worker/wrangler.toml still has the placeholder database_id. Run the bootstrap-d1 workflow first."
+            exit 1
+          fi
+
+      - name: Apply pending D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bash scripts/apply-d1-migrations.sh
+
   deploy-email-worker:
     runs-on: ubuntu-latest
+    needs: apply-migrations
     defaults:
       run:
         working-directory: email-worker
@@ -58,6 +93,7 @@ jobs:
 
   deploy-feed-worker:
     runs-on: ubuntu-latest
+    needs: apply-migrations
     defaults:
       run:
         working-directory: feed-worker

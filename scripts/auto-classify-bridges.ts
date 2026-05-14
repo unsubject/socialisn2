@@ -488,9 +488,17 @@ interface SenderMapKey {
 }
 
 export function senderKey(sender: UnmatchedSender): SenderMapKey | null {
-  if (sender.list_id) return { match_field: 'list_id', match_value: sender.list_id };
-  if (sender.from_addr) return { match_field: 'from_addr', match_value: sender.from_addr };
-  if (sender.from_domain) return { match_field: 'from_domain', match_value: sender.from_domain };
+  // Always lowercase the match_value so the sender_map index is built
+  // case-folded, matching the lookup path in email-worker/src/sender-map.ts.
+  // Mailing-list software inconsistently capitalises List-Id and From
+  // addresses; if we stored "News@Anthropic.com" but the next email
+  // arrives as "news@anthropic.com" the lookup would silently miss.
+  if (sender.list_id)
+    return { match_field: 'list_id', match_value: sender.list_id.toLowerCase() };
+  if (sender.from_addr)
+    return { match_field: 'from_addr', match_value: sender.from_addr.toLowerCase() };
+  if (sender.from_domain)
+    return { match_field: 'from_domain', match_value: sender.from_domain.toLowerCase() };
   return null;
 }
 

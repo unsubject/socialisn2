@@ -1,0 +1,141 @@
+name: register-sender-map
+
+# Manually triggered. Inserts a sender_map row so a publisher's emails
+# stop landing in `unmatched` and start landing in `inbox` under the
+# given slug.
+#
+# Operating loop:
+#   1. Subscribe inbox@socialisn.com to a publisher's newsletter.
+#   2. First email arrives → no sender_map match → goes to unmatched.
+#   3. Run inspect-d1 to read the unmatched row and capture the
+#      list_id / from_addr.
+#   4. Run THIS workflow with the publisher's slug + match field
+#      + match value to register the mapping.
+#   5. Subsequent emails route to inbox under that slug.
+#
+# Implementation note: SQL is sent through the CF D1 REST API with
+# bound `?` parameters (params: [...]) rather than via wrangler's
+# --command form. wrangler 3's --command does naive string concat
+# from the shell, which would let a crafted match_value escape the
+# quotes. The REST API binds parameters server-side; no shell
+# interpolation reaches the SQL parser.
+
+on:
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: 'Source slug (lowercase, hyphenated — e.g. anthropic, brad-setser).'
+        required: true
+      match_field:
+        description: 'Which header to match against.'
+        required: true
+        type: choice
+        options:
+          - list_id
+          - from_addr
+          - from_domain
+      match_value:
+        description: 'The literal header value (e.g. <news.anthropic.com>, news@anthropic.com, anthropic.com).'
+        required: true
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate slug shape
+        env:
+          SLUG: ${{ inputs.slug }}
+        run: |
+          set -euo pipefail
+          # slug ends up in URLs the feed-worker serves, so enforce the same
+          # charset feed-handler.ts's SLUG_PATTERN accepts.
+          if ! echo "$SLUG" | grep -qE '^[a-z0-9-]+$'; then
+            echo "::error::slug must match [a-z0-9-]+ (lowercase, hyphenated). Got: $SLUG"
+            exit 1
+          fi
+
+      - name: Read D1 database_id from email-worker/wrangler.toml
+        id: dbid
+        run: |
+          set -euo pipefail
+          id=$(grep -E '^database_id' email-worker/wrangler.toml | sed -E 's/^database_id[[:space:]]*=[[:space:]]*"([^"]+)"/\1/')
+          if [ -z "$id" ] || [ "$id" = "REPLACE_WITH_D1_ID_FROM_WRANGLER_D1_CREATE" ]; then
+            echo "::error::email-worker/wrangler.toml does not have a real database_id. Run bootstrap-d1 first."
+            exit 1
+          fi
+          echo "database_id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Insert via CF D1 REST API (parameterised)
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DB_ID: ${{ steps.dbid.outputs.database_id }}
+          SLUG: ${{ inputs.slug }}
+          MATCH_FIELD: ${{ inputs.match_field }}
+          MATCH_VALUE: ${{ inputs.match_value }}
+        run: |
+          set -euo pipefail
+          NOW_MS=$(($(date +%s) * 1000))
+          # jq -n with --arg builds the JSON payload with proper escaping for
+          # any character in the inputs. The SQL string is a constant; the
+          # values flow only through the `params` array, bound server-side.
+          PAYLOAD=$(jq -n \
+            --arg sql "INSERT INTO sender_map (match_field, match_value, slug, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING" \
+            --arg field "$MATCH_FIELD" \
+            --arg value "$MATCH_VALUE" \
+            --arg slug "$SLUG" \
+            --argjson ts "$NOW_MS" \
+            '{sql: $sql, params: [$field, $value, $slug, $ts]}')
+
+          response=$(curl -fsS \
+            -X POST \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD" \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query")
+
+          echo "$response" | jq .
+          # CF wraps the per-statement result inside .result[0]; success means
+          # the array exists and the first entry's `success` is true.
+          ok=$(echo "$response" | jq -r '.success')
+          if [ "$ok" != "true" ]; then
+            echo "::error::D1 insert failed; see response above."
+            exit 1
+          fi
+
+      - name: Verify the row exists
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DB_ID: ${{ steps.dbid.outputs.database_id }}
+          SLUG: ${{ inputs.slug }}
+          MATCH_FIELD: ${{ inputs.match_field }}
+          MATCH_VALUE: ${{ inputs.match_value }}
+        run: |
+          set -euo pipefail
+          PAYLOAD=$(jq -n \
+            --arg sql "SELECT match_field, match_value, slug, datetime(created_at/1000, 'unixepoch') AS created FROM sender_map WHERE match_field = ? AND match_value = ?" \
+            --arg field "$MATCH_FIELD" \
+            --arg value "$MATCH_VALUE" \
+            '{sql: $sql, params: [$field, $value]}')
+
+          response=$(curl -fsS \
+            -X POST \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD" \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query")
+
+          {
+            echo "## register-sender-map complete"
+            echo ""
+            echo "Mapping registered. The next inbound email matching \`${{ inputs.match_field }} = ${{ inputs.match_value }}\` lands in \`inbox\` under slug \`${{ inputs.slug }}\`."
+            echo ""
+            echo "### Verification"
+            echo ""
+            echo '```json'
+            echo "$response" | jq '.result[0].results'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

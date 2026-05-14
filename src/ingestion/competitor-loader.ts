@@ -3,6 +3,12 @@
 // competitors table (no fetch_interval_min column there), so we apply a
 // fixed interval at the scheduler layer. If a future competitor platform
 // needs a different cadence the constant graduates to a per-row column.
+//
+// Scheduling decision uses last_fetched_at (set by markCompetitorFetched
+// after each fetch attempt, success or failure), NOT last_video_at. The
+// former advances every fetch; the latter only when a strictly newer
+// video is seen. Scheduling on last_video_at would mean an inactive
+// channel is permanently "due" and the scheduler enqueues every tick.
 
 import { and, eq, isNull, lte, or, sql } from 'drizzle-orm';
 
@@ -28,7 +34,7 @@ export async function loadDueCompetitors(db: Db): Promise<DueCompetitor[]> {
       platform: competitors.platform,
       externalId: competitors.externalId,
       name: competitors.name,
-      lastVideoAt: competitors.lastVideoAt,
+      lastFetchedAt: competitors.lastFetchedAt,
     })
     .from(competitors)
     .where(
@@ -37,9 +43,9 @@ export async function loadDueCompetitors(db: Db): Promise<DueCompetitor[]> {
         // YouTube only in v1 per ADR-003 / SPEC §6.7.
         eq(competitors.platform, 'youtube'),
         or(
-          isNull(competitors.lastVideoAt),
+          isNull(competitors.lastFetchedAt),
           lte(
-            sql`${competitors.lastVideoAt} + (${YOUTUBE_COMPETITOR_INTERVAL_MIN} || ' minutes')::interval`,
+            sql`${competitors.lastFetchedAt} + (${YOUTUBE_COMPETITOR_INTERVAL_MIN} || ' minutes')::interval`,
             sql`NOW()`,
           ),
         ),

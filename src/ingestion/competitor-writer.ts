@@ -55,18 +55,26 @@ export async function writeCompetitorVideos(
   };
 }
 
+/**
+ * Stamps last_fetched_at (always — drives scheduling) and last_status
+ * (free-text breadcrumb), and conditionally advances last_video_at to
+ * the newest publishedAt seen this fetch.
+ *
+ * Always call this after a fetch attempt, including failures: scheduling
+ * runs off last_fetched_at, so a perpetually-failing channel that never
+ * stamps would re-enqueue every scheduler tick.
+ */
 export async function markCompetitorFetched(
   db: Db,
   competitorId: string,
-  lastVideoAt: Date | null,
+  args: { status: string; newestVideoAt: Date | null },
 ): Promise<void> {
-  // The competitors table tracks last_video_at (newest published_at seen) for
-  // scheduling heuristics; there is no last_fetched_at / last_status column on
-  // competitors. Update only when we actually saw a video newer than what's
-  // currently stored.
-  if (!lastVideoAt) return;
-  await db
-    .update(competitors)
-    .set({ lastVideoAt })
-    .where(eq(competitors.id, competitorId));
+  const update: Record<string, unknown> = {
+    lastFetchedAt: new Date(),
+    lastStatus: args.status,
+  };
+  if (args.newestVideoAt) {
+    update.lastVideoAt = args.newestVideoAt;
+  }
+  await db.update(competitors).set(update).where(eq(competitors.id, competitorId));
 }

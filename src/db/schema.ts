@@ -192,6 +192,12 @@ export const competitors = pgTable(
     language: text('language').notNull().default('zh-HK'),
     enabled: boolean('enabled').notNull().default(true),
     lastVideoAt: timestamp('last_video_at', { withTimezone: true }),
+    // Scheduler-side bookkeeping (mirrors the sources table convention).
+    // last_video_at is the newest video's publishedAt; it does NOT advance
+    // when the worker fetches and finds nothing new. Scheduling decisions
+    // run off last_fetched_at instead.
+    lastFetchedAt: timestamp('last_fetched_at', { withTimezone: true }),
+    lastStatus: text('last_status'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({

@@ -34,6 +34,32 @@ interface UnmatchedSender {
   from_addr: string | null;
   from_domain: string | null;
   subject_sample: string | null;
+  raw_headers: string | null;
+}
+
+// Email-service-provider domains. When from_domain is one of these, the
+// sender is delivering on behalf of the actual publisher — identity lives
+// in list_id / List-Post / Reply-To / Sender / subject instead. The LLM
+// gets explicit guidance to handle these via web_search.
+const TRANSPORT_PROVIDER_DOMAINS = [
+  'mcsv.net', 'mcdlv.net', 'list-manage.com', 'campaign-archive.com', 'mailchimp.com',
+  'amazonses.com',
+  'sendgrid.net', 'sendgrid.com',
+  'mailgun.net', 'mailgun.org',
+  'sendinblue.com', 'brevo.com',
+  'postmarkapp.com', 'mtasv.net',
+  'sparkpostmail.com',
+  'mandrillapp.com',
+  'convertkit.com', 'kit.com',
+  'beehiiv.com', 'mail.beehiiv.com',
+] as const;
+
+export function isTransportProviderDomain(domain: string | null): boolean {
+  if (!domain) return false;
+  const d = domain.toLowerCase();
+  return TRANSPORT_PROVIDER_DOMAINS.some(
+    (tp) => d === tp || d.endsWith(`.${tp}`),
+  );
 }
 
 interface Classification {
@@ -168,6 +194,17 @@ If the publisher you identify is one of these, you MUST return the exact seeded 
 
 Only invent a new slug when the publisher is genuinely novel (not on the list above).
 
+CRITICAL — transport providers. Many newsletters are sent via Mailchimp, Amazon SES, SendGrid, Beehiiv, ConvertKit, Mailgun, Sendinblue/Brevo, Postmark, Substack, etc. When from_domain is one of those (mcsv.net / list-manage.com / amazonses.com / sendgrid.net / beehiiv.com / ...), the From: header is the DELIVERY infrastructure, NOT the publisher. The actual publisher identity lives in:
+
+  - list_id (often encodes the publisher: <publisher.us10.list-manage.com>)
+  - List-Post / List-Owner / List-Help URLs (publisher's website)
+  - Reply-To (often the publisher's own contact)
+  - Sender header (sometimes distinct from From)
+  - The subject line (often "Publisher Name: ...")
+  - Feedback-ID (sometimes encodes the campaign / publisher)
+
+If you see a transport-provider domain, DO NOT classify it as "mailchimp" or "amazon-ses". Instead, examine list_id and the other context headers, then use web_search to identify the real publisher behind the campaign.
+
 Taxonomy:
 - primary_domain: one of "scitech" | "economy" | "geopolitics" | "national" | "economics" (academic / international macroeconomics).
 - domains: array of 1-3 of the above values; primary_domain MUST be first.
@@ -206,13 +243,28 @@ async function classifyWithLlm(
   sender: UnmatchedSender,
   seeds: SeededBridge[],
 ): Promise<Classification | null> {
+  const transportNote = isTransportProviderDomain(sender.from_domain)
+    ? '\n\nNote: from_domain looks like an email-service-provider — see the CRITICAL transport-providers section in the system prompt. Identify the actual publisher from the context headers below.\n'
+    : '';
+  const headerLines: string[] = [];
+  if (sender.raw_headers) {
+    try {
+      const obj = JSON.parse(sender.raw_headers) as Record<string, string>;
+      for (const [k, v] of Object.entries(obj)) {
+        headerLines.push(`- ${k}: ${v}`);
+      }
+    } catch {
+      // ignore malformed raw_headers (shouldn't happen — the worker
+      // always writes valid JSON.stringify output)
+    }
+  }
   const userMsg = `Classify this inbound newsletter sender:
 
 - from_addr: ${sender.from_addr ?? '(none)'}
 - list_id: ${sender.list_id ?? '(none)'}
 - from_domain: ${sender.from_domain ?? '(none)'}
 - subject sample: ${sender.subject_sample ?? '(none)'}
-
+${headerLines.length > 0 ? '\nAdditional context headers (often the strongest identity signal when from_domain is a transport provider):\n' + headerLines.join('\n') + '\n' : ''}${transportNote}
 Use web_search if needed. Output JSON only.`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -310,7 +362,9 @@ async function main(): Promise<void> {
   const seeds = loadSeededBridges();
   console.log(`[classify] loaded ${seeds.length} seeded bridges`);
 
-  // Distinct senders in unmatched, plus a representative subject sample.
+  // Distinct senders in unmatched. Subject + raw_headers picked from the
+  // earliest matching row (MIN(received_at)) so we get a representative
+  // sample — multiple rows from the same publisher share an identity.
   const senders = await d1Query<UnmatchedSender>(
     cfg,
     `SELECT list_id,
@@ -318,7 +372,8 @@ async function main(): Promise<void> {
             CASE WHEN from_addr IS NULL OR instr(from_addr, '@') = 0 THEN NULL
                  ELSE lower(substr(from_addr, instr(from_addr, '@')+1))
             END AS from_domain,
-            MIN(subject) AS subject_sample
+            MIN(subject) AS subject_sample,
+            MIN(raw_headers) AS raw_headers
        FROM unmatched
       GROUP BY list_id, from_addr`,
   );
@@ -357,8 +412,13 @@ async function main(): Promise<void> {
 
     // Tier 1: deterministic seed match. Saves an LLM call AND guarantees
     // we route under the canonical slug rather than letting the LLM
-    // invent a divergent one.
-    const seedMatch = matchSeededBridge(sender.from_domain, seeds);
+    // invent a divergent one. Skip for transport-provider domains —
+    // they'd never match a seed's domains_hint anyway, and we want the
+    // LLM to look at list_id / extra headers, not from_domain alone.
+    const seedMatch =
+      sender.from_domain && !isTransportProviderDomain(sender.from_domain)
+        ? matchSeededBridge(sender.from_domain, seeds)
+        : null;
     let cls: Classification | null = null;
     if (seedMatch) {
       cls = classificationFromSeed(seedMatch);

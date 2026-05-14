@@ -5,26 +5,53 @@
 //
 // What this stub already does end-to-end (so the deploy + smoke test exercise
 // the real flow on the real bindings):
-//   - reads List-Id / From: headers
+//   - reads List-Id / From: headers + transport-context headers
 //   - looks up the source slug via sender_map (List-Id → from_addr → from_domain)
 //   - on match: INSERTs a minimal row into `inbox` (subject only; body fields TBD)
-//   - on no match: INSERTs into `unmatched` for operator triage
+//   - on no match: INSERTs into `unmatched` for operator triage,
+//     capturing transport-context headers in raw_headers JSON so the
+//     classifier can identify publishers behind Mailchimp / SES / etc.
 
 import { domainOf, findSlugByHeaders } from './sender-map';
 import type { Env } from './index';
 
+// Headers we capture into unmatched.raw_headers. When the From: domain is a
+// transport provider (mcsv.net for Mailchimp, amazonses.com for AWS SES, …),
+// the actual publisher identity hides in these. Keep the list focused —
+// every entry is JSON-stringified into a single column, so adding rarely-
+// useful headers just bloats the row.
+const CONTEXT_HEADERS = [
+  'list-post',
+  'list-unsubscribe',
+  'reply-to',
+  'sender',
+  'list-owner',
+  'list-help',
+  'feedback-id',
+  'x-mailer',
+] as const;
+
+function collectRawHeaders(message: ForwardableEmailMessage): string {
+  const out: Record<string, string> = {};
+  for (const name of CONTEXT_HEADERS) {
+    const v = message.headers.get(name);
+    if (v) out[name] = v;
+  }
+  return JSON.stringify(out);
+}
+
 async function ingestToD1(
   env: Env,
   headers: { listId: string | null; fromAddr: string | null; fromDomain: string | null },
-  meta: { messageId: string; receivedAt: number; subject: string | null },
+  meta: { messageId: string; receivedAt: number; subject: string | null; rawHeaders: string },
 ): Promise<void> {
   const slug = await findSlugByHeaders(env.INBOX_DB, headers);
 
   if (!slug) {
     await env.INBOX_DB.prepare(
-      'INSERT INTO unmatched (received_at, list_id, from_addr, subject) VALUES (?, ?, ?, ?)',
+      'INSERT INTO unmatched (received_at, list_id, from_addr, subject, raw_headers) VALUES (?, ?, ?, ?, ?)',
     )
-      .bind(meta.receivedAt, headers.listId, headers.fromAddr, meta.subject)
+      .bind(meta.receivedAt, headers.listId, headers.fromAddr, meta.subject, meta.rawHeaders)
       .run();
     console.log(
       `[email-worker] no sender_map match list_id=${headers.listId ?? '∅'} from=${headers.fromAddr ?? '∅'}; wrote to unmatched`,
@@ -52,6 +79,7 @@ export async function handleEmail(
   const subject = message.headers.get('subject');
   const messageId = message.headers.get('message-id') ?? crypto.randomUUID();
   const receivedAt = Date.now();
+  const rawHeaders = collectRawHeaders(message);
 
   // D1 ingestion is best-effort. A transient D1 outage, schema drift, or
   // any other write failure logs + continues so the personal-mirror forward
@@ -61,7 +89,7 @@ export async function handleEmail(
     await ingestToD1(
       env,
       { listId, fromAddr, fromDomain },
-      { messageId, receivedAt, subject },
+      { messageId, receivedAt, subject, rawHeaders },
     );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -1,23 +1,29 @@
 // Async classifier for inbound-newsletter publishers. Periodically scans
-// D1's `unmatched` table, asks an LLM with web-search to identify each
-// unique sender, and writes both:
+// D1's `unmatched` table and writes both:
 //   - sender_map: maps the raw header value to the slug (email-worker
 //     hot path uses this on the next inbound)
 //   - discovered_publishers: descriptive metadata (name, primary_domain,
 //     authority, language, reasoning) — useful for ops and for the
 //     future D1 → Postgres `sources` sync
 //
+// Two-tier resolution:
+//   1. Seeded match. The 30 email_bridge rows in
+//      migrations/004_seed_email_bridges.sql (post-006 / 008) have
+//      canonical slugs that the ingestion-worker polls. If the sender's
+//      from_domain matches a seeded publisher's domains_hint, route to
+//      the SEEDED slug — no LLM call. Anything else would create a
+//      sender_map entry pointing at a slug nothing polls.
+//   2. Novel publisher. The LLM gets the full seeded-slug list and is
+//      instructed to return the seeded slug if it identifies one of
+//      those publishers; otherwise invents a new slug. Web-search is
+//      available to it (Anthropic web_search tool, max 3 uses).
+//
 // Runs unattended on cron (.github/workflows/auto-classify-bridges.yml).
 // Idempotent: ON CONFLICT DO NOTHING on both INSERTs.
 //
-// No static pattern config — the LLM is the classification authority.
-// If you need to FORCE a specific slug for a publisher (operator
-// override / correction), run the register-sender-map workflow with
-// the explicit values.
-//
 // Resilience: invalid LLM JSON, model errors, malformed slugs etc.
-// all result in the row STAYING in unmatched — next tick retries. No
-// crash, no partial writes.
+// leave the row in unmatched — next tick retries. No crash, no
+// partial writes. Operator can force a slug via register-sender-map.
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -58,6 +64,18 @@ const SLUG_RE = /^[a-z0-9-]+$/;
 
 const ANTHROPIC_MODEL = 'claude-opus-4-7';
 
+export interface SeededBridge {
+  slug: string;
+  name: string;
+  primary_domain: string;
+  authority: number;
+  domains_hint: string[];
+}
+
+interface SeededBridgesFile {
+  bridges: SeededBridge[];
+}
+
 function required(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var ${name}`);
@@ -66,6 +84,33 @@ function required(name: string): string {
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const WRANGLER_TOML = resolve(REPO_ROOT, 'email-worker', 'wrangler.toml');
+const SEEDED_BRIDGES_PATH = resolve(REPO_ROOT, 'config', 'seeded-email-bridges.json');
+
+export function loadSeededBridges(): SeededBridge[] {
+  const raw = readFileSync(SEEDED_BRIDGES_PATH, 'utf-8');
+  const parsed = JSON.parse(raw) as SeededBridgesFile;
+  return parsed.bridges;
+}
+
+/**
+ * Deterministic first-pass match: if the sender's from_domain matches
+ * (exactly or as a subdomain) any seeded publisher's domains_hint,
+ * return that seed. Cheaper than an LLM call and unambiguous.
+ */
+export function matchSeededBridge(
+  fromDomain: string | null,
+  seeds: SeededBridge[],
+): SeededBridge | null {
+  if (!fromDomain) return null;
+  const d = fromDomain.toLowerCase();
+  for (const seed of seeds) {
+    for (const hint of seed.domains_hint) {
+      const h = hint.toLowerCase();
+      if (d === h || d.endsWith(`.${h}`)) return seed;
+    }
+  }
+  return null;
+}
 
 function loadDatabaseId(): string {
   const toml = readFileSync(WRANGLER_TOML, 'utf-8');
@@ -107,9 +152,21 @@ async function d1Query<T>(
   return body.result[0]?.results ?? [];
 }
 
-const SYSTEM_PROMPT = `You are a publisher-classification assistant for an editorial-intelligence system. Given the sender headers of an inbound newsletter email, identify the publisher and classify it into a fixed taxonomy.
+export function buildSystemPrompt(seeds: SeededBridge[]): string {
+  const seededList = seeds
+    .map((s) => `- slug "${s.slug}" → ${s.name}`)
+    .join('\n');
+  return `You are a publisher-classification assistant for an editorial-intelligence system. Given the sender headers of an inbound newsletter email, identify the publisher and classify it into a fixed taxonomy.
 
 Use the web_search tool to look up the publisher if you don't recognise the sender. After you have enough information, respond with a single JSON object — no prose before or after, no code fences.
+
+CRITICAL — slug constraint. The following publishers are already seeded in the database with these EXACT slugs:
+
+${seededList}
+
+If the publisher you identify is one of these, you MUST return the exact seeded slug above. The downstream ingestion polls /feeds/<seeded-slug>.xml; returning a different slug ("financial-times" instead of "ft", "wall-street-journal" instead of "wsj") would make the email-worker write under a slug nothing polls.
+
+Only invent a new slug when the publisher is genuinely novel (not on the list above).
 
 Taxonomy:
 - primary_domain: one of "scitech" | "economy" | "geopolitics" | "national" | "economics" (academic / international macroeconomics).
@@ -120,7 +177,7 @@ Taxonomy:
     80 = specialised expert, peer-reviewed academic (Nature, NBER)
     90 = top-tier authoritative (FT, Bloomberg, AEA P&P)
 - language: ISO 639-1 ("en", "zh", etc.).
-- slug: lowercase, hyphen-separated, matches /^[a-z0-9-]+$/. Should be a short publisher identifier, NOT a URL slug ("nature-news" not "nature-news-feed-xml").
+- slug: lowercase, hyphen-separated, matches /^[a-z0-9-]+$/. Short publisher identifier ("nature-news" not "nature-news-feed-xml").
 - reasoning: 1-2 sentence justification, max ~200 chars.
 
 Output JSON shape:
@@ -133,6 +190,7 @@ Output JSON shape:
   "language": "en",
   "reasoning": "Brief reasoning here."
 }`;
+}
 
 interface AnthropicContentBlock {
   type: string;
@@ -146,6 +204,7 @@ interface AnthropicResponse {
 async function classifyWithLlm(
   anthropicKey: string,
   sender: UnmatchedSender,
+  seeds: SeededBridge[],
 ): Promise<Classification | null> {
   const userMsg = `Classify this inbound newsletter sender:
 
@@ -166,7 +225,7 @@ Use web_search if needed. Output JSON only.`;
     body: JSON.stringify({
       model: ANTHROPIC_MODEL,
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(seeds),
       tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
       messages: [{ role: 'user', content: userMsg }],
     }),
@@ -177,6 +236,22 @@ Use web_search if needed. Output JSON only.`;
   }
   const body = (await res.json()) as AnthropicResponse;
   return extractClassification(body);
+}
+
+/**
+ * Build a Classification directly from a seeded bridge entry. Used when
+ * deterministic domain match succeeded — no LLM call needed.
+ */
+export function classificationFromSeed(seed: SeededBridge): Classification {
+  return {
+    slug: seed.slug,
+    name: seed.name,
+    primary_domain: seed.primary_domain,
+    domains: [seed.primary_domain],
+    authority: seed.authority,
+    language: 'en',
+    reasoning: `Matched seeded email_bridge via domains_hint.`,
+  };
 }
 
 export function extractClassification(body: AnthropicResponse): Classification | null {
@@ -232,6 +307,8 @@ async function main(): Promise<void> {
     dbId: loadDatabaseId(),
   };
   const anthropicKey = required('ANTHROPIC_API_KEY');
+  const seeds = loadSeededBridges();
+  console.log(`[classify] loaded ${seeds.length} seeded bridges`);
 
   // Distinct senders in unmatched, plus a representative subject sample.
   const senders = await d1Query<UnmatchedSender>(
@@ -278,16 +355,27 @@ async function main(): Promise<void> {
       continue;
     }
 
-    console.log(
-      `[classify] asking LLM about ${key.match_field}=${key.match_value} (from ${sender.from_addr ?? '∅'})`,
-    );
+    // Tier 1: deterministic seed match. Saves an LLM call AND guarantees
+    // we route under the canonical slug rather than letting the LLM
+    // invent a divergent one.
+    const seedMatch = matchSeededBridge(sender.from_domain, seeds);
     let cls: Classification | null = null;
-    try {
-      cls = await classifyWithLlm(anthropicKey, sender);
-    } catch (err: unknown) {
-      console.warn(
-        `[classify] LLM call failed for ${key.match_value}: ${err instanceof Error ? err.message : String(err)}`,
+    if (seedMatch) {
+      cls = classificationFromSeed(seedMatch);
+      console.log(
+        `[classify] seed-matched ${sender.from_domain} → ${seedMatch.slug} (no LLM)`,
       );
+    } else {
+      console.log(
+        `[classify] asking LLM about ${key.match_field}=${key.match_value} (from ${sender.from_addr ?? '∅'})`,
+      );
+      try {
+        cls = await classifyWithLlm(anthropicKey, sender, seeds);
+      } catch (err: unknown) {
+        console.warn(
+          `[classify] LLM call failed for ${key.match_value}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     if (!cls) {
       skipped.push({ sender, reason: 'LLM returned no valid classification' });

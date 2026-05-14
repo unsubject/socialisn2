@@ -3,13 +3,20 @@
 // for an integration test; this file just exercises the response-
 // parsing logic so a bad LLM response doesn't write a garbage row.
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
+  classificationFromSeed,
   extractClassification,
+  loadSeededBridges,
+  matchSeededBridge,
   parseClassificationJson,
   senderKey,
   validateClassification,
+  type SeededBridge,
 } from '../../scripts/auto-classify-bridges.js';
 
 describe('validateClassification', () => {
@@ -115,6 +122,93 @@ describe('extractClassification', () => {
     expect(
       extractClassification({ stop_reason: 'end_turn', content: [{ type: 'tool_use' }] }),
     ).toBeNull();
+  });
+});
+
+describe('matchSeededBridge', () => {
+  const seeds: SeededBridge[] = [
+    {
+      slug: 'ft',
+      name: 'Financial Times',
+      primary_domain: 'economy',
+      authority: 90,
+      domains_hint: ['ft.com', 'email.ft.com'],
+    },
+    {
+      slug: 'nature-news',
+      name: 'Nature News',
+      primary_domain: 'scitech',
+      authority: 85,
+      domains_hint: ['nature.com'],
+    },
+  ];
+
+  it('matches exact domain', () => {
+    expect(matchSeededBridge('ft.com', seeds)?.slug).toBe('ft');
+  });
+
+  it('matches subdomain of a hint', () => {
+    expect(matchSeededBridge('newsletters.ft.com', seeds)?.slug).toBe('ft');
+  });
+
+  it('matches a literal subdomain hint', () => {
+    expect(matchSeededBridge('email.ft.com', seeds)?.slug).toBe('ft');
+  });
+
+  it('is case-insensitive', () => {
+    expect(matchSeededBridge('Nature.com', seeds)?.slug).toBe('nature-news');
+  });
+
+  it('returns null for an unknown publisher', () => {
+    expect(matchSeededBridge('stratechery.com', seeds)).toBeNull();
+  });
+
+  it('returns null for missing from_domain', () => {
+    expect(matchSeededBridge(null, seeds)).toBeNull();
+  });
+
+  it("doesn't false-match an unrelated TLD overlap (e.g. zft.com)", () => {
+    // Regression: endsWith('.ft.com') is correct; bare endsWith('ft.com')
+    // would match 'zft.com'.
+    expect(matchSeededBridge('zft.com', seeds)).toBeNull();
+  });
+});
+
+describe('classificationFromSeed', () => {
+  it('builds a Classification from a seed entry', () => {
+    const seed: SeededBridge = {
+      slug: 'ft',
+      name: 'Financial Times',
+      primary_domain: 'economy',
+      authority: 90,
+      domains_hint: ['ft.com'],
+    };
+    const cls = classificationFromSeed(seed);
+    expect(cls.slug).toBe('ft');
+    expect(cls.name).toBe('Financial Times');
+    expect(cls.primary_domain).toBe('economy');
+    expect(cls.domains).toEqual(['economy']);
+    expect(cls.authority).toBe(90);
+    expect(cls.reasoning).toMatch(/seeded/);
+  });
+});
+
+describe('seeded-email-bridges.json sync with migration 004', () => {
+  it('every seeded slug appears in migrations/004_seed_email_bridges.sql at /feeds/<slug>.xml', () => {
+    const seeds = loadSeededBridges();
+    const migrationPath = resolve(process.cwd(), 'migrations', '004_seed_email_bridges.sql');
+    const sql = readFileSync(migrationPath, 'utf-8');
+    const migrationSlugs = new Set<string>();
+    const re = /feeds\/([a-z0-9-]+)\.xml/g;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(sql)) !== null) {
+      if (match[1]) migrationSlugs.add(match[1]);
+    }
+    // Migration 006 moved shift-key out of email_bridge — not in our config any more.
+    migrationSlugs.delete('shift-key');
+
+    const configSlugs = new Set(seeds.map((s) => s.slug));
+    expect(Array.from(configSlugs).sort()).toEqual(Array.from(migrationSlugs).sort());
   });
 });
 

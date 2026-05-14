@@ -592,7 +592,7 @@ Two Cloudflare Workers share one D1 database. All newsletter subscriptions use t
 2. email-worker (TypeScript, deployed via Wrangler) parses each inbound message with `postal-mime` and looks up the source slug in the D1 `sender_map` table using a three-step priority: **List-Id** header (preferred — RFC 2919, set by virtually every legitimate newsletter) → full **From:** address → **From:** domain.
 3. On match, email-worker strips boilerplate and inserts the message into the `inbox` table; extracted links are inserted into the `inbox_links` join table (FK → inbox with `ON DELETE CASCADE`). On no match, the message lands in the `unmatched` triage table preserving `List-Id`, `From:`, and subject.
 4. **feed-worker** — a separate Cloudflare Worker on the route `inbox.socialisn.com/feeds/*` — exposes per-source Atom feeds at `https://inbox.socialisn.com/feeds/<slug>.xml`, reading the same D1 with a `LIMIT 50` window. Socialisn2's ingestion-worker polls those URLs like any other RSS source (`sources.kind = 'email_bridge'`).
-5. To add a new source: subscribe to the publisher's newsletter using `inbox@socialisn.com`. The first email lands in `unmatched`. Inspect the captured `List-Id`, then register it via one `sender_map` insert + one `sources` insert (or call the Phase 4 MCP tool `add_email_bridge_source(slug, publisher_name, list_id, domain, authority)`). Subsequent emails route correctly; the email-worker also re-processes earlier `unmatched` rows for that List-Id into `inbox`.
+5. To add a new source: subscribe to the publisher's newsletter using `inbox@socialisn.com`. The first email lands in `unmatched`. The `auto-classify-bridges` cron (every 30 min) attempts an LLM classification using a seeded slug list + web search; the operator can also force a slug via the `register-sender-map` workflow. Subsequent emails route correctly. Re-processing earlier `unmatched` rows for a newly-registered slug is NOT automatic in v1 — operator can rely on the publisher resending or invoke a one-shot backfill manually (deferred to a follow-up workflow).
 
 **Seed sources (v1):**
 
@@ -1110,16 +1110,22 @@ socialisn2/
 │   ├── 002_seed_sources.sql
 │   ├── 003_seed_competitors.sql
 │   └── 004_seed_email_bridges.sql
-├── inbox-worker/                 (Cloudflare Email Worker — §6.9)
+├── email-worker/                 (Cloudflare Email Worker — §6.9, inbound)
 │   ├── wrangler.toml
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── src/
 │   │   ├── email-handler.ts      (parses inbound email → D1)
-│   │   └── feed-handler.ts       (serves Atom XML per source slug)
-│   ├── migrations/
-│   │   └── 0001_inbox.sql        (D1 schema)
+│   │   ├── parse.ts              (boilerplate strip + link extract)
+│   │   └── sender-map.ts         (publisher slug lookup)
+│   ├── migrations/               (D1 schema for the shared inbox DB)
 │   └── tests/
+├── feed-worker/                  (Cloudflare HTTP Worker — §6.9, outbound)
+│   ├── wrangler.toml
+│   ├── package.json
+│   ├── tsconfig.json
+│   └── src/
+│       └── feed-handler.ts       (serves Atom XML per source slug)
 ├── src/
 │   ├── app.ts                    (Fastify entrypoint)
 │   ├── mcp/
@@ -1253,14 +1259,14 @@ Items where Claude Code may need to make a call during build — flag and ask Si
 
 ## 20. Handoff Notes for Claude Code
 
-- Build in feature branches off `main`. Open a PR per major component (`ingestion`, `scoring`, `mcp`, `telegram`, `rss`, `inbox-worker`, `backfill`). Each PR includes its own test suite. See `BUILD-PHASES.md` for the phased sequencing.
+- Build in feature branches off `main`. Open a PR per major component (`ingestion`, `scoring`, `mcp`, `telegram`, `rss`, `email-worker`, `feed-worker`, `backfill`). Each PR includes its own test suite. See `BUILD-PHASES.md` for the phased sequencing.
 - The `SPEC.md` you are reading is the source of truth. If a question arises that this document doesn't answer, raise it as an Open Question (§19) and ask Simon before assuming.
 - Do NOT migrate code from `unsubject/socialisn`. Start clean. The old repo is reference material only.
 - Match `2nd-brain` stylistic conventions: same TypeScript config, same Docker layout, same linting rules. If you need to make different choices, document why.
 - The Perplexity API integration referenced in the old socialisn repo is **explicitly removed** in v2 (see §2). Do not re-introduce it.
 - The cost ceiling (§12) is hard, not advisory. The system must halt gracefully at the ceiling, not panic.
 - Simon's positioning statement (§9.4) is treated as a config file, not a prompt string. It must be editable without code changes; the curation prompt loads it at runtime.
-- **No scraping** (§2). Sources must expose RSS/Atom or an official API. The Email Worker bridge in §6.9 is the only sanctioned path for newsletter-only sources, and it deploys to Cloudflare independently of the docker-compose stack on the Hostinger VPS (`cd inbox-worker && wrangler deploy`).
+- **No scraping** (§2). Sources must expose RSS/Atom or an official API. The Email Worker bridge in §6.9 is the only sanctioned path for newsletter-only sources, and it deploys to Cloudflare independently of the docker-compose stack on the Hostinger VPS (`cd email-worker && wrangler deploy`; `cd feed-worker && wrangler deploy`).
 
 ---
 

@@ -31,13 +31,18 @@ Working sequence for building Socialisn2 against `SPEC.md`. Five phases, multi-P
   - `migrations/004_seed_email_bridges.sql` — SPEC §6.9 seed rows pointing to `https://inbox.socialisn.com/feeds/<slug>.xml`
 
 - **PR 4** — Cloudflare Email Worker scaffold + foundation ADRs
-  - `inbox-worker/` directory: `wrangler.toml`, `package.json`, `tsconfig.json`, stub `email-handler.ts` + `feed-handler.ts`, D1 binding declared
-  - `inbox-worker/migrations/0001_inbox.sql` — D1 schema `(slug, received_at, message_id, subject, body_text, body_html, links)`
+  - `email-worker/` directory: `wrangler.toml`, `package.json`, `tsconfig.json`, stub `email-handler.ts`, D1 binding declared
+  - `feed-worker/` directory: `wrangler.toml`, `package.json`, `tsconfig.json`, stub `feed-handler.ts`, shared D1 binding
+  - `email-worker/migrations/0001_inbox.sql` — D1 schema `(slug, received_at, message_id, subject, body_text, body_html, links)`
   - **`ADR-001` — Architecture overview** (codifies SPEC §4)
   - **`ADR-002` — Stack choices** (codifies SPEC §4.2)
   - **`ADR-003` — No-scraping policy and email-bridge architecture** (codifies SPEC §2 + §6.9; resolves SPEC §19 Open Q1)
-  - Manual prerequisite documented in PR description: socialisn.com nameservers on Cloudflare, Email Routing enabled with catch-all → `inbox-worker`, MX records verified
+  - Manual prerequisite documented in PR description: socialisn.com nameservers on Cloudflare, Email Routing enabled with catch-all → `email-worker`, MX records verified
   - Phase report
+
+  (Originally specced as a single `inbox-worker/`; split into two Workers
+  during Phase 1 PR 4 so the email-handling and feed-serving paths could
+  deploy independently while sharing the same D1.)
 
 ## Phase 1 — Ingestion (raw_items only, no LLM)
 
@@ -59,8 +64,8 @@ Working sequence for building Socialisn2 against `SPEC.md`. Five phases, multi-P
   - **`ADR-005` — GDELT rate-limit fallback** (resolves SPEC §19 Open Q3: threshold for switching to BigQuery export)
 
 - **PR 4** — Email Worker production logic + end-to-end smoke + phase report
-  - `inbox-worker/src/email-handler.ts` — `postal-mime` parse, boilerplate strip (List-Unsubscribe, tracking pixels, unsubscribe footer regex), D1 insert
-  - `inbox-worker/src/feed-handler.ts` — Atom XML generator querying D1
+  - `email-worker/src/email-handler.ts` — `postal-mime` parse, boilerplate strip (List-Unsubscribe, tracking pixels, unsubscribe footer regex), D1 insert
+  - `feed-worker/src/feed-handler.ts` — Atom XML generator querying D1
   - Subscribe one bridge source (Anthropic news) end-to-end and verify it lands as `raw_items` through the ingestion worker
   - Phase report: source coverage table, items/day per source, email-bridge smoke result
 
@@ -145,7 +150,7 @@ Working sequence for building Socialisn2 against `SPEC.md`. Five phases, multi-P
 - **PR 2** — Deployment
   - VPS deploy script — join existing Traefik network (`n8n-traefik-1`, resolver `mytlschallenge`) for the MCP HTTPS endpoint
   - Static-RSS path under nginx at `/var/www/socialisn2/feeds`
-  - `inbox-worker` deployed independently via `wrangler deploy` (no docker-compose entry)
+  - `email-worker` and `feed-worker` deployed independently via `wrangler deploy` (no docker-compose entry)
 
 - **PR 3** — Observability
   - `/status` HTTP + Telegram `/status`

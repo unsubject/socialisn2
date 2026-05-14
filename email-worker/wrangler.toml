@@ -11,4 +11,4 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "INBOX_DB"
 database_name = "socialisn2-inbox"
-database_id = "REPLACE_WITH_D1_ID_FROM_WRANGLER_D1_CREATE"
+database_id = "ab7605c4-be15-4499-ac42-e1d8202f9b51"

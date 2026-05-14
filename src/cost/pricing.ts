@@ -1,0 +1,55 @@
+// Per-model USD pricing, expressed as USD per token. Source: vendor public
+// pricing pages as of 2026-05. Update with vendor announcements; LiteLLM
+// itself surfaces a `_response_cost` field for served models, but we re-
+// derive locally so the ledger doesn't depend on LiteLLM internals (and so
+// embedding-direct calls to OpenAI go through the same code path).
+//
+// Convention: USD per *single* token (not per 1M). Divide vendor's per-1M
+// rate by 1_000_000.
+
+export interface ModelPricing {
+  /** Cost per single input token, USD. */
+  inputUsdPerToken: number;
+  /** Cost per single output token, USD. 0 for embedding-only models. */
+  outputUsdPerToken: number;
+}
+
+const M = 1_000_000;
+
+export const PRICING: Record<string, ModelPricing> = {
+  // ---------- Embeddings ----------
+  // OpenAI text-embedding-3-small — $0.02 / 1M input tokens, no output.
+  'text-embedding-3-small': { inputUsdPerToken: 0.02 / M, outputUsdPerToken: 0 },
+
+  // ---------- LLM (LiteLLM-normalised model names) ----------
+  // Anthropic Sonnet 4.5 — $3 / $15 per 1M (input / output).
+  'claude-sonnet-4.5': { inputUsdPerToken: 3 / M, outputUsdPerToken: 15 / M },
+  // Anthropic Haiku 4.5 — $1 / $5 per 1M.
+  'claude-haiku-4.5': { inputUsdPerToken: 1 / M, outputUsdPerToken: 5 / M },
+  // Google Gemini 2.5 Flash-Lite — $0.10 / $0.40 per 1M.
+  'gemini-2.5-flash-lite': { inputUsdPerToken: 0.1 / M, outputUsdPerToken: 0.4 / M },
+};
+
+/** Look up pricing for a model. Throws if the model is not in the table. */
+export function pricingFor(model: string): ModelPricing {
+  const p = PRICING[model];
+  if (!p) {
+    throw new Error(
+      `No pricing entry for model "${model}". Add it to src/cost/pricing.ts before billing.`,
+    );
+  }
+  return p;
+}
+
+/**
+ * Compute USD cost for a call given token counts. Pure — does not write to
+ * the ledger. Use `recordCost()` to persist.
+ */
+export function computeCostUsd(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+): number {
+  const p = pricingFor(model);
+  return inputTokens * p.inputUsdPerToken + outputTokens * p.outputUsdPerToken;
+}

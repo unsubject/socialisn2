@@ -62,4 +62,31 @@ export const env = {
       'GDELT_USER_AGENT',
       'socialisn2/0.1 (+https://github.com/unsubject/socialisn2)',
     ),
+  // LiteLLM proxy — chat-completion calls in scoring stages route here.
+  litellmBaseUrl: () => required('LITELLM_BASE_URL'),
+  litellmApiKey: () => required('LITELLM_API_KEY'),
+  // OpenAI direct — embeddings only (text-embedding-3-small). See
+  // src/lib/embeddings.ts for why we don't proxy this through LiteLLM.
+  openaiApiKey: () => required('OPENAI_API_KEY'),
+  // SPEC §12 cost enforcement. Hard ceiling, not advisory.
+  costCeilingDailyUsd: () => {
+    const raw = process.env.COST_CEILING_DAILY_USD ?? '1.50';
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(
+        `Invalid COST_CEILING_DAILY_USD=${JSON.stringify(raw)} — must be a positive number`,
+      );
+    }
+    return parsed;
+  },
+  costAlertThreshold: () => {
+    const raw = process.env.COST_ALERT_THRESHOLD ?? '0.80';
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+      throw new Error(
+        `Invalid COST_ALERT_THRESHOLD=${JSON.stringify(raw)} — must be a number in (0, 1]`,
+      );
+    }
+    return parsed;
+  },
 };

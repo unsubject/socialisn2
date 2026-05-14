@@ -22,6 +22,20 @@ The HTTP side that serves Atom feeds at `inbox.socialisn.com/feeds/<slug>.xml` i
 4. Insert one `sender_map` row + one `sources` row (or call the Phase 4 MCP tool `add_email_bridge_source`).
 5. Subsequent emails route correctly. Re-processing of earlier `unmatched` rows for that List-Id into `inbox` is a Phase 1 PR 4 feature.
 
+## Optional: mirror every inbound to a personal mailbox
+
+Cloudflare Email Routing custom-address rules support only one action (Worker), so duplicating delivery to a personal inbox happens at the Worker layer. Set the `PERSONAL_FORWARD_ADDR` env var to a verified destination address on the same CF account; if unset, the Worker just writes to D1 and that's it.
+
+Set via the dashboard → Workers & Pages → `socialisn2-email-worker` → Settings → Variables and Secrets → **+ Add variable** → encrypted, name `PERSONAL_FORWARD_ADDR`, value `<your verified destination email>`.
+
+Or via wrangler:
+
+```sh
+echo "you@example.com" | wrangler secret put PERSONAL_FORWARD_ADDR --name socialisn2-email-worker
+```
+
+Forward failures are logged and swallowed — a misconfigured destination won't block ingestion.
+
 ## Stage
 
 Phase 0 scaffold. The `email-handler.ts` writes a minimal row (subject only); full `postal-mime` parse, boilerplate strip, and link extraction land in Phase 1 PR 4.

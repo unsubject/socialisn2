@@ -72,11 +72,28 @@ jobs:
           QUERY: ${{ inputs.custom_query }}
         run: |
           set -euo pipefail
-          # Reject anything that isn't a SELECT statement. Bootstrap-d1 and
-          # deploy-workers handle writes; this workflow stays read-only so
-          # the dispatch input can't be used to mutate state.
-          trimmed=$(echo "$QUERY" | sed -E 's/^[[:space:]]+//')
-          first_word=$(echo "$trimmed" | awk '{print toupper($1)}')
+          # Read-only enforcement, two layers:
+          #
+          # Layer 1: reject embedded statement separators. wrangler 3 d1
+          # execute --command accepts multi-statement input
+          # (https://developers.cloudflare.com/d1/wrangler-commands/), so
+          # SELECT 1; DELETE FROM unmatched would pass a naive
+          # "first word is SELECT" check. Strip one trailing terminator,
+          # then refuse if any ';' remains anywhere in the string. This
+          # is conservative — SELECTs with ';' inside literal strings get
+          # rejected too — but for operator triage it's fine; if you need
+          # that, run wrangler from your own laptop.
+          #
+          # Layer 2: require the first non-whitespace token is SELECT.
+          # Defence-in-depth; layer 1 alone would already prevent
+          # "DELETE …" (no ';') from running as a single statement.
+          trimmed=$(echo "$QUERY" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+          stripped=$(echo "$trimmed" | sed -E 's/;[[:space:]]*$//')
+          if echo "$stripped" | grep -q ';'; then
+            echo "::error::Custom query rejected: contains an embedded ';'. This workflow runs a single SELECT only; multi-statement and embedded literals with ';' are not supported here."
+            exit 1
+          fi
+          first_word=$(echo "$stripped" | awk '{print toupper($1)}')
           if [ "$first_word" != "SELECT" ]; then
             echo "::error::Custom query must start with SELECT (got first word: ${first_word:-empty}). This workflow is read-only."
             exit 1
@@ -86,10 +103,10 @@ jobs:
             echo "### Custom query"
             echo ""
             echo '```sql'
-            echo "$QUERY"
+            echo "$stripped"
             echo '```'
             echo ""
             echo '```'
-            npx wrangler d1 execute socialisn2-inbox --remote --command "$QUERY" 2>&1 | tail -n +5
+            npx wrangler d1 execute socialisn2-inbox --remote --command "$stripped" 2>&1 | tail -n +5
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

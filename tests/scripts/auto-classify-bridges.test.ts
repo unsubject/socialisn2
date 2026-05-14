@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classificationFromSeed,
   extractClassification,
+  isTransportProviderDomain,
   loadSeededBridges,
   matchSeededBridge,
   parseClassificationJson,
@@ -220,6 +221,7 @@ describe('senderKey', () => {
         from_addr: 'a@b.com',
         from_domain: 'b.com',
         subject_sample: null,
+        raw_headers: null,
       }),
     ).toEqual({ match_field: 'list_id', match_value: '<x.list>' });
   });
@@ -231,6 +233,7 @@ describe('senderKey', () => {
         from_addr: 'a@b.com',
         from_domain: 'b.com',
         subject_sample: null,
+        raw_headers: null,
       }),
     ).toEqual({ match_field: 'from_addr', match_value: 'a@b.com' });
   });
@@ -242,13 +245,51 @@ describe('senderKey', () => {
         from_addr: null,
         from_domain: 'b.com',
         subject_sample: null,
+        raw_headers: null,
       }),
     ).toEqual({ match_field: 'from_domain', match_value: 'b.com' });
   });
 
   it('returns null when nothing is usable', () => {
     expect(
-      senderKey({ list_id: null, from_addr: null, from_domain: null, subject_sample: null }),
+      senderKey({
+        list_id: null,
+        from_addr: null,
+        from_domain: null,
+        subject_sample: null,
+        raw_headers: null,
+      }),
     ).toBeNull();
+  });
+});
+
+describe('isTransportProviderDomain', () => {
+  it('matches exact and subdomain forms', () => {
+    expect(isTransportProviderDomain('mcsv.net')).toBe(true);
+    expect(isTransportProviderDomain('us10.list-manage.com')).toBe(true);
+    expect(isTransportProviderDomain('amazonses.com')).toBe(true);
+    expect(isTransportProviderDomain('us-east-1.amazonses.com')).toBe(true);
+    expect(isTransportProviderDomain('beehiiv.com')).toBe(true);
+    expect(isTransportProviderDomain('mail.beehiiv.com')).toBe(true);
+  });
+
+  it('is case-insensitive', () => {
+    expect(isTransportProviderDomain('AMAZONSES.COM')).toBe(true);
+  });
+
+  it('does not match unrelated publisher domains', () => {
+    expect(isTransportProviderDomain('nature.com')).toBe(false);
+    expect(isTransportProviderDomain('scmp.com')).toBe(false);
+    expect(isTransportProviderDomain('huggingface.co')).toBe(false);
+  });
+
+  it('does not false-match a fake suffix overlap', () => {
+    // endsWith('.mcsv.net') is correct; bare endsWith('mcsv.net') would
+    // false-match 'evilmcsv.net' if we weren't careful.
+    expect(isTransportProviderDomain('evilmcsv.net')).toBe(false);
+  });
+
+  it('handles null gracefully', () => {
+    expect(isTransportProviderDomain(null)).toBe(false);
   });
 });

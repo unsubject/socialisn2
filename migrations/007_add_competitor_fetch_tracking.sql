@@ -14,5 +14,5 @@
 -- analytics — it just stops being the scheduling clock.
 
 ALTER TABLE competitors
-  ADD COLUMN last_fetched_at TIMESTAMPTZ,
-  ADD COLUMN last_status     TEXT;
+  ADD COLUMN IF NOT EXISTS last_fetched_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS last_status     TEXT;

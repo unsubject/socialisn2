@@ -99,6 +99,7 @@ export async function writeRawItems(
     .select({
       urlHash: rawItems.urlHash,
       titleHash: rawItems.titleHash,
+      publishedAt: rawItems.publishedAt,
     })
     .from(rawItems)
     .where(
@@ -113,8 +114,17 @@ export async function writeRawItems(
   const existingUrlHashes = new Set<string>();
   const existingTitleHashes = new Set<string>();
   for (const row of existing) {
+    // url_hash collision is unconditional. Always add it to the dedup set.
     existingUrlHashes.add(row.urlHash);
-    existingTitleHashes.add(row.titleHash);
+    // title_hash collision only counts when the existing row is itself
+    // within the window. The URL-match branch of the WHERE clause
+    // intentionally returns rows of any age, so without this guard a
+    // stale row pulled in by a url-hash match would leak its title-hash
+    // into the title-dedup set and reject a legitimate recurring-title
+    // entry from a different URL.
+    if (row.publishedAt >= titleWindowCutoff) {
+      existingTitleHashes.add(row.titleHash);
+    }
   }
 
   const fresh = prepared.filter(

@@ -162,6 +162,39 @@ describe.skipIf(!DATABASE_URL)('writeRawItems dedup', () => {
     expect(second.insertedCount).toBe(0);
   });
 
+  it('does not leak a stale title_hash into the dedup set via the url_hash branch', async () => {
+    // Regression for review on PR #25: a stale row matched by url_hash
+    // also exposed its title_hash to the dedup set, even when the row
+    // was older than the title window. A different new item with the
+    // same recurring title and a different URL would then get rejected.
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    await writeRawItems(db, sourceA, [
+      makeItem({
+        externalId: 'stale-1',
+        url: 'https://shared.example/article',
+        title: 'Daily Briefing',
+        publishedAt: threeDaysAgo,
+      }),
+    ]);
+    // Batch with two new items: A collides on url (any age — should be
+    // dropped); B has the same template title but a fresh URL — title
+    // collision is older than the window — should land.
+    const result = await writeRawItems(db, sourceB, [
+      makeItem({
+        externalId: 'b-url-collide',
+        url: 'https://shared.example/article?utm_source=feed',
+        title: 'Different title',
+      }),
+      makeItem({
+        externalId: 'b-title-recurring',
+        url: 'https://b.example/today',
+        title: 'Daily Briefing',
+      }),
+    ]);
+    expect(result.insertedCount).toBe(1);
+    expect(result.duplicateCount).toBe(1);
+  });
+
   it('does NOT dedup by title_hash when the existing row is older than the 48h window', async () => {
     // Older row pinned to 3 days ago — outside the title-hash window.
     const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);

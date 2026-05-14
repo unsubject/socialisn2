@@ -109,6 +109,7 @@ export const items = pgTable(
     contextEn: text('context_en').notNull(),
     languageOriginal: text('language_original').notNull(),
     entities: text('entities').array().default(sql`'{}'::text[]`),
+    keywords: text('keywords').array().notNull().default(sql`'{}'::text[]`),
     domains: text('domains').array().notNull(),
     primaryDomain: text('primary_domain').notNull(),
     embedding: vector('embedding', { dimensions: EMBEDDING_DIM }).notNull(),

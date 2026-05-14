@@ -1,0 +1,38 @@
+{
+  "$comment": "Canonical list of seeded email_bridge slugs from migrations 004 + 006 + 008. Used by scripts/auto-classify-bridges.ts to constrain the LLM: if it identifies a sender as one of these publishers, it MUST return the exact seeded slug — otherwise the email-worker would write under a divergent slug (e.g. 'financial-times') while the ingestion-worker polls /feeds/<seeded-slug>.xml (e.g. 'ft.xml'), and the inbound never reaches raw_items. Tests/scripts/auto-classify-bridges.test.ts asserts this list stays in sync with the migration SQL.",
+  "bridges": [
+    { "slug": "anthropic", "name": "Anthropic news", "primary_domain": "scitech", "authority": 80, "domains_hint": ["anthropic.com"] },
+    { "slug": "meta-ai", "name": "Meta AI blog", "primary_domain": "scitech", "authority": 75, "domains_hint": ["meta.com", "ai.meta.com"] },
+    { "slug": "hf-papers", "name": "Hugging Face Daily Papers", "primary_domain": "scitech", "authority": 75, "domains_hint": ["huggingface.co", "hf.co"] },
+    { "slug": "setser", "name": "Brad Setser — Follow the Money", "primary_domain": "economy", "authority": 75, "domains_hint": ["cfr.org", "substack.com"] },
+    { "slug": "heatmap", "name": "Heatmap News", "primary_domain": "scitech", "authority": 70, "domains_hint": ["heatmap.news"] },
+    { "slug": "derek-lowe", "name": "Derek Lowe — In the Pipeline", "primary_domain": "scitech", "authority": 75, "domains_hint": ["science.org"] },
+
+    { "slug": "reuters", "name": "Reuters", "primary_domain": "geopolitics", "authority": 85, "domains_hint": ["reuters.com"] },
+    { "slug": "bloomberg", "name": "Bloomberg", "primary_domain": "economy", "authority": 85, "domains_hint": ["bloomberg.com"] },
+    { "slug": "ft", "name": "Financial Times", "primary_domain": "economy", "authority": 90, "domains_hint": ["ft.com", "email.ft.com"] },
+    { "slug": "economist", "name": "The Economist", "primary_domain": "economy", "authority": 85, "domains_hint": ["economist.com"] },
+    { "slug": "wsj", "name": "Wall Street Journal", "primary_domain": "economy", "authority": 80, "domains_hint": ["wsj.com", "dowjones.com"] },
+    { "slug": "the-information", "name": "The Information", "primary_domain": "scitech", "authority": 85, "domains_hint": ["theinformation.com"] },
+    { "slug": "politico", "name": "Politico", "primary_domain": "national", "authority": 75, "domains_hint": ["politico.com", "politico.eu"] },
+    { "slug": "foreign-affairs", "name": "Foreign Affairs", "primary_domain": "geopolitics", "authority": 80, "domains_hint": ["foreignaffairs.com"] },
+    { "slug": "foreign-policy", "name": "Foreign Policy", "primary_domain": "geopolitics", "authority": 75, "domains_hint": ["foreignpolicy.com"] },
+    { "slug": "scmp", "name": "South China Morning Post", "primary_domain": "national", "authority": 70, "domains_hint": ["scmp.com"] },
+
+    { "slug": "wired", "name": "Wired", "primary_domain": "scitech", "authority": 70, "domains_hint": ["wired.com", "condenast.com"] },
+    { "slug": "mit-tech-review", "name": "MIT Technology Review", "primary_domain": "scitech", "authority": 80, "domains_hint": ["technologyreview.com"] },
+    { "slug": "ars-technica", "name": "Ars Technica", "primary_domain": "scitech", "authority": 75, "domains_hint": ["arstechnica.com"] },
+    { "slug": "the-verge", "name": "The Verge", "primary_domain": "scitech", "authority": 65, "domains_hint": ["theverge.com", "voxmedia.com"] },
+    { "slug": "nature-news", "name": "Nature News", "primary_domain": "scitech", "authority": 85, "domains_hint": ["nature.com", "e-alerts.nature.com"] },
+    { "slug": "stat-news", "name": "Stat News", "primary_domain": "scitech", "authority": 80, "domains_hint": ["statnews.com"] },
+    { "slug": "endpoints", "name": "Endpoints News", "primary_domain": "scitech", "authority": 80, "domains_hint": ["endpts.com", "endpointsnews.com"] },
+    { "slug": "canary-media", "name": "Canary Media", "primary_domain": "scitech", "authority": 75, "domains_hint": ["canarymedia.com"] },
+
+    { "slug": "nber", "name": "NBER Working Papers", "primary_domain": "economics", "authority": 80, "domains_hint": ["nber.org"] },
+    { "slug": "ssrn", "name": "SSRN top downloads", "primary_domain": "economics", "authority": 65, "domains_hint": ["ssrn.com"] },
+    { "slug": "voxeu", "name": "VoxEU", "primary_domain": "economics", "authority": 70, "domains_hint": ["voxeu.org", "cepr.org"] },
+    { "slug": "aea", "name": "AEA papers & proceedings", "primary_domain": "economics", "authority": 85, "domains_hint": ["aeaweb.org"] },
+    { "slug": "behavioral-scientist", "name": "Behavioral Scientist", "primary_domain": "scitech", "authority": 60, "domains_hint": ["behavioralscientist.org"] },
+    { "slug": "asr", "name": "American Sociological Review", "primary_domain": "scitech", "authority": 80, "domains_hint": ["asanet.org", "journals.sagepub.com"] }
+  ]
+}

@@ -7,6 +7,12 @@ import { handleEmail } from './email-handler';
 
 export interface Env {
   INBOX_DB: D1Database;
+  // Optional secondary forward. CF Email Routing custom-address rules
+  // support only ONE action (Worker), so duplicating delivery to a personal
+  // mailbox lives here rather than in the routing config. The address must
+  // be a verified destination on the same CF account; if unset (the default),
+  // the Worker just writes to D1 and that's it.
+  PERSONAL_FORWARD_ADDR?: string;
 }
 
 export default {

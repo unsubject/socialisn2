@@ -36,14 +36,26 @@ export async function handleEmail(
     console.log(
       `[email-worker] no sender_map match list_id=${listId ?? '∅'} from=${fromAddr ?? '∅'}; wrote to unmatched`,
     );
-    return;
+  } else {
+    await env.INBOX_DB.prepare(
+      'INSERT INTO inbox (slug, message_id, received_at, subject) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+    )
+      .bind(slug, messageId, receivedAt, subject)
+      .run();
+
+    console.log(`[email-worker] matched slug=${slug} message_id=${messageId}`);
   }
 
-  await env.INBOX_DB.prepare(
-    'INSERT INTO inbox (slug, message_id, received_at, subject) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
-  )
-    .bind(slug, messageId, receivedAt, subject)
-    .run();
-
-  console.log(`[email-worker] matched slug=${slug} message_id=${messageId}`);
+  // Optional secondary forward to a personal mailbox. Independent of D1
+  // success — if D1 wrote (or skipped), still mirror the original message.
+  // Best-effort: log + swallow forward failures so a misconfigured / unverified
+  // destination doesn't block ingestion.
+  if (env.PERSONAL_FORWARD_ADDR) {
+    try {
+      await message.forward(env.PERSONAL_FORWARD_ADDR);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[email-worker] personal forward to ${env.PERSONAL_FORWARD_ADDR} failed: ${msg}`);
+    }
+  }
 }

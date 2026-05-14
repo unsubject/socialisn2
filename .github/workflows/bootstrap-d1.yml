@@ -59,6 +59,22 @@ jobs:
           echo "database_id=$id" >> "$GITHUB_OUTPUT"
           echo "created=$created" >> "$GITHUB_OUTPUT"
 
+      - name: Inject database_id into wrangler.toml for this run
+        # `wrangler d1 execute --remote` reads the database_id from the
+        # `[[d1_databases]]` block in wrangler.toml; passing the database by
+        # name on the CLI doesn't override it. Patch the placeholder in-place
+        # so the schema-apply step sees a valid UUID. This change is
+        # ephemeral — it lives only on the runner's checked-out copy and
+        # never gets committed back; the canonical id-into-wrangler.toml
+        # change still happens via a follow-up PR.
+        env:
+          DB_ID: ${{ steps.d1.outputs.database_id }}
+        run: |
+          set -euo pipefail
+          sed -i "s/REPLACE_WITH_D1_ID_FROM_WRANGLER_D1_CREATE/${DB_ID}/" wrangler.toml
+          echo "Patched email-worker/wrangler.toml for this run:"
+          grep -E '^(database_id|database_name)' wrangler.toml
+
       - name: Apply schema (migrations/0001_inbox.sql)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -1,25 +1,26 @@
-// Phase 0 stub. Phase 1 PR 4 wires the full implementation:
-//   - postal-mime parse → { html, text, attachments, headers }
-//   - boilerplate strip (unsubscribe footers, tracking pixels, list-management headers)
-//   - link extraction → INSERTs into `inbox_links` join table
+// Production email handler. Receives an inbound RFC 5322 message via
+// Cloudflare Email Routing, looks up the publisher slug via the
+// sender_map index, and writes:
 //
-// What this stub already does end-to-end (so the deploy + smoke test exercise
-// the real flow on the real bindings):
-//   - reads List-Id / From: headers + transport-context headers
-//   - looks up the source slug via sender_map (List-Id → from_addr → from_domain)
-//   - on match: INSERTs a minimal row into `inbox` (subject only; body fields TBD)
-//   - on no match: INSERTs into `unmatched` for operator triage,
-//     capturing transport-context headers in raw_headers JSON so the
-//     classifier can identify publishers behind Mailchimp / SES / etc.
+//   - inbox          one row per matched email (slug + message_id PK,
+//                    plus subject, body_text snippet, body_html)
+//   - inbox_links    one row per distinct link extracted from the body,
+//                    ordinal-positional for retrieval ordering
+//
+// Unmatched mail falls through to the unmatched table for the operator-
+// triage / LLM-classifier loop. We don't run postal-mime on unmatched —
+// the raw_headers JSON captured at receive-time is enough for the
+// classifier to identify the publisher, and spam to inbox@ that never
+// matches shouldn't pay parse cost.
 
+import PostalMime from 'postal-mime';
+
+import { extractLinks, stripBoilerplate } from './parse';
 import { domainOf, findSlugByHeaders } from './sender-map';
 import type { Env } from './index';
 
-// Headers we capture into unmatched.raw_headers. When the From: domain is a
-// transport provider (mcsv.net for Mailchimp, amazonses.com for AWS SES, …),
-// the actual publisher identity hides in these. Keep the list focused —
-// every entry is JSON-stringified into a single column, so adding rarely-
-// useful headers just bloats the row.
+const SNIPPET_MAX_CHARS = 8_000;
+
 const CONTEXT_HEADERS = [
   'list-post',
   'list-unsubscribe',
@@ -42,6 +43,7 @@ function collectRawHeaders(message: ForwardableEmailMessage): string {
 
 async function ingestToD1(
   env: Env,
+  message: ForwardableEmailMessage,
   headers: { listId: string | null; fromAddr: string | null; fromDomain: string | null },
   meta: { messageId: string; receivedAt: number; subject: string | null; rawHeaders: string },
 ): Promise<void> {
@@ -59,13 +61,36 @@ async function ingestToD1(
     return;
   }
 
+  // Matched. Parse the body — postal-mime accepts the ReadableStream from
+  // ForwardableEmailMessage.raw directly. Failures here propagate to the
+  // outer try/catch in handleEmail, which logs but doesn't bounce the
+  // message (personal-mirror forward still happens).
+  const parsed = await PostalMime.parse(message.raw);
+  const bodyText = parsed.text ? stripBoilerplate(parsed.text).slice(0, SNIPPET_MAX_CHARS) : null;
+  const bodyHtml = parsed.html ?? null;
+
   await env.INBOX_DB.prepare(
-    'INSERT INTO inbox (slug, message_id, received_at, subject) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+    'INSERT INTO inbox (slug, message_id, received_at, subject, body_text, body_html) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
   )
-    .bind(slug, meta.messageId, meta.receivedAt, meta.subject)
+    .bind(slug, meta.messageId, meta.receivedAt, meta.subject, bodyText, bodyHtml)
     .run();
 
-  console.log(`[email-worker] matched slug=${slug} message_id=${meta.messageId}`);
+  const links = extractLinks({ html: bodyHtml, text: bodyText });
+  if (links.length > 0) {
+    // D1 batch — one round-trip for N inserts. ON CONFLICT DO NOTHING in
+    // case the inbox INSERT skipped via the (slug, message_id) PK
+    // collision: we'd still try to insert links and would race the FK.
+    const stmts = links.map((link) =>
+      env.INBOX_DB.prepare(
+        'INSERT INTO inbox_links (slug, message_id, link_pos, link_url) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+      ).bind(slug, meta.messageId, link.pos, link.url),
+    );
+    await env.INBOX_DB.batch(stmts);
+  }
+
+  console.log(
+    `[email-worker] matched slug=${slug} message_id=${meta.messageId} body_text=${bodyText?.length ?? 0}c links=${links.length}`,
+  );
 }
 
 export async function handleEmail(
@@ -88,6 +113,7 @@ export async function handleEmail(
   try {
     await ingestToD1(
       env,
+      message,
       { listId, fromAddr, fromDomain },
       { messageId, receivedAt, subject, rawHeaders },
     );

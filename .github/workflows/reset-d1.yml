@@ -1,0 +1,120 @@
+name: reset-d1
+
+# Manually-triggered destructive op. Empties every data table in
+# socialisn2-inbox so you can re-test from a clean state:
+#
+#   - inbox             (matched bridge emails)
+#   - inbox_links       (extracted links — cascaded from inbox anyway)
+#   - sender_map        (header → slug mappings)
+#   - unmatched         (operator triage queue)
+#   - discovered_publishers  (LLM-classified publishers)
+#
+# Preserves the schema itself AND the `_d1_migrations` tracker — those
+# are infra, not data. Re-running deploy-workers after this is a no-op
+# (migrations already recorded).
+#
+# Safety: requires the operator to type RESET into the dispatch input.
+# Anything else fails the run before any DELETE statements fire.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type RESET to wipe all data tables. Anything else aborts.'
+        required: true
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate confirmation input
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRM" != "RESET" ]; then
+            echo "::error::Refusing to reset — confirmation must be exactly 'RESET' (got: ${CONFIRM:-empty})"
+            exit 1
+          fi
+
+      - name: Read D1 database_id
+        id: dbid
+        run: |
+          set -euo pipefail
+          id=$(grep -E '^database_id' email-worker/wrangler.toml | sed -E 's/^database_id[[:space:]]*=[[:space:]]*"([^"]+)"/\1/')
+          if [ -z "$id" ] || [ "$id" = "REPLACE_WITH_D1_ID_FROM_WRANGLER_D1_CREATE" ]; then
+            echo "::error::email-worker/wrangler.toml has no real database_id"
+            exit 1
+          fi
+          echo "database_id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Report row counts before
+        id: before
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DB_ID: ${{ steps.dbid.outputs.database_id }}
+        run: |
+          set -euo pipefail
+          payload='{"sql":"SELECT '"'"'inbox'"'"' AS tbl, COUNT(*) AS n FROM inbox UNION ALL SELECT '"'"'inbox_links'"'"', COUNT(*) FROM inbox_links UNION ALL SELECT '"'"'sender_map'"'"', COUNT(*) FROM sender_map UNION ALL SELECT '"'"'unmatched'"'"', COUNT(*) FROM unmatched UNION ALL SELECT '"'"'discovered_publishers'"'"', COUNT(*) FROM discovered_publishers"}'
+          response=$(curl -fsS -X POST \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query")
+          {
+            echo "## reset-d1"
+            echo ""
+            echo "### Before"
+            echo ""
+            echo '```json'
+            echo "$response" | jq '.result[0].results'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wipe data tables
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DB_ID: ${{ steps.dbid.outputs.database_id }}
+        run: |
+          set -euo pipefail
+          # Order matters when FKs cascade: inbox_links FK→inbox would
+          # cascade on inbox DELETE anyway, but explicit DELETEs are
+          # cheaper than the trigger fire path on D1.
+          for table in inbox_links inbox sender_map unmatched discovered_publishers; do
+            echo "Wiping $table…"
+            payload=$(jq -n --arg sql "DELETE FROM $table" '{sql: $sql}')
+            curl -fsS -X POST \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "$payload" \
+              "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query" \
+              | jq -r '.result[0].meta | "  rows_written=\(.rows_written // 0)"'
+          done
+
+      - name: Report row counts after
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DB_ID: ${{ steps.dbid.outputs.database_id }}
+        run: |
+          set -euo pipefail
+          payload='{"sql":"SELECT '"'"'inbox'"'"' AS tbl, COUNT(*) AS n FROM inbox UNION ALL SELECT '"'"'inbox_links'"'"', COUNT(*) FROM inbox_links UNION ALL SELECT '"'"'sender_map'"'"', COUNT(*) FROM sender_map UNION ALL SELECT '"'"'unmatched'"'"', COUNT(*) FROM unmatched UNION ALL SELECT '"'"'discovered_publishers'"'"', COUNT(*) FROM discovered_publishers"}'
+          response=$(curl -fsS -X POST \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query")
+          {
+            echo ""
+            echo "### After"
+            echo ""
+            echo '```json'
+            echo "$response" | jq '.result[0].results'
+            echo '```'
+            echo ""
+            echo "Schema + \`_d1_migrations\` tracker preserved. Re-running deploy-workers is a no-op."
+          } >> "$GITHUB_STEP_SUMMARY"

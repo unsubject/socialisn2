@@ -20,7 +20,7 @@ function fakeVec(seed: number): number[] {
 }
 
 describe('embed', () => {
-  it('returns empty arrays for empty input without making a request', async () => {
+  it('returns empty arrays for empty inputs array without making a request', async () => {
     let called = false;
     const fakeFetch = (async () => {
       called = true;
@@ -61,7 +61,7 @@ describe('embed', () => {
     await expect(embed({ inputs: ['x'], fetchFn: fakeFetch })).rejects.toThrow(/HTTP 429/);
   });
 
-  it('filters out empty-string inputs before calling the API', async () => {
+  it('filters out empty-string inputs from the API call but keeps slots aligned', async () => {
     let capturedBody: { input?: string[] } = {};
     let called = false;
     const fakeFetch = (async (
@@ -82,11 +82,33 @@ describe('embed', () => {
 
     const result = await embed({ inputs: ['', 'real', ''], fetchFn: fakeFetch });
     expect(called).toBe(true);
+    // Sent only the non-empty value.
     expect(capturedBody.input).toEqual(['real']);
-    expect(result.vectors).toHaveLength(1);
+    // Returned vectors array is index-aligned to inputs.
+    expect(result.vectors).toEqual([null, fakeVec(1), null]);
   });
 
-  it('short-circuits when ALL inputs are empty strings', async () => {
+  it('aligns shuffled API response back to input positions when some inputs are empty', async () => {
+    // Inputs: ['', 'a', '', 'b']. Non-empty are at indices 1 and 3.
+    // API sees ['a','b'] → returns data with index 0, 1 (possibly shuffled).
+    const fakeFetch = (async () =>
+      new Response(
+        JSON.stringify({
+          data: [
+            { embedding: fakeVec(20), index: 1 },
+            { embedding: fakeVec(10), index: 0 },
+          ],
+          usage: { prompt_tokens: 12, total_tokens: 12 },
+          model: 'text-embedding-3-small',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof fetch;
+
+    const result = await embed({ inputs: ['', 'a', '', 'b'], fetchFn: fakeFetch });
+    expect(result.vectors).toEqual([null, fakeVec(10), null, fakeVec(20)]);
+  });
+
+  it('short-circuits when ALL inputs are empty strings — returns aligned nulls', async () => {
     let called = false;
     const fakeFetch = (async () => {
       called = true;
@@ -95,7 +117,7 @@ describe('embed', () => {
 
     const result = await embed({ inputs: ['', '', ''], fetchFn: fakeFetch });
     expect(called).toBe(false);
-    expect(result).toEqual({ vectors: [], inputTokens: 0, usd: 0 });
+    expect(result).toEqual({ vectors: [null, null, null], inputTokens: 0, usd: 0 });
   });
 
   it('propagates an already-aborted external signal', async () => {

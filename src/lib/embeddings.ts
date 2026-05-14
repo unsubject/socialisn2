@@ -25,9 +25,11 @@ export interface EmbedOptions {
    * call and ~8192 tokens per input. Caller is responsible for chunking
    * larger payloads.
    *
-   * Empty strings are filtered out before the API call — OpenAI returns 400
-   * for empty inputs, and embedding an empty string is never the intent.
-   * If filtering leaves zero inputs, we short-circuit with empty vectors.
+   * Empty strings are filtered out before the API call (OpenAI 400s on `""`),
+   * but the returned `vectors` array is index-aligned to `inputs` — empty
+   * positions surface as `null`, not as dropped entries. This lets callers
+   * iterate `inputs` and pair each one with its embedding (or skip on null)
+   * without separate book-keeping.
    */
   inputs: string[];
   /** Override fetch — primarily for tests. */
@@ -39,8 +41,12 @@ export interface EmbedOptions {
 }
 
 export interface EmbedResult {
-  /** Same order as `inputs`. Each vector has length 1536. */
-  vectors: number[][];
+  /**
+   * Aligned 1:1 with `inputs`. Each entry is a 1536-dim vector or `null` if
+   * the corresponding input was an empty string and therefore not sent to
+   * the API.
+   */
+  vectors: (number[] | null)[];
   inputTokens: number;
   usd: number;
 }
@@ -61,11 +67,21 @@ interface OpenAiEmbeddingResponse {
  * successful call.
  */
 export async function embed(opts: EmbedOptions): Promise<EmbedResult> {
-  // Filter empty strings up-front; OpenAI 400s on `""`, and embedding empty
-  // input is never the intent. If everything was empty, short-circuit.
-  const filteredInputs = opts.inputs.filter((s) => s.length > 0);
-  if (filteredInputs.length === 0) {
-    return { vectors: [], inputTokens: 0, usd: 0 };
+  // Build a list of (originalIndex, value) for non-empty inputs. We send
+  // only the non-empty ones to the API and use originalIndex to scatter the
+  // returned vectors back into the right slots of an output array sized to
+  // match `inputs`.
+  const sendable: Array<{ idx: number; value: string }> = [];
+  for (let i = 0; i < opts.inputs.length; i++) {
+    const s = opts.inputs[i] ?? '';
+    if (s.length > 0) sendable.push({ idx: i, value: s });
+  }
+  if (sendable.length === 0) {
+    return {
+      vectors: opts.inputs.map(() => null),
+      inputTokens: 0,
+      usd: 0,
+    };
   }
 
   const apiKey = env.openaiApiKey();
@@ -86,7 +102,7 @@ export async function embed(opts: EmbedOptions): Promise<EmbedResult> {
         'content-type': 'application/json',
         authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model: EMBED_MODEL, input: filteredInputs }),
+      body: JSON.stringify({ model: EMBED_MODEL, input: sendable.map((s) => s.value) }),
       signal: controller.signal,
     });
   } finally {
@@ -96,13 +112,21 @@ export async function embed(opts: EmbedOptions): Promise<EmbedResult> {
   if (!res.ok) {
     const detail = await res.text().catch(() => '<no body>');
     throw new Error(
-      `OpenAI embeddings call failed: HTTP ${res.status} n=${filteredInputs.length} body=${detail.slice(0, 500)}`,
+      `OpenAI embeddings call failed: HTTP ${res.status} n=${sendable.length} body=${detail.slice(0, 500)}`,
     );
   }
 
   const json = (await res.json()) as OpenAiEmbeddingResponse;
+  // The API guarantees `index` matches the request order, but re-sort
+  // defensively in case of any reordering. Then scatter into the
+  // input-aligned output array.
   const sorted = [...json.data].sort((a, b) => a.index - b.index);
-  const vectors = sorted.map((d) => d.embedding);
+  const vectors: (number[] | null)[] = opts.inputs.map(() => null);
+  for (let i = 0; i < sorted.length; i++) {
+    const originalIdx = sendable[i]?.idx;
+    const vec = sorted[i]?.embedding;
+    if (originalIdx !== undefined && vec) vectors[originalIdx] = vec;
+  }
   const inputTokens = json.usage?.prompt_tokens ?? 0;
   const usd = computeCostUsd(EMBED_MODEL, inputTokens, 0);
 

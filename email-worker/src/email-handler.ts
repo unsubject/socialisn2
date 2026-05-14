@@ -13,6 +13,34 @@
 import { domainOf, findSlugByHeaders } from './sender-map';
 import type { Env } from './index';
 
+async function ingestToD1(
+  env: Env,
+  headers: { listId: string | null; fromAddr: string | null; fromDomain: string | null },
+  meta: { messageId: string; receivedAt: number; subject: string | null },
+): Promise<void> {
+  const slug = await findSlugByHeaders(env.INBOX_DB, headers);
+
+  if (!slug) {
+    await env.INBOX_DB.prepare(
+      'INSERT INTO unmatched (received_at, list_id, from_addr, subject) VALUES (?, ?, ?, ?)',
+    )
+      .bind(meta.receivedAt, headers.listId, headers.fromAddr, meta.subject)
+      .run();
+    console.log(
+      `[email-worker] no sender_map match list_id=${headers.listId ?? '∅'} from=${headers.fromAddr ?? '∅'}; wrote to unmatched`,
+    );
+    return;
+  }
+
+  await env.INBOX_DB.prepare(
+    'INSERT INTO inbox (slug, message_id, received_at, subject) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
+  )
+    .bind(slug, meta.messageId, meta.receivedAt, meta.subject)
+    .run();
+
+  console.log(`[email-worker] matched slug=${slug} message_id=${meta.messageId}`);
+}
+
 export async function handleEmail(
   message: ForwardableEmailMessage,
   env: Env,
@@ -25,31 +53,26 @@ export async function handleEmail(
   const messageId = message.headers.get('message-id') ?? crypto.randomUUID();
   const receivedAt = Date.now();
 
-  const slug = await findSlugByHeaders(env.INBOX_DB, { listId, fromAddr, fromDomain });
-
-  if (!slug) {
-    await env.INBOX_DB.prepare(
-      'INSERT INTO unmatched (received_at, list_id, from_addr, subject) VALUES (?, ?, ?, ?)',
-    )
-      .bind(receivedAt, listId, fromAddr, subject)
-      .run();
-    console.log(
-      `[email-worker] no sender_map match list_id=${listId ?? '∅'} from=${fromAddr ?? '∅'}; wrote to unmatched`,
+  // D1 ingestion is best-effort. A transient D1 outage, schema drift, or
+  // any other write failure logs + continues so the personal-mirror forward
+  // below still runs — losing ingestion enrichment is preferable to
+  // losing the durable copy in the operator's inbox.
+  try {
+    await ingestToD1(
+      env,
+      { listId, fromAddr, fromDomain },
+      { messageId, receivedAt, subject },
     );
-  } else {
-    await env.INBOX_DB.prepare(
-      'INSERT INTO inbox (slug, message_id, received_at, subject) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
-    )
-      .bind(slug, messageId, receivedAt, subject)
-      .run();
-
-    console.log(`[email-worker] matched slug=${slug} message_id=${messageId}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[email-worker] D1 ingestion failed: ${msg}`);
   }
 
   // Optional secondary forward to a personal mailbox. Independent of D1
-  // success — if D1 wrote (or skipped), still mirror the original message.
-  // Best-effort: log + swallow forward failures so a misconfigured / unverified
-  // destination doesn't block ingestion.
+  // outcome — every inbound is mirrored when the env var is set, even if
+  // the D1 write above threw. Forward failures are similarly logged +
+  // swallowed so a misconfigured / unverified destination address doesn't
+  // bounce the original email back to the sender.
   if (env.PERSONAL_FORWARD_ADDR) {
     try {
       await message.forward(env.PERSONAL_FORWARD_ADDR);

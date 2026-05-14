@@ -11,11 +11,13 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "d1:apply:remote": "bash ../scripts/apply-d1-migrations.sh"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240924.0",
     "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
     "wrangler": "^3.78.0"
   },
   "dependencies": {

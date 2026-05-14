@@ -58,12 +58,13 @@ jobs:
           DB_ID: ${{ steps.dbid.outputs.database_id }}
         run: |
           set -euo pipefail
-          payload='{"sql":"SELECT '"'"'inbox'"'"' AS tbl, COUNT(*) AS n FROM inbox UNION ALL SELECT '"'"'inbox_links'"'"', COUNT(*) FROM inbox_links UNION ALL SELECT '"'"'sender_map'"'"', COUNT(*) FROM sender_map UNION ALL SELECT '"'"'unmatched'"'"', COUNT(*) FROM unmatched UNION ALL SELECT '"'"'discovered_publishers'"'"', COUNT(*) FROM discovered_publishers"}'
-          response=$(curl -fsS -X POST \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data "$payload" \
-            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query")
+          source "${GITHUB_WORKSPACE}/.github/workflows/_d1-helpers.sh"
+          response=$(d1_query \
+            "SELECT 'inbox' AS tbl, COUNT(*) AS n FROM inbox
+             UNION ALL SELECT 'inbox_links', COUNT(*) FROM inbox_links
+             UNION ALL SELECT 'sender_map', COUNT(*) FROM sender_map
+             UNION ALL SELECT 'unmatched', COUNT(*) FROM unmatched
+             UNION ALL SELECT 'discovered_publishers', COUNT(*) FROM discovered_publishers")
           {
             echo "## reset-d1"
             echo ""
@@ -81,18 +82,14 @@ jobs:
           DB_ID: ${{ steps.dbid.outputs.database_id }}
         run: |
           set -euo pipefail
+          source "${GITHUB_WORKSPACE}/.github/workflows/_d1-helpers.sh"
           # Order matters when FKs cascade: inbox_links FK→inbox would
           # cascade on inbox DELETE anyway, but explicit DELETEs are
           # cheaper than the trigger fire path on D1.
           for table in inbox_links inbox sender_map unmatched discovered_publishers; do
             echo "Wiping $table…"
-            payload=$(jq -n --arg sql "DELETE FROM $table" '{sql: $sql}')
-            curl -fsS -X POST \
-              -H "Authorization: Bearer $CF_API_TOKEN" \
-              -H "Content-Type: application/json" \
-              --data "$payload" \
-              "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query" \
-              | jq -r '.result[0].meta | "  rows_written=\(.rows_written // 0)"'
+            response=$(d1_query "DELETE FROM $table")
+            echo "$response" | jq -r '"  rows_written=\(.result[0].meta.rows_written // 0)"'
           done
 
       - name: Report row counts after
@@ -102,12 +99,13 @@ jobs:
           DB_ID: ${{ steps.dbid.outputs.database_id }}
         run: |
           set -euo pipefail
-          payload='{"sql":"SELECT '"'"'inbox'"'"' AS tbl, COUNT(*) AS n FROM inbox UNION ALL SELECT '"'"'inbox_links'"'"', COUNT(*) FROM inbox_links UNION ALL SELECT '"'"'sender_map'"'"', COUNT(*) FROM sender_map UNION ALL SELECT '"'"'unmatched'"'"', COUNT(*) FROM unmatched UNION ALL SELECT '"'"'discovered_publishers'"'"', COUNT(*) FROM discovered_publishers"}'
-          response=$(curl -fsS -X POST \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data "$payload" \
-            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query")
+          source "${GITHUB_WORKSPACE}/.github/workflows/_d1-helpers.sh"
+          response=$(d1_query \
+            "SELECT 'inbox' AS tbl, COUNT(*) AS n FROM inbox
+             UNION ALL SELECT 'inbox_links', COUNT(*) FROM inbox_links
+             UNION ALL SELECT 'sender_map', COUNT(*) FROM sender_map
+             UNION ALL SELECT 'unmatched', COUNT(*) FROM unmatched
+             UNION ALL SELECT 'discovered_publishers', COUNT(*) FROM discovered_publishers")
           {
             echo ""
             echo "### After"

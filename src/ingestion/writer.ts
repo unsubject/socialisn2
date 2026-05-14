@@ -1,21 +1,31 @@
 // Dedup pass 1 + bulk INSERT into raw_items per SPEC §7.2 step 1.
 //
-// Two dedup layers, in order:
-//   1. In-batch: hash-collisions within the same fetch (same article emitted
-//      under two <item> entries) are folded.
-//   2. Cross-source: SELECT existing url_hash + title_hash from raw_items;
-//      any new item whose hash is already in the table is skipped.
-// Then INSERT remaining rows with ON CONFLICT DO NOTHING against the
-// (source_id, external_id) unique index — catches republishes of the same
-// feed-item id within the same source.
+// Layers:
+//   1. In-batch fold — hash collisions within the same fetch (same article
+//      emitted under two <item> entries) are collapsed.
+//   2. Cross-source url_hash — always matches, any age. Same canonical URL
+//      across sources is unambiguously a re-syndication.
+//   3. Cross-source title_hash — only matches against rows in the recent
+//      window (default 48h). Catches near-simultaneous re-syndication
+//      under the same headline; doesn't reject legitimate recurring titles
+//      ("Morning Briefing", podcast episode templates, "Live Updates")
+//      whose previous edition was days/weeks ago.
+//   4. INSERT with ON CONFLICT (source_id, external_id) DO NOTHING —
+//      catches republishes of the same feed-item id within the same source.
+//
+// The title-window default mirrors the spirit of SPEC §7.2 step 2's
+// 7-day semantic-dedup window but is much tighter; cross-source title
+// collision after 48h is dominated by templates, not re-syndication.
 
-import { inArray, or } from 'drizzle-orm';
+import { and, gte, inArray, or, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
 
 import { rawItems } from '../db/schema.js';
 import type { Db } from '../db/client.js';
 import { titleHash, urlHash } from './dedup.js';
 import type { RawItemInput } from './types.js';
+
+export const TITLE_DEDUP_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 export interface WriteResult {
   fetched: number;
@@ -78,10 +88,13 @@ export async function writeRawItems(
 
   const urlHashes = prepared.map((r) => r.urlHash);
   const titleHashes = prepared.map((r) => r.titleHash);
+  const titleWindowCutoff = new Date(Date.now() - TITLE_DEDUP_WINDOW_MS);
 
-  // `sql\`... ANY(${arr}::text[])\`` binds postgres.js a record, not an array,
-  // so the cast fails ("cannot cast type record to text[]"). Use the typed
-  // inArray operator instead — drizzle expands it to a parameterised IN list.
+  // url_hash matches any age (same canonical URL is always a dup).
+  // title_hash matches only against rows in the recent window — anything
+  // older is treated as coincidental template reuse rather than
+  // syndication. `sql\`... ANY(${arr}::text[])\`` binds as a record under
+  // postgres.js v3, so use drizzle's typed inArray instead.
   const existing = await db
     .select({
       urlHash: rawItems.urlHash,
@@ -89,7 +102,13 @@ export async function writeRawItems(
     })
     .from(rawItems)
     .where(
-      or(inArray(rawItems.urlHash, urlHashes), inArray(rawItems.titleHash, titleHashes)),
+      or(
+        inArray(rawItems.urlHash, urlHashes),
+        and(
+          inArray(rawItems.titleHash, titleHashes),
+          gte(rawItems.publishedAt, sql`${titleWindowCutoff}`),
+        ),
+      ),
     );
   const existingUrlHashes = new Set<string>();
   const existingTitleHashes = new Set<string>();

@@ -15,17 +15,27 @@ import { computeCostUsd } from '../cost/pricing.js';
 
 const EMBED_MODEL = 'text-embedding-3-small';
 const EMBED_URL = 'https://api.openai.com/v1/embeddings';
+// Embedding calls are short — 1-2s typical for a batch of 100 inputs.
+// 30s tracks the generic HTTP_TIMEOUT_MS in env.
+const DEFAULT_EMBED_TIMEOUT_MS = 30_000;
 
 export interface EmbedOptions {
   /**
    * One or more strings to embed. OpenAI's API accepts up to 2048 inputs per
    * call and ~8192 tokens per input. Caller is responsible for chunking
    * larger payloads.
+   *
+   * Empty strings are filtered out before the API call — OpenAI returns 400
+   * for empty inputs, and embedding an empty string is never the intent.
+   * If filtering leaves zero inputs, we short-circuit with empty vectors.
    */
   inputs: string[];
   /** Override fetch — primarily for tests. */
   fetchFn?: typeof fetch;
+  /** External abort signal; raced with the default timeout. */
   signal?: AbortSignal;
+  /** Override the default 30s timeout (ms). */
+  timeoutMs?: number;
 }
 
 export interface EmbedResult {
@@ -51,27 +61,42 @@ interface OpenAiEmbeddingResponse {
  * successful call.
  */
 export async function embed(opts: EmbedOptions): Promise<EmbedResult> {
-  if (opts.inputs.length === 0) {
+  // Filter empty strings up-front; OpenAI 400s on `""`, and embedding empty
+  // input is never the intent. If everything was empty, short-circuit.
+  const filteredInputs = opts.inputs.filter((s) => s.length > 0);
+  if (filteredInputs.length === 0) {
     return { vectors: [], inputTokens: 0, usd: 0 };
   }
 
   const apiKey = env.openaiApiKey();
   const doFetch = opts.fetchFn ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_EMBED_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  if (opts.signal) {
+    if (opts.signal.aborted) controller.abort();
+    else opts.signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
 
-  const res = await doFetch(EMBED_URL, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ model: EMBED_MODEL, input: opts.inputs }),
-    signal: opts.signal,
-  });
+  let res: Response;
+  try {
+    res = await doFetch(EMBED_URL, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ model: EMBED_MODEL, input: filteredInputs }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '<no body>');
     throw new Error(
-      `OpenAI embeddings call failed: HTTP ${res.status} n=${opts.inputs.length} body=${detail.slice(0, 500)}`,
+      `OpenAI embeddings call failed: HTTP ${res.status} n=${filteredInputs.length} body=${detail.slice(0, 500)}`,
     );
   }
 

@@ -61,6 +61,70 @@ describe('embed', () => {
     await expect(embed({ inputs: ['x'], fetchFn: fakeFetch })).rejects.toThrow(/HTTP 429/);
   });
 
+  it('filters out empty-string inputs before calling the API', async () => {
+    let capturedBody: { input?: string[] } = {};
+    let called = false;
+    const fakeFetch = (async (
+      _url: string | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      called = true;
+      capturedBody = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          data: [{ embedding: fakeVec(1), index: 0 }],
+          usage: { prompt_tokens: 5, total_tokens: 5 },
+          model: 'text-embedding-3-small',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await embed({ inputs: ['', 'real', ''], fetchFn: fakeFetch });
+    expect(called).toBe(true);
+    expect(capturedBody.input).toEqual(['real']);
+    expect(result.vectors).toHaveLength(1);
+  });
+
+  it('short-circuits when ALL inputs are empty strings', async () => {
+    let called = false;
+    const fakeFetch = (async () => {
+      called = true;
+      return new Response('');
+    }) as unknown as typeof fetch;
+
+    const result = await embed({ inputs: ['', '', ''], fetchFn: fakeFetch });
+    expect(called).toBe(false);
+    expect(result).toEqual({ vectors: [], inputTokens: 0, usd: 0 });
+  });
+
+  it('propagates an already-aborted external signal', async () => {
+    const fakeFetch = (async (
+      _url: string | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      if (init?.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      return new Response('', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(
+      embed({ inputs: ['hi'], fetchFn: fakeFetch, signal: ctrl.signal }),
+    ).rejects.toThrow();
+  });
+
+  it('rejects when fetch itself rejects (network failure)', async () => {
+    const fakeFetch = (async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    await expect(embed({ inputs: ['hi'], fetchFn: fakeFetch })).rejects.toThrow(
+      /fetch failed/,
+    );
+  });
+
   it('posts to the OpenAI embeddings endpoint with bearer auth', async () => {
     let capturedUrl: string | URL = '';
     let capturedHeaders: Record<string, string> = {};

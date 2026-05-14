@@ -30,15 +30,30 @@ export const PRICING: Record<string, ModelPricing> = {
   'gemini-2.5-flash-lite': { inputUsdPerToken: 0.1 / M, outputUsdPerToken: 0.4 / M },
 };
 
-/** Look up pricing for a model. Throws if the model is not in the table. */
+/**
+ * Pessimistic fallback for unknown models. Sonnet rates — the most
+ * expensive entry we currently bill. The rationale is documented in
+ * `pricingFor`: a hard cost ceiling MUST count every call. Throwing on
+ * unknown models would let an unbilled call sneak past the ceiling, which
+ * is the exact failure mode SPEC §12 is designed to prevent.
+ */
+const PESSIMISTIC_FALLBACK: ModelPricing = PRICING['claude-sonnet-4.5']!;
+
+/**
+ * Look up pricing for a model. If the model isn't in the table — e.g.
+ * LiteLLM resolved an alias to an unexpected variant, or a new model name
+ * appeared in production before the table was updated — log a warning and
+ * return the pessimistic fallback (currently Sonnet rates). Bill against
+ * the ceiling rather than silently skipping the row.
+ */
 export function pricingFor(model: string): ModelPricing {
   const p = PRICING[model];
-  if (!p) {
-    throw new Error(
-      `No pricing entry for model "${model}". Add it to src/cost/pricing.ts before billing.`,
-    );
-  }
-  return p;
+  if (p) return p;
+  console.warn(
+    `[pricing] No entry for model "${model}" — billing at pessimistic ` +
+      `fallback (claude-sonnet-4.5 rates). Add the entry to src/cost/pricing.ts.`,
+  );
+  return PESSIMISTIC_FALLBACK;
 }
 
 /**

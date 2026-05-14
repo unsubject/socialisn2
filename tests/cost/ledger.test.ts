@@ -110,4 +110,39 @@ describe.skipIf(!DATABASE_URL)('cost ledger', () => {
   it('dailyTotalUsd returns 0 on an empty ledger', async () => {
     expect(await dailyTotalUsd(db)).toBe(0);
   });
+
+  // Regression test for the PG16 3-arg date_trunc fix. With the buggy 2-arg
+  // form `date_trunc('day', NOW() AT TIME ZONE 'UTC')`, comparing against a
+  // timestamptz column uses the SESSION TZ for the implicit cast — so a
+  // session in America/New_York would shift the day boundary by the offset
+  // (4-5 h) and miscount rows near UTC midnight. We force the session into
+  // ET, then insert a row at a UTC instant that is on a different ET day,
+  // and confirm dailyTotalUsd still uses the UTC boundary.
+  it('dailyTotalUsd uses UTC boundary regardless of session TZ', async () => {
+    // The ET session would, under the buggy query, treat
+    // "today" as today-ET, anchored at midnight ET = 04:00 UTC (EST) /
+    // 05:00 UTC (EDT). A row inserted at e.g. 02:00 UTC of today-UTC would
+    // be ~22:00 ET of yesterday-ET and would NOT be counted by the buggy
+    // form. The correct UTC-anchored query MUST count it.
+    await client.unsafe(`SET TIME ZONE 'America/New_York'`);
+
+    // Anchor an "early-morning UTC" instant inside today-UTC. We compute it
+    // as `(today-UTC at 00:30 UTC)` so it's always inside today-UTC but
+    // typically inside yesterday-ET, which is the failure mode we want to
+    // catch.
+    await client.unsafe(`
+      INSERT INTO cost_ledger
+        (id, occurred_at, model, input_tokens, output_tokens, usd)
+      VALUES
+        (gen_random_uuid(),
+         date_trunc('day', NOW(), 'UTC') + INTERVAL '30 minutes',
+         'claude-sonnet-4.5', 1000, 500, 0.0105)
+    `);
+
+    const total = await dailyTotalUsd(db);
+    expect(total).toBeCloseTo(0.0105, 6);
+
+    // Restore the default for any subsequent test running on this connection.
+    await client.unsafe(`RESET TIME ZONE`);
+  });
 });

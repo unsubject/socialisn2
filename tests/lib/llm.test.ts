@@ -95,6 +95,113 @@ describe('llmCall', () => {
     });
   });
 
+  it('throws on empty completion content (null or "")', async () => {
+    const fakeNull = stubFetch({
+      choices: [{ message: { content: null } }],
+      usage: { prompt_tokens: 5, completion_tokens: 0 },
+      model: 'claude-sonnet-4.5',
+    });
+    await expect(
+      llmCall({
+        model: 'claude-sonnet-4.5',
+        messages: [{ role: 'user', content: 'hi' }],
+        fetchFn: fakeNull,
+      }),
+    ).rejects.toThrow(/empty completion/);
+
+    const fakeEmpty = stubFetch({
+      choices: [{ message: { content: '' } }],
+      usage: { prompt_tokens: 5, completion_tokens: 0 },
+      model: 'claude-sonnet-4.5',
+    });
+    await expect(
+      llmCall({
+        model: 'claude-sonnet-4.5',
+        messages: [{ role: 'user', content: 'hi' }],
+        fetchFn: fakeEmpty,
+      }),
+    ).rejects.toThrow(/empty completion/);
+  });
+
+  it('uses LiteLLM-resolved model for cost calculation, not requested', async () => {
+    // Requested gemini-flash-lite, served as Sonnet (alias mismatch). We
+    // should bill against the model actually served.
+    const fakeFetch = stubFetch({
+      choices: [{ message: { content: 'ok' } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+      model: 'claude-sonnet-4.5',
+    });
+    const result = await llmCall({
+      model: 'gemini-2.5-flash-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      fetchFn: fakeFetch,
+    });
+    // Sonnet rates: 1000*3/1M + 500*15/1M = 0.0105 (not gemini's 0.0003)
+    expect(result.usd).toBeCloseTo(0.0105, 9);
+    expect(result.model).toBe('claude-sonnet-4.5');
+  });
+
+  it('propagates an already-aborted external signal', async () => {
+    const fakeFetch = (async (
+      _url: string | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      if (init?.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      return new Response('', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(
+      llmCall({
+        model: 'claude-sonnet-4.5',
+        messages: [{ role: 'user', content: 'hi' }],
+        fetchFn: fakeFetch,
+        signal: ctrl.signal,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('rejects when fetch itself rejects (network failure)', async () => {
+    const fakeFetch = (async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    await expect(
+      llmCall({
+        model: 'claude-sonnet-4.5',
+        messages: [{ role: 'user', content: 'hi' }],
+        fetchFn: fakeFetch,
+      }),
+    ).rejects.toThrow(/fetch failed/);
+  });
+
+  it('applies temperature=0.2 and max_tokens=1024 defaults when not specified', async () => {
+    let capturedBody: { temperature?: number; max_tokens?: number } = {};
+    const fakeFetch = (async (
+      _url: string | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      capturedBody = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: 'ok' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    await llmCall({
+      model: 'claude-sonnet-4.5',
+      messages: [{ role: 'user', content: 'hi' }],
+      fetchFn: fakeFetch,
+    });
+    expect(capturedBody.temperature).toBe(0.2);
+    expect(capturedBody.max_tokens).toBe(1024);
+  });
+
   it('normalises trailing slash in base URL', async () => {
     process.env.LITELLM_BASE_URL = 'https://litellm.test.example///';
     let capturedUrl: string | URL = '';

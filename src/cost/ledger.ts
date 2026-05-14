@@ -62,14 +62,24 @@ export async function recordCost(db: Db, entry: CostEntry): Promise<number> {
  *      a stable rolling 24-hour view. Anchoring to ET would create two
  *      anomalous days each year (DST), which complicates alerting.
  *
- * If the operator's preference shifts to ET-aligned reporting, this is a
- * one-line change at `occurred_at::date AT TIME ZONE 'America/New_York'`.
+ * We use PG16's 3-arg `date_trunc(field, source, tz)`, which takes a
+ * timestamptz and returns a timestamptz anchored at the start of `tz`-day.
+ * The 2-arg `date_trunc('day', NOW() AT TIME ZONE 'UTC')` would return a
+ * plain `timestamp` (tz stripped); comparing that to a `timestamptz` column
+ * triggers an implicit cast using the SESSION's `TimeZone` GUC, NOT UTC —
+ * which would silently shift the boundary on any host where the session TZ
+ * isn't `Etc/UTC` (Hostinger VPS containers default to host TZ). This bug
+ * was not catchable by the original test because the forged "yesterday"
+ * row was 24 h before now under any boundary calculation.
+ *
+ * If the operator's preference shifts to ET-aligned reporting, change the
+ * third argument to `'America/New_York'`.
  */
 export async function dailyTotalUsd(db: Db): Promise<number> {
   const rows = await db.execute<{ total: string | null }>(
     sql`SELECT COALESCE(SUM(usd), 0)::text AS total
         FROM cost_ledger
-        WHERE occurred_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')`,
+        WHERE occurred_at >= date_trunc('day', NOW(), 'UTC')`,
   );
   const total = rows[0]?.total ?? '0';
   return Number(total);

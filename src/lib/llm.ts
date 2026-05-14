@@ -16,6 +16,11 @@ import process from 'node:process';
 import { env } from '../config/env.js';
 import { computeCostUsd } from '../cost/pricing.js';
 
+// LLM completions are slower than ingestion fetches — Sonnet at 1024 tokens
+// can take 30-60s tail-latency. We deliberately use a higher default than
+// the generic HTTP_TIMEOUT_MS used elsewhere.
+const DEFAULT_LLM_TIMEOUT_MS = 120_000;
+
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -30,8 +35,14 @@ export interface LlmCallOptions {
   maxTokens?: number;
   /** Override fetch — primarily for tests. Defaults to global `fetch`. */
   fetchFn?: typeof fetch;
-  /** Override abort signal — primarily for tests / per-call timeouts. */
+  /**
+   * External abort signal. If provided, it AND the default timeout race —
+   * whichever fires first aborts the request. Tests typically pass a
+   * pre-aborted signal to bypass the timeout entirely.
+   */
   signal?: AbortSignal;
+  /** Override the default 120s timeout (ms). */
+  timeoutMs?: number;
 }
 
 export interface LlmCallResult {
@@ -69,15 +80,30 @@ export async function llmCall(opts: LlmCallOptions): Promise<LlmCallResult> {
   };
 
   const doFetch = opts.fetchFn ?? fetch;
-  const res = await doFetch(url, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: opts.signal,
-  });
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  // Race the caller's signal with our timeout: if the caller aborts, we
+  // forward that to our controller and stop the timer.
+  if (opts.signal) {
+    if (opts.signal.aborted) controller.abort();
+    else opts.signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+
+  let res: Response;
+  try {
+    res = await doFetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '<no body>');
@@ -87,11 +113,23 @@ export async function llmCall(opts: LlmCallOptions): Promise<LlmCallResult> {
   }
 
   const json = (await res.json()) as OpenAiChatResponse;
-  const text = json.choices[0]?.message.content ?? '';
+  const rawContent = json.choices[0]?.message.content;
+  if (rawContent === null || rawContent === undefined || rawContent === '') {
+    // Anthropic occasionally returns null content on tool-use / refusal paths
+    // through the OpenAI-compat shim. Silently returning '' would propagate a
+    // zero-vector embedding or a JSON-parse error far from this site. Fail the
+    // stage instead, per SPEC §12: caller marks `runs.status = 'failed'`.
+    throw new Error(
+      `LLM returned empty completion for model=${opts.model} — possible tool-use/refusal`,
+    );
+  }
+  const text = rawContent;
   const inputTokens = json.usage?.prompt_tokens ?? 0;
   const outputTokens = json.usage?.completion_tokens ?? 0;
   const resolvedModel = json.model ?? opts.model;
-  const usd = computeCostUsd(opts.model, inputTokens, outputTokens);
+  // Price against the model LiteLLM actually served — alias resolution may
+  // route a logical name to a different physical variant.
+  const usd = computeCostUsd(resolvedModel, inputTokens, outputTokens);
 
   if (process.env.SOCIALISN2_LLM_DEBUG === '1') {
     console.log(

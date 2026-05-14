@@ -11,8 +11,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "d1:apply:local": "wrangler d1 execute socialisn2-inbox --local --file=migrations/0001_inbox.sql",
-    "d1:apply:remote": "wrangler d1 execute socialisn2-inbox --remote --file=migrations/0001_inbox.sql"
+    "d1:apply:remote": "bash ../scripts/apply-d1-migrations.sh"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240924.0",

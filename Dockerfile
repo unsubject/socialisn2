@@ -19,5 +19,10 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev --no-audit --no-fund; fi
 COPY --from=build /app/dist ./dist
+# Runtime configuration: prompt templates and other static files that Node
+# code reads at startup (e.g. src/scoring/normalize.ts loads
+# config/prompts/normalize.txt). The path is resolved relative to the
+# compiled module (import.meta.url), so the directory layout matches dev.
+COPY config ./config
 EXPOSE 3000
 CMD ["node", "dist/index.js"]

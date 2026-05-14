@@ -127,6 +127,25 @@ describe('parseAndValidate', () => {
     expect(result.domains).toEqual(['economy', 'geopolitics']);
     expect(result.primaryDomain).toBe('geopolitics');
   });
+
+  it('dedupes repeated domains', () => {
+    const json = JSON.stringify({
+      ...JSON.parse(asLlmJson(VALID_RESPONSE)),
+      domains: ['economy', 'economy', 'geopolitics'],
+      primary_domain: 'economy',
+    });
+    expect(parseAndValidate(json).domains).toEqual(['economy', 'geopolitics']);
+  });
+
+  it('strips ```json5 fences without leaving "5" glued to the body', () => {
+    const wrapped = '```json5\n' + asLlmJson(VALID_RESPONSE) + '\n```';
+    expect(parseAndValidate(wrapped)).toEqual(VALID_RESPONSE);
+  });
+
+  it('strips uppercase ```JSON fences', () => {
+    const wrapped = '```JSON\n' + asLlmJson(VALID_RESPONSE) + '\n```';
+    expect(parseAndValidate(wrapped)).toEqual(VALID_RESPONSE);
+  });
 });
 
 describe('normalizeItem', () => {
@@ -154,6 +173,55 @@ describe('normalizeItem', () => {
         { fetchFn: fakeFetch },
       ),
     ).rejects.toThrow(/valid JSON/);
+  });
+
+  it('propagates temperature=0.1 and max_tokens=800 to llmCall', async () => {
+    let capturedBody: { temperature?: number; max_tokens?: number } = {};
+    const fakeFetch = (async (
+      _url: string | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      capturedBody = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: asLlmJson(VALID_RESPONSE) } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    await normalizeItem(
+      { title: 't', content: 'c', language: 'en' },
+      { fetchFn: fakeFetch },
+    );
+    expect(capturedBody.temperature).toBe(0.1);
+    expect(capturedBody.max_tokens).toBe(800);
+  });
+
+  it('threads non-English source language through to the user payload', async () => {
+    let capturedBody: { messages?: Array<{ role: string; content: string }> } = {};
+    const fakeFetch = (async (
+      _url: string | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      capturedBody = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: asLlmJson(VALID_RESPONSE) } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    await normalizeItem(
+      { title: '美聯儲維持利率不變', content: '香港股市午後...', language: 'zh-Hant' },
+      { fetchFn: fakeFetch },
+    );
+    const userMsg = capturedBody.messages?.find((m) => m.role === 'user');
+    expect(userMsg?.content).toContain('"language": "zh-Hant"');
+    expect(userMsg?.content).toContain('美聯儲維持利率不變');
   });
 
   it('passes language=null through as "unknown" in the user payload', async () => {

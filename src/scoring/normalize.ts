@@ -16,11 +16,19 @@
 // record the cost in `cost_ledger` with the appropriate run_id / stage.
 
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { type LlmCallResult, llmCall } from '../lib/llm.js';
 
-const PROMPT_PATH = resolve(process.cwd(), 'config/prompts/normalize.txt');
+// Resolve the prompt path relative to THIS module rather than process.cwd()
+// — a BullMQ worker started under systemd, a docker WORKDIR other than
+// repo root, or a future bundler all change cwd in ways the operator can't
+// always predict. import.meta.url anchors to the compiled .js file's
+// location, and the Dockerfile copies both `dist/` and `config/` into the
+// runtime image so the relative path resolves the same in dev and prod.
+const PROMPT_PATH = fileURLToPath(
+  new URL('../../config/prompts/normalize.txt', import.meta.url),
+);
 // Loaded once at module init — the prompt is config, edited rarely. A
 // long-running worker will pick up edits on restart only, which is the
 // behaviour we want (no surprise prompt drift mid-shift).
@@ -133,7 +141,12 @@ export function parseAndValidate(rawText: string): NormalizedItem {
   const primaryDomainRaw = requireString(json, 'primary_domain');
   const keywords = requireStringArray(json, 'keywords');
 
-  const domains = domainsRaw.map((d) => validateDomain(d, 'domains'));
+  // Dedupe the domains list — models occasionally repeat the primary in
+  // the multi-label set ("economy" + primary "economy"), which would
+  // pollute downstream array-overlap (`&&`) queries and the GIN index.
+  const domains = Array.from(
+    new Set(domainsRaw.map((d) => validateDomain(d, 'domains'))),
+  );
   const primaryDomain = validateDomain(primaryDomainRaw, 'primary_domain');
 
   if (!domains.includes(primaryDomain)) {
@@ -155,8 +168,10 @@ export function parseAndValidate(rawText: string): NormalizedItem {
 }
 
 function stripCodeFences(s: string): string {
-  // Handle ```json\n...\n``` and ```\n...\n``` wrappers.
-  return s.replace(/^\s*```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+  // Handle ```json / ```JSON / ```json5 / ```yaml / bare ``` openers.
+  // Tag can be any [a-z0-9] sequence; optional trailing newline. Some
+  // models emit `\`\`\`json5\n` and we don't want `5` glued to the body.
+  return s.replace(/^\s*```[a-z0-9]*\s*\n?/i, '').replace(/```\s*$/, '');
 }
 
 function isObject(x: unknown): x is Record<string, unknown> {

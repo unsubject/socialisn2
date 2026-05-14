@@ -105,7 +105,7 @@ jobs:
             exit 1
           fi
 
-      - name: Verify the row exists
+      - name: Verify the row exists AND points to the requested slug
         env:
           CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -127,6 +127,23 @@ jobs:
             -H "Content-Type: application/json" \
             --data "$PAYLOAD" \
             "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query")
+
+          # ON CONFLICT DO NOTHING preserves the existing row when
+          # (match_field, match_value) already maps to a different slug.
+          # Check the slug actually matches what the operator asked for —
+          # otherwise the green run would hide that subsequent email keeps
+          # routing to the old slug.
+          existing_slug=$(echo "$response" | jq -r '.result[0].results[0].slug // empty')
+
+          if [ -z "$existing_slug" ]; then
+            echo "::error::Verification SELECT returned no row. The INSERT silently failed (D1 unreachable, schema drift, or other). Re-run inspect-d1 to inspect state."
+            exit 1
+          fi
+
+          if [ "$existing_slug" != "$SLUG" ]; then
+            echo "::error::A mapping for (${MATCH_FIELD}=${MATCH_VALUE}) already exists pointing to slug '${existing_slug}', not '${SLUG}'. ON CONFLICT DO NOTHING kept the prior mapping. Repoint requires deleting the existing row first (run wrangler locally) — this workflow intentionally doesn't expose DELETE."
+            exit 1
+          fi
 
           {
             echo "## register-sender-map complete"

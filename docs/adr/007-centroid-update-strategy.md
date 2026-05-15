@@ -28,14 +28,16 @@ story shows up as multiple weak candidates to Simon).
 
 ## Decision
 
-**Online updates use the running mean** via a single SQL UPDATE with
-pgvector arithmetic. **No periodic re-centroiding in v1.**
+**Online updates use the running mean**, computed in JS inside a
+`SELECT … FOR UPDATE` transaction. **No periodic re-centroiding in v1.**
 
 Compaction (SPEC §7.4 step 4) merges clusters whose centroids drift close
-to each other within the same domain, but it does NOT recompute centroids
-from members either. The merge produces an item-count-weighted mean of the
-two existing centroids — mathematically the running mean of all members,
-assuming both were built that way.
+to each other within the same domain. The merge produces an
+item-count-weighted mean of the two existing centroids, computed the same
+way (read both, compute in JS inside a transaction with both rows locked,
+write back). Compaction does NOT recompute centroids from member items —
+the weighted mean preserves the running-mean invariant assuming both
+inputs were built that way.
 
 ## Rationale
 
@@ -58,33 +60,64 @@ assuming both were built that way.
    story, falling Stage 4 cluster quality, and Simon picking less. All
    three are observable from the `candidates` and `feedback` tables.
 
-**Why the running mean is implemented in SQL, not application code:**
+**Why the math is done in JS, not in SQL:**
 
-- **Atomicity.** A single UPDATE is row-atomic — no SELECT/UPDATE race, no
-  need for `SELECT FOR UPDATE` or an explicit transaction. Phase 5 may run
-  multiple scoring workers; the SQL approach is forward-compatible without
-  rework.
-- **One round-trip per join.** No 1536-dim float array crossed over the
-  wire per item. The current Phase 2 single-worker case doesn't care, but
-  the read-modify-write alternative becomes expensive once the pipeline
-  scales.
-- **Compaction shape generalises.** The same operator pattern
-  `(a * n_a + b * n_b) / (n_a + n_b)` is reused in the compaction merge —
-  one mental model, one set of guarantees.
+pgvector defines only vector-vector arithmetic — `vector + vector`,
+`vector - vector`, and (since 0.5.0) element-wise `vector * vector`.
+It does **not** define `vector * float` or `vector / float` at any
+version through current. The seemingly natural SQL form
+`(centroid * n + new) / (n + 1)` does not compile against pgvector;
+PostgreSQL responds with `operator does not exist: vector * double
+precision`.
 
-pgvector ≥0.5.0 exposes `vector * float`, `vector + vector`, and
-`vector / float` as native operators. The repo's schema uses HNSW
-indices on `clusters.centroid` and `items.embedding`, which require
-pgvector ≥0.5.0, so the dependency is already in place.
+The two viable workarounds in SQL — (a) fan a scalar into a same-shape
+vector via `array_fill(s, ARRAY[1536])::vector(1536)` and use
+element-wise `*` for the multiplications + a pre-computed reciprocal for
+the divisions, or (b) restructure to `AVG(embedding)` over the items
+table (pgvector ≥0.7) — both have meaningful drawbacks:
+
+- (a) is verbose and has a subtle `real` vs `float` precision boundary at
+  the `array_fill` cast that's easy to get wrong.
+- (b) requires the item to be inserted into `items` before the cluster
+  centroid update, which couples this module to the caller's insertion
+  order and inverts the natural pipeline ("normalise → cluster → write
+  item" becomes "normalise → write item → cluster").
+
+JS-side read-modify-write inside a `SELECT … FOR UPDATE` transaction is
+the simpler shape:
+
+- **Atomicity.** The row lock acquired by `FOR UPDATE` holds for the
+  duration of the transaction, closing the SELECT/compute/UPDATE race.
+- **Code reuse.** The same shape applies to compaction merges, which
+  also need to fetch both centroids to compute the weighted mean —
+  pgvector can't do the merge in pure SQL either, so we'd need this
+  path regardless.
+- **Cost.** One extra round-trip per join (1536 floats ≈ 6 KB on the
+  wire). Embedding API latency dominates the pipeline at hundreds of
+  milliseconds; the centroid round-trip is in the noise.
+
+pgvector ≥0.5.0 (the version implied by the schema's HNSW index usage)
+remains the floor; nothing in this PR pushes that requirement higher.
 
 ## Consequences
 
 - `src/scoring/cluster.ts` exposes `assignCluster(db, input, opts)` that
-  performs find-or-create with the running-mean update in one UPDATE.
+  performs find-or-create. The match path opens a transaction, locks the
+  matched cluster row with `FOR UPDATE`, computes the new centroid in JS
+  via `(centroid * n + new_vec) / (n + 1)`, and writes it back.
 - The same module exposes `compactClusters(db, opts)` for the daily
-  compaction job (SPEC §7.4 step 4). Compaction does NOT recentroid; it
-  produces a weighted-mean merge that preserves the running-mean
-  invariant.
+  compaction job (SPEC §7.4 step 4). Each merge opens a transaction,
+  locks both cluster rows (in stable id order to avoid deadlocks),
+  computes the item-count-weighted mean in JS, then UPDATEs target +
+  items + source. Compaction does NOT recentroid from members; the
+  weighted mean preserves the running-mean invariant.
+- Compaction consumes BOTH sides of each merge for the remainder of the
+  pass. A target whose centroid has just moved must not be re-merged
+  using a precomputed distance — chained merges across three or more
+  clusters are deferred to subsequent daily passes, which is acceptable
+  at the daily cadence. The worst case is a "true triangle" of three
+  same-story clusters taking ~3 days to fully collapse, never producing
+  a wrong merge.
 - The compaction job runs daily at 03:00 ET per SPEC §7.4. The cron
   schedule is wired in Phase 4 PR 4 (run orchestration); this PR ships
   only the function and a manual entry point at

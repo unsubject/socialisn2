@@ -539,6 +539,73 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
       expect(result.merges).toBe(0);
     });
 
+    it('does NOT over-merge an A-B-C chain when the kept centroid moves past the threshold', async () => {
+      // Construct three clusters so the precomputed candidate query sees
+      // both (A,B) and (A,C) as candidates BUT after merging B into A the
+      // updated A centroid is > 0.15 from C. If the loop only consumes
+      // the source, it would still apply the stale (A,C) candidate and
+      // over-merge. Correct behaviour: exactly one merge (B → A); C
+      // remains active, deferred to the next compaction pass.
+      const vChainA = mkVec([1]);
+      // d(A, vChainB) ≈ 0.13 — tightest candidate
+      const vChainB = mkVec([0.87, Math.sqrt(1 - 0.87 * 0.87)]);
+      // d(A, vChainC) ≈ 0.14 — below threshold pre-merge, but after the
+      // A+B merge the centroid moves into dim-1 territory and the new
+      // distance to vChainC (which lives in dim 2) opens past 0.15.
+      const vChainC = mkVec([0.86, 0, Math.sqrt(1 - 0.86 * 0.86)]);
+
+      // Equal item_count + same first_seen_at: target is whichever side
+      // is c1 in the candidate query (c1.id < c2.id). Insert in A→B→C
+      // order so UUIDv7 monotonicity guarantees A.id < B.id < C.id.
+      const cA = await insertCluster({
+        embedding: vChainA,
+        primaryDomain: 'economy',
+        itemCount: 3,
+      });
+      const cB = await insertCluster({
+        embedding: vChainB,
+        primaryDomain: 'economy',
+        itemCount: 3,
+      });
+      const cC = await insertCluster({
+        embedding: vChainC,
+        primaryDomain: 'economy',
+        itemCount: 3,
+      });
+      // Single shared entity across all three so the EXISTS clause
+      // includes both (A,B) and (A,C) candidate rows.
+      await insertItem({
+        clusterId: cA,
+        embedding: vChainA,
+        primaryDomain: 'economy',
+        entities: ['X'],
+      });
+      await insertItem({
+        clusterId: cB,
+        embedding: vChainB,
+        primaryDomain: 'economy',
+        entities: ['X'],
+      });
+      await insertItem({
+        clusterId: cC,
+        embedding: vChainC,
+        primaryDomain: 'economy',
+        entities: ['X'],
+      });
+
+      const result = await compactClusters(db);
+
+      expect(result.merges).toBe(1);
+      expect(result.pairs[0]).toMatchObject({ source: cB, target: cA });
+
+      // C must remain active — the precomputed (A,C) candidate is now
+      // stale (A's centroid moved past the 0.15 threshold) and must not
+      // be applied.
+      const cCAfter = await getCluster(cC);
+      expect(cCAfter.status).toBe('active');
+      expect(cCAfter.merged_into).toBeNull();
+    });
+
     it('orthogonal pair is never merged regardless of entity overlap', async () => {
       const cA = await insertCluster({ embedding: vA, primaryDomain: 'economy', itemCount: 3 });
       const cO = await insertCluster({ embedding: vOrth, primaryDomain: 'economy', itemCount: 3 });

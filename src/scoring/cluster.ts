@@ -5,19 +5,24 @@
 // - `assignCluster(db, input, opts)` — for each normalised item, find the
 //   nearest active cluster in the same `primary_domain` within a 7-day
 //   window and either join it (running-mean centroid update) or create a
-//   new cluster. Single SQL UPDATE per join — atomic at the row level.
+//   new cluster. The running-mean update is read-modify-write inside a
+//   `SELECT … FOR UPDATE` transaction (see ADR-007 for why JS-side, not
+//   SQL — pgvector does not define `vector * float` or `vector / float`,
+//   only element-wise vector-vector ops).
 //
 // - `compactClusters(db, opts)` — daily compaction (SPEC §7.4 step 4):
 //   merge active clusters in the same domain whose centroids drifted
 //   close (cosine distance < 0.15) AND whose member items share at least
 //   one entity. The shared-entity guard is the safety net against false
 //   merges (two distinct stories that happen to have similar centroids).
+//   Each merge consumes BOTH sides for the pass — a target whose centroid
+//   has moved must not be re-merged using a stale precomputed distance.
 //
 // Both functions take an optional `threshold` so Phase 3 PR 3 can wire in
 // the per-domain values from SPEC §8's table via `config/domains.ts`
 // without editing this module.
 //
-// See ADR-007 for the running-mean rationale.
+// See ADR-007 for the centroid-update rationale.
 
 import { type SQL, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
@@ -60,9 +65,9 @@ export interface AssignClusterResult {
 
 /**
  * Find-or-create a cluster for the given item. The running-mean centroid
- * update happens in a single SQL UPDATE using pgvector arithmetic
- * (`(centroid * n + new) / (n + 1)`), so the operation is atomic at the
- * row level without an explicit transaction. See ADR-007.
+ * update is computed in JS inside a `SELECT … FOR UPDATE` transaction —
+ * pgvector exposes only vector-vector arithmetic, not scalar ops, so the
+ * SQL form `(centroid * n + new) / (n+1)` doesn't compile. See ADR-007.
  */
 export async function assignCluster(
   db: Db,
@@ -77,41 +82,74 @@ export async function assignCluster(
 
   const threshold = opts.threshold ?? DEFAULT_JOIN_THRESHOLD;
   const recencyDays = opts.recencyDays ?? DEFAULT_RECENCY_DAYS;
-  const vec = toPgvectorLiteral(input.embedding);
+  const vecLit = toPgvectorLiteral(input.embedding);
 
   // Find the closest active cluster in the same domain within the window.
   // pgvector's `<=>` is cosine distance (1 - cosine similarity). HNSW index
   // on `clusters.centroid` makes ORDER BY ... LIMIT 1 cheap.
   const found = await db.execute<{
     id: string;
-    domains: string[];
     distance: number;
   }>(sql`
-    SELECT id, domains, (centroid <=> ${vec}::vector(${sql.raw(String(EMBEDDING_DIM))})) AS distance
+    SELECT id, (centroid <=> ${vecLit}::vector(${sql.raw(String(EMBEDDING_DIM))})) AS distance
     FROM clusters
     WHERE primary_domain = ${input.primaryDomain}
       AND status = 'active'
       AND last_seen_at > NOW() - make_interval(days => ${recencyDays})
-    ORDER BY centroid <=> ${vec}::vector(${sql.raw(String(EMBEDDING_DIM))}) ASC
+    ORDER BY centroid <=> ${vecLit}::vector(${sql.raw(String(EMBEDDING_DIM))}) ASC
     LIMIT 1
   `);
 
   const match = found[0];
   if (match && match.distance < threshold) {
-    // Merge the new item's domain labels into the cluster's existing set.
-    // Sorted+deduped so the column has a stable, comparable shape across
-    // updates (helps tests and downstream array overlap queries).
-    const mergedDomains = sortedUnique([...match.domains, ...input.itemDomains]);
+    // Re-read the matched row under a row lock, compute the new centroid
+    // in JS, and write it back — all in one tx. The lookup-then-update
+    // race window between the SELECT above and the UPDATE is closed by
+    // `FOR UPDATE`. Phase 5 multi-worker may also want a per-(domain)
+    // advisory lock around the candidate query, but Phase 2 is single-
+    // worker so this is enough.
+    await db.transaction(async (tx) => {
+      const locked = await tx.execute<{
+        centroid: string;
+        item_count: number;
+        domains: string[];
+        last_seen_at: Date;
+      }>(sql`
+        SELECT centroid::text AS centroid, item_count, domains, last_seen_at
+        FROM clusters
+        WHERE id = ${match.id}
+        FOR UPDATE
+      `);
+      const row = locked[0];
+      if (!row) {
+        // Defensive: the row was removed between the SELECT above and the
+        // FOR UPDATE here (shouldn't happen — clusters aren't deleted).
+        // Treat as no-match by re-throwing; the caller can retry.
+        throw new Error(`assignCluster: matched cluster ${match.id} disappeared under lock`);
+      }
+      const currentCentroid = parsePgvectorLiteral(row.centroid);
+      const n = row.item_count;
+      const newCentroid = currentCentroid.map(
+        (x, i) => (x * n + (input.embedding[i] ?? 0)) / (n + 1),
+      );
+      const newCentroidLit = toPgvectorLiteral(newCentroid);
+      const mergedDomains = sortedUnique([...row.domains, ...input.itemDomains]);
+      // GREATEST defends against out-of-order arrivals — a late-fetched
+      // item published before the cluster's current last_seen_at must not
+      // pull the marker backwards.
+      const newLastSeenIso = new Date(
+        Math.max(row.last_seen_at.getTime(), input.publishedAt.getTime()),
+      ).toISOString();
 
-    await db.execute(sql`
-      UPDATE clusters
-      SET centroid = (centroid * item_count::float + ${vec}::vector(${sql.raw(String(EMBEDDING_DIM))}))
-                     / ((item_count + 1)::float),
-          item_count = item_count + 1,
-          last_seen_at = GREATEST(last_seen_at, ${input.publishedAt.toISOString()}::timestamptz),
-          domains = ${textArrayLiteral(mergedDomains)}
-      WHERE id = ${match.id}
-    `);
+      await tx.execute(sql`
+        UPDATE clusters
+        SET centroid = ${newCentroidLit}::vector(${sql.raw(String(EMBEDDING_DIM))}),
+            item_count = item_count + 1,
+            last_seen_at = ${newLastSeenIso}::timestamptz,
+            domains = ${textArrayLiteral(mergedDomains)}
+        WHERE id = ${match.id}
+      `);
+    });
 
     return { clusterId: match.id, isNew: false, distance: match.distance };
   }
@@ -125,7 +163,7 @@ export async function assignCluster(
     INSERT INTO clusters (id, centroid, first_seen_at, last_seen_at, item_count, domains, primary_domain, status)
     VALUES (
       ${newId},
-      ${vec}::vector(${sql.raw(String(EMBEDDING_DIM))}),
+      ${vecLit}::vector(${sql.raw(String(EMBEDDING_DIM))}),
       ${publishedIso}::timestamptz,
       ${publishedIso}::timestamptz,
       1,
@@ -167,9 +205,19 @@ export interface CompactResult {
  *      primary_domain, both active and in the recency window, centroid
  *      distance < threshold, and at least one shared entity (via items).
  *   2. Sort candidates by distance ascending — tightest pair merged first.
- *   3. For each candidate in order, skip if either side has already been
- *      merged in this pass; otherwise merge (smaller item_count → larger,
- *      ties broken by older first_seen_at preserved as target).
+ *   3. For each candidate in order, skip if EITHER side has already been
+ *      consumed in this pass (both the source and the kept target are
+ *      marked consumed after a merge, because the kept target's centroid
+ *      has moved and the precomputed distance to any third cluster is no
+ *      longer accurate — applying it could over-merge). Chained merges
+ *      across three or more clusters are deferred to subsequent passes,
+ *      which is acceptable at the daily cadence.
+ *
+ * Per merge: open a transaction, lock both rows with `FOR UPDATE`, read
+ * the centroids back, compute the item-count-weighted mean in JS (pgvector
+ * has no scalar arithmetic — see ADR-007), then UPDATE target + items +
+ * source. One commit per merge; a crash mid-pass leaves a partial state
+ * that the next day's run will continue from cleanly.
  *
  * O(N²) within a domain in step 1. With <100 active clusters per domain in
  * any 7-day window, that's fine. Phase 5 can revisit if profiling flags it.
@@ -182,7 +230,11 @@ export async function compactClusters(
   const recencyDays = opts.recencyDays ?? DEFAULT_RECENCY_DAYS;
 
   // Pairwise candidate join + entity-overlap check, all in one query so the
-  // application code only iterates the surviving pairs.
+  // application code only iterates the surviving pairs. NB: the
+  // `items.entities && items.entities` between-column overlap can't use a
+  // GIN index (those help for `col && const_array` only); plan is nested
+  // loop, bounded by recency + domain + EXISTS short-circuit. Watch this
+  // in Phase 5 if compaction wall-time grows.
   const candidates = await db.execute<{
     id_a: string;
     id_b: string;
@@ -240,24 +292,60 @@ export async function compactClusters(
     const sourceDomains = aIsTarget ? c.d_b : c.d_a;
     const mergedDomains = sortedUnique([...targetDomains, ...sourceDomains]);
 
-    // One transaction per merge: weighted-mean centroid update (using a
-    // CTE that captures the source row before we mark it merged), then
-    // re-point items, then mark source.
+    // One transaction per merge:
+    //   1. Lock both rows in stable id order (avoids deadlock pairs even
+    //      under hypothetical concurrent compaction).
+    //   2. Read both centroids; compute weighted mean in JS.
+    //   3. UPDATE target with new centroid + book-keeping.
+    //   4. Re-point items.
+    //   5. Mark source merged.
     await db.transaction(async (tx) => {
+      const [firstId, secondId] =
+        targetId < sourceId ? [targetId, sourceId] : [sourceId, targetId];
+      const locked = await tx.execute<{
+        id: string;
+        centroid: string;
+        item_count: number;
+        first_seen_at: Date;
+        last_seen_at: Date;
+      }>(sql`
+        SELECT id, centroid::text AS centroid, item_count, first_seen_at, last_seen_at
+        FROM clusters
+        WHERE id IN (${firstId}, ${secondId})
+        ORDER BY id
+        FOR UPDATE
+      `);
+      const lockedTarget = locked.find((r) => r.id === targetId);
+      const lockedSource = locked.find((r) => r.id === sourceId);
+      if (!lockedTarget || !lockedSource) {
+        throw new Error(
+          `compactClusters: rows disappeared under lock (target=${targetId}, source=${sourceId})`,
+        );
+      }
+
+      const tVec = parsePgvectorLiteral(lockedTarget.centroid);
+      const sVec = parsePgvectorLiteral(lockedSource.centroid);
+      const nT = lockedTarget.item_count;
+      const nS = lockedSource.item_count;
+      const total = nT + nS;
+      const merged = tVec.map((x, i) => (x * nT + (sVec[i] ?? 0) * nS) / total);
+      const mergedLit = toPgvectorLiteral(merged);
+
+      const newFirstSeen = new Date(
+        Math.min(lockedTarget.first_seen_at.getTime(), lockedSource.first_seen_at.getTime()),
+      ).toISOString();
+      const newLastSeen = new Date(
+        Math.max(lockedTarget.last_seen_at.getTime(), lockedSource.last_seen_at.getTime()),
+      ).toISOString();
+
       await tx.execute(sql`
-        WITH src AS (
-          SELECT centroid, item_count, first_seen_at, last_seen_at
-          FROM clusters WHERE id = ${sourceId}
-        )
-        UPDATE clusters c
-        SET centroid = (c.centroid * c.item_count::float + src.centroid * src.item_count::float)
-                       / ((c.item_count + src.item_count)::float),
-            item_count = c.item_count + src.item_count,
-            first_seen_at = LEAST(c.first_seen_at, src.first_seen_at),
-            last_seen_at = GREATEST(c.last_seen_at, src.last_seen_at),
+        UPDATE clusters
+        SET centroid = ${mergedLit}::vector(${sql.raw(String(EMBEDDING_DIM))}),
+            item_count = ${total},
+            first_seen_at = ${newFirstSeen}::timestamptz,
+            last_seen_at = ${newLastSeen}::timestamptz,
             domains = ${textArrayLiteral(mergedDomains)}
-        FROM src
-        WHERE c.id = ${targetId}
+        WHERE id = ${targetId}
       `);
       await tx.execute(sql`
         UPDATE items SET cluster_id = ${targetId} WHERE cluster_id = ${sourceId}
@@ -269,7 +357,11 @@ export async function compactClusters(
       `);
     });
 
+    // Consume BOTH sides — the target's centroid has moved, so any later
+    // precomputed candidate distance involving it is stale and applying it
+    // could over-merge. Defer chained merges to the next compaction pass.
     consumed.add(sourceId);
+    consumed.add(targetId);
     pairs.push({ source: sourceId, target: targetId, distance: c.distance });
   }
 
@@ -288,6 +380,20 @@ export async function compactClusters(
  */
 function toPgvectorLiteral(v: number[]): string {
   return `[${v.join(',')}]`;
+}
+
+/**
+ * Parse a pgvector text literal (`[1,2,3]`) back into a number[]. We read
+ * centroids via `centroid::text` because the postgres-js + drizzle binding
+ * path returns the vector as the same `[...]` string under `::text`.
+ */
+function parsePgvectorLiteral(s: string): number[] {
+  // The literal is JSON-compatible: square brackets, comma-separated numbers.
+  const parsed = JSON.parse(s) as unknown;
+  if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === 'number')) {
+    throw new Error(`parsePgvectorLiteral: not a number array: ${s.slice(0, 80)}`);
+  }
+  return parsed as number[];
 }
 
 function sortedUnique(strs: string[]): string[] {

@@ -113,7 +113,7 @@ export async function assignCluster(
         centroid: string;
         item_count: number;
         domains: string[];
-        last_seen_at: Date;
+        last_seen_at: Date | string;
       }>(sql`
         SELECT centroid::text AS centroid, item_count, domains, last_seen_at
         FROM clusters
@@ -136,9 +136,10 @@ export async function assignCluster(
       const mergedDomains = sortedUnique([...row.domains, ...input.itemDomains]);
       // GREATEST defends against out-of-order arrivals — a late-fetched
       // item published before the cluster's current last_seen_at must not
-      // pull the marker backwards.
+      // pull the marker backwards. `new Date(...)` because drizzle's raw
+      // `execute<T>` returns timestamptz as an ISO string, not a Date.
       const newLastSeenIso = new Date(
-        Math.max(row.last_seen_at.getTime(), input.publishedAt.getTime()),
+        Math.max(new Date(row.last_seen_at).getTime(), input.publishedAt.getTime()),
       ).toISOString();
 
       await tx.execute(sql`
@@ -240,10 +241,10 @@ export async function compactClusters(
     id_b: string;
     n_a: number;
     n_b: number;
-    fs_a: Date;
-    fs_b: Date;
-    ls_a: Date;
-    ls_b: Date;
+    fs_a: Date | string;
+    fs_b: Date | string;
+    ls_a: Date | string;
+    ls_b: Date | string;
     d_a: string[];
     d_b: string[];
     distance: number;
@@ -306,8 +307,8 @@ export async function compactClusters(
         id: string;
         centroid: string;
         item_count: number;
-        first_seen_at: Date;
-        last_seen_at: Date;
+        first_seen_at: Date | string;
+        last_seen_at: Date | string;
       }>(sql`
         SELECT id, centroid::text AS centroid, item_count, first_seen_at, last_seen_at
         FROM clusters
@@ -331,11 +332,19 @@ export async function compactClusters(
       const merged = tVec.map((x, i) => (x * nT + (sVec[i] ?? 0) * nS) / total);
       const mergedLit = toPgvectorLiteral(merged);
 
+      // `new Date(...)` because drizzle's raw `execute<T>` returns
+      // timestamptz as an ISO string, not a Date.
       const newFirstSeen = new Date(
-        Math.min(lockedTarget.first_seen_at.getTime(), lockedSource.first_seen_at.getTime()),
+        Math.min(
+          new Date(lockedTarget.first_seen_at).getTime(),
+          new Date(lockedSource.first_seen_at).getTime(),
+        ),
       ).toISOString();
       const newLastSeen = new Date(
-        Math.max(lockedTarget.last_seen_at.getTime(), lockedSource.last_seen_at.getTime()),
+        Math.max(
+          new Date(lockedTarget.last_seen_at).getTime(),
+          new Date(lockedSource.last_seen_at).getTime(),
+        ),
       ).toISOString();
 
       await tx.execute(sql`

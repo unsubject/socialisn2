@@ -187,8 +187,8 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
         status: string;
         merged_into: string | null;
         centroid: string;
-        last_seen_at: Date;
-        first_seen_at: Date;
+        last_seen_at: Date | string;
+        first_seen_at: Date | string;
       }>
     >`SELECT id, item_count, domains, status, merged_into, centroid::text AS centroid,
               last_seen_at, first_seen_at
@@ -197,7 +197,14 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
     if (!row) throw new Error(`cluster ${id} not found`);
     // pgvector returns the vector as a `[a,b,c]` text literal under `::text`.
     const centroid = JSON.parse(row.centroid) as number[];
-    return { ...row, centroid };
+    // Coerce timestamps to Date — the read path returns them as ISO strings
+    // in this stack (same issue the prod code wraps with `new Date(...)`).
+    return {
+      ...row,
+      centroid,
+      last_seen_at: new Date(row.last_seen_at),
+      first_seen_at: new Date(row.first_seen_at),
+    };
   }
 
   // -------------------------------------------------------------------------

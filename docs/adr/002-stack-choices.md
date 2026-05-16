@@ -12,7 +12,7 @@ The stack needs to be runnable on one operator's Hostinger VPS alongside an exis
 
 | Layer | Choice | Why this over alternatives |
 |---|---|---|
-| Runtime | Node.js 20 + TypeScript | Mirrors `2nd-brain` — one mental model. Python adds a second toolchain on the same VPS. |
+| Runtime | Node.js 22 + TypeScript | Mirrors `2nd-brain` — one mental model. Python adds a second toolchain on the same VPS. |
 | Web framework | Fastify | Faster than Express; smaller surface than NestJS. |
 | ORM | Drizzle | Type-safe queries, raw-SQL migrations (immutable, reviewable). Prisma's migration story is heavier and the generated client adds startup cost. |
 | Database | PostgreSQL 16 + pgvector | Single store for relational + vector. Separate vector DB (Qdrant/Weaviate) is a second container, second backup target, second failure mode. |

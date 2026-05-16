@@ -17,7 +17,7 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { fetchAndParseEmailBridge } from '../../src/ingestion/email_bridge.js';
+import { fetchAndParseEmailBridge } from '../../src/ingestion/email-bridge.js';
 import { parseRssXml } from '../../src/ingestion/rss.js';
 
 function fixture(name: string): string {

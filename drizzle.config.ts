@@ -5,11 +5,21 @@
 
 import type { Config } from 'drizzle-kit';
 
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  // drizzle-kit reads this config at CLI start; an empty-string fallback
+  // would let it connect to a useless URL and surface a confusing error
+  // deep in the introspect / diff path. Fail clear, fail early.
+  throw new Error(
+    'drizzle.config.ts: DATABASE_URL must be set in the env before running drizzle-kit',
+  );
+}
+
 export default {
   schema: './src/db/schema.ts',
   out: './migrations',
   dialect: 'postgresql',
   dbCredentials: {
-    url: process.env.DATABASE_URL ?? '',
+    url: databaseUrl,
   },
 } satisfies Config;

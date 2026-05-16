@@ -9,8 +9,12 @@ See [SPEC.md](./SPEC.md) for the design contract and
 
 ## Status
 
-Phase 0 — scaffold. Empty system that builds, lints, typechecks, runs CI. No
-ingestion or scoring logic yet.
+Phases 0-2 complete. Foundation, ingestion (RSS / arXiv / YouTube / GDELT /
+Cloudflare Email Worker bridge), and the scoring core (normalise → embed →
+semantic dedup → cluster + daily compaction) are landed. Phase 3 —
+heuristic ranking + Sonnet curation + cost ceiling — is the next step. See
+[docs/phase-reports/](./docs/phase-reports) for what shipped in each phase
+and [BUILD-PHASES.md](./BUILD-PHASES.md) for the full sequence.
 
 ## Local dev
 

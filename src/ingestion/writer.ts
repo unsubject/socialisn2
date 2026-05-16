@@ -6,16 +6,17 @@
 //   2. Cross-source url_hash — always matches, any age. Same canonical URL
 //      across sources is unambiguously a re-syndication.
 //   3. Cross-source title_hash — only matches against rows in the recent
-//      window (default 48h). Catches near-simultaneous re-syndication
-//      under the same headline; doesn't reject legitimate recurring titles
-//      ("Morning Briefing", podcast episode templates, "Live Updates")
-//      whose previous edition was days/weeks ago.
+//      window (default 7d, mirroring SPEC §7.2 step 2's semantic-dedup
+//      window). Catches near-simultaneous re-syndication under the same
+//      headline; doesn't reject legitimate recurring titles ("Morning
+//      Briefing", podcast episode templates, "Live Updates") whose
+//      previous edition was weeks ago.
 //   4. INSERT with ON CONFLICT (source_id, external_id) DO NOTHING —
 //      catches republishes of the same feed-item id within the same source.
 //
-// The title-window default mirrors the spirit of SPEC §7.2 step 2's
-// 7-day semantic-dedup window but is much tighter; cross-source title
-// collision after 48h is dominated by templates, not re-syndication.
+// The title-window default tracks SPEC §7.2 step 2's 7-day semantic-dedup
+// window; cross-source title collision after 7d is dominated by templates,
+// not re-syndication.
 
 import { and, gte, inArray, or } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
@@ -25,7 +26,7 @@ import type { Db } from '../db/client.js';
 import { titleHash, urlHash } from './dedup.js';
 import type { RawItemInput } from './types.js';
 
-export const TITLE_DEDUP_WINDOW_MS = 48 * 60 * 60 * 1000;
+export const TITLE_DEDUP_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface WriteResult {
   fetched: number;

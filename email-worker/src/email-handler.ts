@@ -42,6 +42,26 @@ function collectRawHeaders(message: ForwardableEmailMessage): string {
   return JSON.stringify(out);
 }
 
+async function synthesiseMessageId(
+  subject: string | null,
+  fromAddr: string | null,
+  rawHeaders: string,
+): Promise<string> {
+  // Fallback when the inbound mail lacks a Message-Id header. Stable hash
+  // of (subject, sender, collected headers) so a redelivery of the same
+  // headers-less email collides on the (slug, message_id) PK and ON
+  // CONFLICT DO NOTHING — the previous crypto.randomUUID() form wrote a
+  // duplicate row on every redelivery. received_at is deliberately
+  // excluded since it varies per delivery and would defeat the dedup.
+  const input = `${subject ?? ''}\n${fromAddr ?? ''}\n${rawHeaders}`;
+  const buf = new TextEncoder().encode(input);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  const hex = Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  return `<synth-${hex.slice(0, 32)}@inbox.socialisn.com>`;
+}
+
 async function ingestToD1(
   env: Env,
   message: ForwardableEmailMessage,
@@ -109,9 +129,11 @@ export async function handleEmail(
   const fromAddr = message.from ?? null;
   const fromDomain = domainOf(fromAddr);
   const subject = message.headers.get('subject');
-  const messageId = message.headers.get('message-id') ?? crypto.randomUUID();
-  const receivedAt = Date.now();
   const rawHeaders = collectRawHeaders(message);
+  const messageId =
+    message.headers.get('message-id') ??
+    (await synthesiseMessageId(subject, fromAddr, rawHeaders));
+  const receivedAt = Date.now();
 
   // D1 ingestion is best-effort. A transient D1 outage, schema drift, or
   // any other write failure logs + continues so the personal-mirror forward

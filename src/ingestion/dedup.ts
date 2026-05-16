@@ -1,9 +1,10 @@
 // SPEC §7.2 step 1 — hash dedup primitives.
 //
-// canonicaliseUrl: lower-case scheme + host, strip tracking query params
-// (utm_*, fbclid, gclid, mc_cid, mc_eid, ref, ref_src), drop fragment, strip
-// trailing slash from the path. Designed to collapse "same article, different
-// link decoration" without losing legitimate query state (a `?id=42` resource
+// canonicaliseUrl: lower-case scheme + host, strip a leading `www.`, strip
+// tracking query params (utm_*, fbclid, gclid, mc_cid, mc_eid, ref, ref_src),
+// sort the remaining params alphabetically, drop fragment, strip trailing
+// slash from the path. Designed to collapse "same article, different link
+// decoration" without losing legitimate query state (a `?id=42` resource
 // identifier is preserved).
 //
 // normaliseTitle: lower-case, strip Unicode punctuation, collapse runs of
@@ -42,11 +43,20 @@ export function canonicaliseUrl(input: string): string {
   parsed.hash = '';
   parsed.protocol = parsed.protocol.toLowerCase();
   parsed.hostname = parsed.hostname.toLowerCase();
+  // Strip a leading `www.` so example.com/x and www.example.com/x share a hash.
+  // We deliberately do NOT recurse on other subdomains — m.example.com and
+  // www.example.com.uk are not assumed identical.
+  if (parsed.hostname.startsWith('www.') && parsed.hostname.length > 4) {
+    parsed.hostname = parsed.hostname.slice(4);
+  }
 
-  const params = Array.from(parsed.searchParams.entries());
+  // Strip tracking params and sort the rest alphabetically so query-order
+  // variation (e.g. `?b=2&a=1` vs `?a=1&b=2`) doesn't change the hash.
+  const sortedParams = Array.from(parsed.searchParams.entries())
+    .filter(([k]) => !isTrackingParam(k))
+    .sort(([a], [b]) => a.localeCompare(b));
   parsed.search = '';
-  for (const [k, v] of params) {
-    if (isTrackingParam(k)) continue;
+  for (const [k, v] of sortedParams) {
     parsed.searchParams.append(k, v);
   }
 

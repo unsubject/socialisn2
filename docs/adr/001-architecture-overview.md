@@ -19,7 +19,7 @@ The signal volume is large at the top and shrinks fast: ~10,000 raw items/day la
 A **cost-controlled funnel** of nine stages, each strictly cheaper than its successor's input would be if applied unfiltered:
 
 ```
-Stage 0  Raw signals          ~10,000s items/day        (free — RSS/API fetch)
+Stage 0  Raw signals          ~10,000 items/day         (free — RSS/API fetch)
 Stage 1  De-dup (URL/title)   ~5,000 unique             (free — hashing)
 Stage 2  Embed + cluster      ~5,000 → ~500 clusters    (cheap — embedding ~$0.04/day)
 Stage 3  Heuristic scoring    rank clusters             (free — authority, recency, volume)

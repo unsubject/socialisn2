@@ -1,7 +1,7 @@
-// Loads source rows for the scheduler. Only `rss` sources are fetched in
-// Phase 1 PR 1; the other kinds (arxiv, youtube_channel, email_bridge) get
-// their own adapters in subsequent PRs and the scheduler will filter them in
-// once those adapters exist.
+// Loads source rows for the scheduler. The caller (`scheduler/cron.ts`)
+// passes which `kinds` to enqueue; this function just filters by
+// `enabled = true` AND (no prior fetch OR due-for-fetch per
+// `fetch_interval_min`).
 
 import { and, eq, isNull, lte, or, sql } from 'drizzle-orm';
 

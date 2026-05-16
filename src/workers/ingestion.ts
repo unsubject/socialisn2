@@ -18,7 +18,7 @@ import {
   markCompetitorFetched,
   writeCompetitorVideos,
 } from '../ingestion/competitor-writer.js';
-import { fetchAndParseEmailBridge } from '../ingestion/email_bridge.js';
+import { fetchAndParseEmailBridge } from '../ingestion/email-bridge.js';
 import { fetchAndParseRss } from '../ingestion/rss.js';
 import { markSourceFetched } from '../ingestion/source-loader.js';
 import type { RawItemInput } from '../ingestion/types.js';

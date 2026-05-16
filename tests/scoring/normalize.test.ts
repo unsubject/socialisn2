@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   type NormalizedItem,
   VALID_DOMAINS,
+  buildEmbeddingInput,
   normalizeItem,
   parseAndValidate,
 } from '../../src/scoring/normalize.js';
@@ -115,6 +116,46 @@ describe('parseAndValidate', () => {
       keywords: [],
     });
     expect(() => parseAndValidate(json)).toThrow(/keywords length 0/);
+  });
+
+  it('throws when keywords length is 1 (below SPEC §7.3 min of 3)', () => {
+    const json = JSON.stringify({
+      ...JSON.parse(asLlmJson(VALID_RESPONSE)),
+      keywords: ['only-one'],
+    });
+    expect(() => parseAndValidate(json)).toThrow(/keywords length 1/);
+  });
+
+  it('throws when keywords length is 2 (below SPEC §7.3 min of 3)', () => {
+    const json = JSON.stringify({
+      ...JSON.parse(asLlmJson(VALID_RESPONSE)),
+      keywords: ['one', 'two'],
+    });
+    expect(() => parseAndValidate(json)).toThrow(/keywords length 2/);
+  });
+
+  it('throws when keywords length is 8 (above SPEC §7.3 max of 7)', () => {
+    const json = JSON.stringify({
+      ...JSON.parse(asLlmJson(VALID_RESPONSE)),
+      keywords: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
+    });
+    expect(() => parseAndValidate(json)).toThrow(/keywords length 8/);
+  });
+
+  it('accepts keywords length 3 (lower SPEC §7.3 bound)', () => {
+    const json = JSON.stringify({
+      ...JSON.parse(asLlmJson(VALID_RESPONSE)),
+      keywords: ['a', 'b', 'c'],
+    });
+    expect(parseAndValidate(json).keywords).toEqual(['a', 'b', 'c']);
+  });
+
+  it('accepts keywords length 7 (upper SPEC §7.3 bound)', () => {
+    const json = JSON.stringify({
+      ...JSON.parse(asLlmJson(VALID_RESPONSE)),
+      keywords: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
+    });
+    expect(parseAndValidate(json).keywords).toHaveLength(7);
   });
 
   it('accepts multi-domain output with one as primary', () => {
@@ -247,6 +288,38 @@ describe('normalizeItem', () => {
     const userMsg = capturedBody.messages?.find((m) => m.role === 'user');
     expect(userMsg?.content).toContain('"language": "unknown"');
     expect(userMsg?.content).toContain('"content": ""');
+  });
+});
+
+describe('buildEmbeddingInput', () => {
+  it('emits summary + context + entities in the SPEC §7.3 step-2 order', () => {
+    const out = buildEmbeddingInput({
+      summaryEn: 'Summary line.',
+      contextEn: 'Context paragraph here.',
+      entities: ['Federal Reserve', 'Jerome Powell'],
+    });
+    expect(out).toBe(
+      'Summary line.\n\nContext paragraph here.\nEntities: Federal Reserve, Jerome Powell',
+    );
+  });
+
+  it('omits the Entities suffix entirely when entities[] is empty', () => {
+    const out = buildEmbeddingInput({
+      summaryEn: 'Summary.',
+      contextEn: 'Context.',
+      entities: [],
+    });
+    expect(out).toBe('Summary.\n\nContext.');
+    expect(out).not.toContain('Entities:');
+  });
+
+  it('is deterministic — same inputs produce the same string twice', () => {
+    const item = {
+      summaryEn: 'A',
+      contextEn: 'B',
+      entities: ['x', 'y'],
+    };
+    expect(buildEmbeddingInput(item)).toBe(buildEmbeddingInput(item));
   });
 });
 

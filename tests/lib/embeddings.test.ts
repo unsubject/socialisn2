@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { embed } from '../../src/lib/embeddings.js';
+import { EMBEDDING_DIM } from '../../src/db/schema.js';
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -14,9 +15,19 @@ afterEach(() => {
   process.env = { ...ORIGINAL_ENV };
 });
 
+/**
+ * Stand-in for a 1536-dim embedding. We bake a `seed`-derived signature
+ * into the first four positions so tests can still distinguish vectors,
+ * but the array length matches EMBEDDING_DIM so embed()'s dimension check
+ * doesn't fire on test fixtures.
+ */
 function fakeVec(seed: number): number[] {
-  // Stand-in for a 1536-dim vector — use 4 dims for test brevity.
-  return [seed, seed + 1, seed + 2, seed + 3];
+  const v = new Array(EMBEDDING_DIM).fill(0);
+  v[0] = seed;
+  v[1] = seed + 1;
+  v[2] = seed + 2;
+  v[3] = seed + 3;
+  return v;
 }
 
 describe('embed', () => {
@@ -173,5 +184,22 @@ describe('embed', () => {
     expect(String(capturedUrl)).toBe('https://api.openai.com/v1/embeddings');
     expect(capturedHeaders.authorization).toBe('Bearer sk-test');
     expect(capturedBody).toMatchObject({ model: 'text-embedding-3-small', input: ['hi'] });
+  });
+
+  it('throws when a returned vector has length ≠ EMBEDDING_DIM', async () => {
+    // Simulate an upstream model swap returning a different dimension.
+    const fakeFetch = (async () =>
+      new Response(
+        JSON.stringify({
+          data: [{ embedding: [1, 2, 3], index: 0 }],
+          usage: { prompt_tokens: 5, total_tokens: 5 },
+          model: 'text-embedding-3-small',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof fetch;
+
+    await expect(embed({ inputs: ['hi'], fetchFn: fakeFetch })).rejects.toThrow(
+      /EMBEDDING_DIM/,
+    );
   });
 });

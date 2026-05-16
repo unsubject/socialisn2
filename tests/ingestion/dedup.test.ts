@@ -41,7 +41,27 @@ describe('canonicaliseUrl', () => {
     const u =
       'https://www.bbc.com/news/articles/c1w28qw1e0xo?at_medium=RSS&at_campaign=rss&at_link_origin=feed';
     expect(canonicaliseUrl(u)).toBe(
-      'https://www.bbc.com/news/articles/c1w28qw1e0xo',
+      'https://bbc.com/news/articles/c1w28qw1e0xo',
+    );
+  });
+
+  it('strips a leading www. so example.com and www.example.com share a hash', () => {
+    expect(canonicaliseUrl('https://www.example.com/x')).toBe(
+      canonicaliseUrl('https://example.com/x'),
+    );
+    // Does NOT strip other subdomains.
+    expect(canonicaliseUrl('https://m.example.com/x')).not.toBe(
+      canonicaliseUrl('https://example.com/x'),
+    );
+  });
+
+  it('sorts query params alphabetically so order-only variants share a hash', () => {
+    expect(canonicaliseUrl('https://example.com/x?b=2&a=1')).toBe(
+      canonicaliseUrl('https://example.com/x?a=1&b=2'),
+    );
+    // Preserves duplicate keys + multi-value params, just in sorted-key order.
+    expect(canonicaliseUrl('https://example.com/x?c=3&a=1&b=2')).toBe(
+      'https://example.com/x?a=1&b=2&c=3',
     );
   });
 

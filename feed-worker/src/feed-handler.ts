@@ -1,13 +1,13 @@
-// Phase 0 stub. Phase 1 PR 4 swaps the email-handler over to a real
-// postal-mime parse and link extraction; this file's render expands to
-// emit body_text in <content type="html"> at that point. For now it
-// renders the columns the email-handler stub actually writes (subject +
-// body_text + body_html when present) into a valid Atom entry.
+// Phase 1 PR 4 production feed handler. Renders the email-worker's D1
+// inbox into an Atom feed per slug at
+// `https://inbox.socialisn.com/feeds/<slug>.xml`.
 //
-// Each entry carries a synthetic <link href="…/items/<slug>/<msgid>"> —
-// stable per inbound email (Message-Id is RFC 5322 globally unique-ish),
-// suitable as the url_hash key downstream and as the externalId fallback
-// for rss-parser, which drops Atom entries with no <link>.
+// Each entry's <link> uses the first URL extracted into inbox_links
+// during email ingestion — typically the canonical article URL — so the
+// ingestion-worker's url_hash dedup catches the same story arriving via
+// a primary RSS feed. When no link was extracted (rare; usually means a
+// plain-text email with no URLs), we fall back to the synthetic per-
+// message URL so rss-parser still has a <link> to populate from.
 
 import type { Env } from './index';
 
@@ -18,6 +18,7 @@ interface InboxRow {
   received_at: number;
   subject: string | null;
   body_text: string | null;
+  first_link: string | null;
 }
 
 export async function handleFetch(
@@ -32,8 +33,23 @@ export async function handleFetch(
   }
   const slug = match[1] ?? 'unknown';
 
+  // Pull the lowest-positioned (i.e. first-in-body) extracted link via a
+  // correlated subquery so we avoid a second round-trip per entry. D1
+  // supports subselects; LEFT-JOIN + ORDER BY/LIMIT IN ... would also
+  // work but is harder to read.
   const rows = await env.INBOX_DB.prepare(
-    'SELECT message_id, received_at, subject, body_text FROM inbox WHERE slug = ? ORDER BY received_at DESC LIMIT 50',
+    `SELECT
+       i.message_id,
+       i.received_at,
+       i.subject,
+       i.body_text,
+       (SELECT link_url FROM inbox_links
+        WHERE slug = i.slug AND message_id = i.message_id
+        ORDER BY link_pos ASC LIMIT 1) AS first_link
+     FROM inbox AS i
+     WHERE i.slug = ?
+     ORDER BY i.received_at DESC
+     LIMIT 50`,
   )
     .bind(slug)
     .all<InboxRow>();
@@ -59,16 +75,21 @@ ${entries}
   });
 }
 
-function buildItemLink(slug: string, messageId: string): string {
-  // Synthetic per-message link. Stable identifier for the
-  // ingestion-worker's url_hash; not currently served by feed-worker
-  // (could grow into a /items/<slug>/<msgid> read-only HTML view later).
+function buildSyntheticItemLink(slug: string, messageId: string): string {
+  // Fallback per-message link when no inbox_links URL was extracted.
+  // Stable identifier for the ingestion-worker's url_hash; rss-parser
+  // drops Atom entries with no <link> so this must always be non-empty.
   return `https://inbox.socialisn.com/items/${encodeURIComponent(
     slug,
   )}/${encodeURIComponent(messageId)}`;
 }
 
 function renderEntry(slug: string, r: InboxRow): string {
+  // Prefer the real article URL extracted into inbox_links so cross-source
+  // url_hash dedup catches the same story arriving via a primary RSS
+  // source. Fall back to the synthetic link only when no link was
+  // extracted (e.g. a plain-text email with no URLs in the body).
+  const linkHref = r.first_link ?? buildSyntheticItemLink(slug, r.message_id);
   // Atom <content type="text"> rather than <summary>: rss-parser only
   // populates item.content from <content> elements by default. Using
   // <content> means the ingestion-worker sees the snippet without needing
@@ -79,7 +100,7 @@ function renderEntry(slug: string, r: InboxRow): string {
   return `  <entry>
     <id>urn:socialisn2-inbox:${escapeXml(slug)}:${escapeXml(r.message_id)}</id>
     <title>${escapeXml(r.subject ?? '(no subject)')}</title>
-    <link rel="alternate" href="${escapeXml(buildItemLink(slug, r.message_id))}"/>
+    <link rel="alternate" href="${escapeXml(linkHref)}"/>
     <updated>${new Date(r.received_at).toISOString()}</updated>${contentBlock}
   </entry>`;
 }

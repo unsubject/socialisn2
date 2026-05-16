@@ -1,0 +1,35 @@
+# LiteLLM proxy config — routes the model_name used by src/lib/llm.ts
+# (and src/cost/pricing.ts) to the underlying provider.
+#
+# Added in the Phase 2 LiteLLM-in-docker-compose follow-up. Replaces
+# the ADR-002 / SPEC §4.2 assumption of a pre-existing operator-managed
+# LiteLLM proxy.
+
+model_list:
+  # Normalise stage (SPEC §7.3) — Gemini 2.5 Flash-Lite.
+  - model_name: gemini-2.5-flash-lite
+    litellm_params:
+      model: gemini/gemini-2.5-flash-lite
+      api_key: os.environ/GOOGLE_AI_API_KEY
+
+  # Curate stage (SPEC §9.4) — Claude Sonnet 4.5. Phase 3 PR 3 starts
+  # using this; routed in advance so the route is ready when the code
+  # lands.
+  - model_name: claude-sonnet-4.5
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # Haiku 4.5 — reserved for cheaper agent paths.
+  - model_name: claude-haiku-4.5
+    litellm_params:
+      model: anthropic/claude-haiku-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+litellm_settings:
+  # Drop provider-specific params LiteLLM doesn't recognise instead of
+  # throwing — keeps src/lib/llm.ts provider-agnostic.
+  drop_params: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

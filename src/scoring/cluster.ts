@@ -264,7 +264,7 @@ export async function compactClusters(
     WHERE c1.last_seen_at > NOW() - make_interval(days => ${recencyDays})
       AND c2.last_seen_at > NOW() - make_interval(days => ${recencyDays})
       AND (c1.centroid <=> c2.centroid) < ${threshold}
-      ${opts.primaryDomain ? sql`AND c1.primary_domain = ${opts.primaryDomain}` : sql``}
+      ${opts.primaryDomain ? sql`AND c1.primary_domain = ${opts.primaryDomain} AND c2.primary_domain = ${opts.primaryDomain}` : sql``}
       AND EXISTS (
         SELECT 1
         FROM items i_a
@@ -395,9 +395,14 @@ function toPgvectorLiteral(v: number[]): string {
  * Parse a pgvector text literal (`[1,2,3]`) back into a number[]. We read
  * centroids via `centroid::text` because the postgres-js + drizzle binding
  * path returns the vector as the same `[...]` string under `::text`.
+ *
+ * Assumes the literal is JSON-compatible — no `NaN` or `Infinity` values.
+ * text-embedding-3-small only emits finite floats so this holds in v1;
+ * if pgvector ever serialises non-finite values JSON.parse will throw,
+ * which is the right failure mode (we'd rather error than silently
+ * coerce).
  */
 function parsePgvectorLiteral(s: string): number[] {
-  // The literal is JSON-compatible: square brackets, comma-separated numbers.
   const parsed = JSON.parse(s) as unknown;
   if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === 'number')) {
     throw new Error(`parsePgvectorLiteral: not a number array: ${s.slice(0, 80)}`);

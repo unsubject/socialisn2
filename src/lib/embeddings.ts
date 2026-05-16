@@ -12,6 +12,7 @@
 
 import { env } from '../config/env.js';
 import { computeCostUsd } from '../cost/pricing.js';
+import { EMBEDDING_DIM } from '../db/schema.js';
 
 const EMBED_MODEL = 'text-embedding-3-small';
 const EMBED_URL = 'https://api.openai.com/v1/embeddings';
@@ -62,9 +63,11 @@ interface OpenAiEmbeddingResponse {
  * not the order OpenAI happens to return them in (the API guarantees
  * `index` but we re-sort defensively in case of any reordering).
  *
- * Throws on non-2xx — caller decides retry policy. Does NOT write to
- * cost_ledger; use `recordCost()` from `src/cost/ledger.ts` after a
- * successful call.
+ * Throws on non-2xx — caller decides retry policy. Also throws if any
+ * returned vector has length ≠ EMBEDDING_DIM, so a model-name typo or a
+ * silent upstream dimension change surfaces here rather than at pgvector
+ * insert time. Does NOT write to cost_ledger; use `recordCost()` from
+ * `src/cost/ledger.ts` after a successful call.
  */
 export async function embed(opts: EmbedOptions): Promise<EmbedResult> {
   // Build a list of (originalIndex, value) for non-empty inputs. We send
@@ -119,13 +122,23 @@ export async function embed(opts: EmbedOptions): Promise<EmbedResult> {
   const json = (await res.json()) as OpenAiEmbeddingResponse;
   // The API guarantees `index` matches the request order, but re-sort
   // defensively in case of any reordering. Then scatter into the
-  // input-aligned output array.
+  // input-aligned output array, asserting dimension as we go.
   const sorted = [...json.data].sort((a, b) => a.index - b.index);
   const vectors: (number[] | null)[] = opts.inputs.map(() => null);
   for (let i = 0; i < sorted.length; i++) {
     const originalIdx = sendable[i]?.idx;
     const vec = sorted[i]?.embedding;
-    if (originalIdx !== undefined && vec) vectors[originalIdx] = vec;
+    if (originalIdx === undefined || !vec) continue;
+    if (vec.length !== EMBEDDING_DIM) {
+      // A non-1536-dim vector means OpenAI served a different model than
+      // we requested (or the model definition changed). Failing here
+      // localises the surprise; pgvector would also reject the insert,
+      // but the error there is harder to attribute back to embeddings.ts.
+      throw new Error(
+        `OpenAI embeddings: vector length ${vec.length} ≠ EMBEDDING_DIM ${EMBEDDING_DIM} at input index ${originalIdx}`,
+      );
+    }
+    vectors[originalIdx] = vec;
   }
   const inputTokens = json.usage?.prompt_tokens ?? 0;
   const usd = computeCostUsd(EMBED_MODEL, inputTokens, 0);

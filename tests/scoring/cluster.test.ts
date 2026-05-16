@@ -254,6 +254,27 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
       expect(c.last_seen_at.toISOString()).toBe('2026-05-15T11:00:00.000Z');
     });
 
+    it('does NOT pull last_seen_at backwards when an item arrives out-of-order', async () => {
+      // First item lands with publishedAt = 12:00.
+      const first = await assignCluster(db, {
+        embedding: vA,
+        primaryDomain: 'economy',
+        itemDomains: ['economy'],
+        publishedAt: new Date('2026-05-15T12:00:00Z'),
+      });
+      // A late-fetched second item joins with publishedAt = 08:00 (earlier).
+      // The GREATEST/Math.max branch must keep last_seen_at pinned at 12:00.
+      await assignCluster(db, {
+        embedding: vB,
+        primaryDomain: 'economy',
+        itemDomains: ['economy'],
+        publishedAt: new Date('2026-05-15T08:00:00Z'),
+      });
+      const c = await getCluster(first.clusterId);
+      expect(c.item_count).toBe(2);
+      expect(c.last_seen_at.toISOString()).toBe('2026-05-15T12:00:00.000Z');
+    });
+
     it('creates a new cluster when nearest centroid is above threshold', async () => {
       const first = await assignCluster(db, {
         embedding: vA,
@@ -544,6 +565,64 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
       });
       const result = await compactClusters(db);
       expect(result.merges).toBe(0);
+    });
+
+    it('respects the primaryDomain option, isolating compaction to that domain', async () => {
+      // Two mergeable pairs in different domains. Filter to 'economy' —
+      // the scitech pair must not merge in the same pass.
+      const econA = await insertCluster({
+        embedding: vA,
+        primaryDomain: 'economy',
+        itemCount: 3,
+      });
+      const econB = await insertCluster({
+        embedding: vB,
+        primaryDomain: 'economy',
+        itemCount: 3,
+      });
+      const sciA = await insertCluster({
+        embedding: vA,
+        primaryDomain: 'scitech',
+        itemCount: 3,
+      });
+      const sciB = await insertCluster({
+        embedding: vB,
+        primaryDomain: 'scitech',
+        itemCount: 3,
+      });
+      await insertItem({
+        clusterId: econA,
+        embedding: vA,
+        primaryDomain: 'economy',
+        entities: ['Fed'],
+      });
+      await insertItem({
+        clusterId: econB,
+        embedding: vB,
+        primaryDomain: 'economy',
+        entities: ['Fed'],
+      });
+      await insertItem({
+        clusterId: sciA,
+        embedding: vA,
+        primaryDomain: 'scitech',
+        entities: ['OpenAI'],
+      });
+      await insertItem({
+        clusterId: sciB,
+        embedding: vB,
+        primaryDomain: 'scitech',
+        entities: ['OpenAI'],
+      });
+
+      const result = await compactClusters(db, { primaryDomain: 'economy' });
+      expect(result.merges).toBe(1);
+      // Only the economy pair merged.
+      expect(result.pairs[0]?.target).toMatch(/^[0-9a-f-]{36}$/);
+      const sciAAfter = await getCluster(sciA);
+      const sciBAfter = await getCluster(sciB);
+      expect(sciAAfter.status).toBe('active');
+      expect(sciBAfter.status).toBe('active');
     });
 
     it('does NOT over-merge an A-B-C chain when the kept centroid moves past the threshold', async () => {

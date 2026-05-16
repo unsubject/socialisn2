@@ -1,4 +1,4 @@
-// Smoke-tests the seed migrations 002-004. Resets `public`, applies every
+// Smoke-tests the seed migrations 002-004 + 010. Resets `public`, applies every
 // migrations/*.sql in order, then asserts row counts and a handful of
 // representative rows. Confirms the migration set produces a coherent
 // initial sources/competitors state.
@@ -14,7 +14,7 @@ import { assertDestructiveAllowed } from '../helpers/destructive-guard.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
-describe.skipIf(!DATABASE_URL)('migrations 001-004 (schema + seeds)', () => {
+describe.skipIf(!DATABASE_URL)('migrations 001-010 (schema + seeds)', () => {
   let client: ReturnType<typeof postgres>;
 
   beforeAll(async () => {
@@ -44,8 +44,10 @@ describe.skipIf(!DATABASE_URL)('migrations 001-004 (schema + seeds)', () => {
     // 30 = 7 (§6.9 newsletter-only) - 1 (Shift Key moved to §6.6 by 006) + 10 (§6.1) + 8 (§6.2) + 6 (§6.4)
     expect(byKind.email_bridge).toBe(30);
     expect(byKind.arxiv).toBe(3);
-    // 81 RSS rows = 80 from 002 + 1 (Shift Key added by 006).
-    expect(byKind.rss).toBe(81);
+    // 105 RSS rows = 80 from 002 + 1 (Shift Key added by 006) + 24 from 010
+    // (SPEC §6.3 + §6.5 coverage gaps: HN + RMI + 7 bio preprint feeds +
+    // Nature Medicine + The Transmitter + 4 USA + 5 UK + 2 CA + 1 AU + 1 TW).
+    expect(byKind.rss).toBe(105);
   });
 
   it('seeds Reuters via email-bridge (§6.1 → §6.9)', async () => {
@@ -179,5 +181,57 @@ describe.skipIf(!DATABASE_URL)('migrations 001-004 (schema + seeds)', () => {
       SELECT name FROM sources WHERE kind = 'arxiv' ORDER BY name
     `;
     expect(rows.map((r) => r.name)).toEqual(['arXiv cs.AI', 'arXiv cs.CL', 'arXiv cs.LG']);
+  });
+
+  it('seeds Hacker News (§6.3) with the points=100 server-side filter', async () => {
+    const rows = await client<{
+      url: string;
+      domains: string[];
+      authority_score: number;
+    }[]>`
+      SELECT url, domains, authority_score FROM sources
+      WHERE name = 'Hacker News (best, points>=100)'
+    `;
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.url).toBe('https://hnrss.org/best?points=100');
+    expect(rows[0]?.domains).toEqual(['scitech']);
+  });
+
+  it('seeds bioRxiv subject feeds (§6.3 biological) at the arXiv-style 1440 cadence', async () => {
+    const rows = await client<{ name: string; fetch_interval_min: number }[]>`
+      SELECT name, fetch_interval_min FROM sources
+      WHERE name LIKE 'bioRxiv:%' OR name LIKE 'medRxiv:%'
+      ORDER BY name
+    `;
+    expect(rows.length).toBe(7); // 5 bioRxiv + 2 medRxiv
+    expect(rows.every((r) => r.fetch_interval_min === 1440)).toBe(true);
+    expect(rows.map((r) => r.name)).toEqual([
+      'bioRxiv: Cancer Biology',
+      'bioRxiv: Genomics',
+      'bioRxiv: Immunology',
+      'bioRxiv: Neuroscience',
+      'bioRxiv: Synthetic Biology',
+      'medRxiv: Epidemiology',
+      'medRxiv: Oncology',
+    ]);
+  });
+
+  it('seeds §6.5 USA outlets at 60 min cadence with national domain', async () => {
+    const rows = await client<{ name: string; fetch_interval_min: number; domains: string[] }[]>`
+      SELECT name, fetch_interval_min, domains FROM sources
+      WHERE name IN ('Politico', 'Axios', 'The Atlantic', 'Reason')
+      ORDER BY name
+    `;
+    expect(rows.length).toBe(4);
+    expect(rows.every((r) => r.fetch_interval_min === 60)).toBe(true);
+    expect(rows.every((r) => r.domains.includes('national'))).toBe(true);
+  });
+
+  it('seeds Guardian business under the economy domain (not national)', async () => {
+    const rows = await client<{ domains: string[] }[]>`
+      SELECT domains FROM sources WHERE name = 'The Guardian: Business'
+    `;
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.domains).toEqual(['economy']);
   });
 });

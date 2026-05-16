@@ -15,13 +15,16 @@ interface MockRow {
   received_at: number;
   subject: string | null;
   body_text: string | null;
-  first_link: string | null;
+  chosen_link: string | null;
 }
 
 function makeEnv(rows: MockRow[]): Env {
   // Minimal D1 mock — only the prepare/bind/all path is exercised by the
   // handler. We don't try to interpret the SQL; every prepare returns the
-  // rows the test set up.
+  // rows the test set up. The article-vs-fallback link selection happens
+  // in the SQL itself (COALESCE of two subqueries), so unit-testing that
+  // selection logic belongs with the SQL/D1 layer; here we just verify
+  // the handler emits whichever chosen_link the row provides.
   const db = {
     prepare(_sql: string) {
       return {
@@ -81,14 +84,14 @@ describe('handleFetch', () => {
     );
   });
 
-  it("emits the row's first_link as <link href> when present", async () => {
+  it("emits the row's chosen_link as <link href> when present", async () => {
     const env = makeEnv([
       {
         message_id: '<m1@example.com>',
         received_at: Date.parse('2026-05-15T10:00:00Z'),
         subject: 'Anthropic news',
         body_text: 'hello',
-        first_link: 'https://www.anthropic.com/news/article-x',
+        chosen_link: 'https://www.anthropic.com/news/article-x',
       },
     ]);
     const res = await handleFetch(
@@ -104,14 +107,14 @@ describe('handleFetch', () => {
     expect(body).not.toContain('inbox.socialisn.com/items/anthropic/');
   });
 
-  it('falls back to the synthetic /items/<slug>/<msgid> link when first_link is null', async () => {
+  it('falls back to the synthetic /items/<slug>/<msgid> link when chosen_link is null', async () => {
     const env = makeEnv([
       {
         message_id: '<m1@example.com>',
         received_at: Date.parse('2026-05-15T10:00:00Z'),
         subject: 'plain text email',
         body_text: 'no links in this one',
-        first_link: null,
+        chosen_link: null,
       },
     ]);
     const res = await handleFetch(
@@ -132,7 +135,7 @@ describe('handleFetch', () => {
         received_at: Date.parse('2026-05-15T10:00:00Z'),
         subject: 'Q&A: Anthropic <2026>',
         body_text: null,
-        first_link: 'https://example.com/?a=1&b=2',
+        chosen_link: 'https://example.com/?a=1&b=2',
       },
     ]);
     const res = await handleFetch(

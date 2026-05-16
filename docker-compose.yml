@@ -71,12 +71,13 @@ services:
   ingestion-worker:
     build: .
     restart: unless-stopped
+    # Intentionally does NOT depend on litellm: ingestion only writes raw_items
+    # and never calls llmCall, so a LiteLLM image-pull / config / port-4000
+    # problem must not gate RSS / YouTube / email-bridge intake.
     depends_on:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      litellm:
         condition: service_healthy
     env_file: .env
     command: ["node", "dist/workers/ingestion.js"]

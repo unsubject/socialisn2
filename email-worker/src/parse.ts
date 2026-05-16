@@ -34,20 +34,97 @@ export function stripBoilerplate(text: string): string {
   return text.slice(0, cutAt).trimEnd();
 }
 
+// Link classification persisted in inbox_links.link_kind. The feed-worker
+// prefers 'article' so cross-source url_hash dedup matches the canonical
+// article URL rather than the masthead / view-in-browser link. Kinds are
+// derived from URL shape alone — extractLinks only sees the href, not the
+// surrounding anchor text or DOM position class.
+export type LinkKind = 'article' | 'masthead' | 'social' | 'tracking' | 'other';
+
 export interface ExtractedLink {
   url: string;
   pos: number;
+  kind: LinkKind;
 }
 
 const HREF_RE = /<a\s[^>]*\bhref\s*=\s*["']([^"']+)["']/gi;
 const BARE_URL_RE = /\bhttps?:\/\/[^\s<>"')]+/g;
 
+// Hosts whose presence in the URL means "share on X" / "talk on Y" rather
+// than the article itself. Newsletters routinely include a row of share
+// links above or below each story; downstream clustering would prefer the
+// underlying article.
+const SOCIAL_HOSTS = new Set<string>([
+  'twitter.com',
+  'x.com',
+  'facebook.com',
+  'instagram.com',
+  'linkedin.com',
+  'reddit.com',
+  'pinterest.com',
+  'threads.net',
+  't.me',
+  'tiktok.com',
+  'mastodon.social',
+  'bsky.app',
+  'youtube.com',
+  'youtu.be',
+]);
+
+// Path / query fragments that mark a link as the issue's HTML mirror or
+// the publisher's homepage masthead rather than an article body link.
+// Matched on lowercased pathname + search.
+const MASTHEAD_PATTERNS: RegExp[] = [
+  /\bview[-_/.]?(this[-_/.]?)?(email|message)?[-_/.]?(in|on)?[-_/.]?(your[-_/.]?)?(browser|web|online)\b/,
+  /\bread[-_/.]?(in|on)?[-_/.]?(browser|web|online)\b/,
+  /\bview[-_/.]?in[-_/.]?browser\b/,
+  /\bweb[-_/.]?version\b/,
+];
+
+const TRACKING_PATTERNS: RegExp[] = [
+  /\b(beacon|pixel|open\.gif|open\.png|tracking\.gif|track\/open)\b/,
+];
+
+function classifyLink(rawUrl: string): LinkKind {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    // Unparseable URL (e.g. relative href that slipped past the
+    // protocol check). Tag as 'other' rather than guessing; the feed
+    // handler's fallback path will still consider it.
+    return 'other';
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+  if (SOCIAL_HOSTS.has(host)) return 'social';
+
+  const pathAndSearch = `${parsed.pathname}${parsed.search}`.toLowerCase();
+  for (const re of TRACKING_PATTERNS) {
+    if (re.test(pathAndSearch)) return 'tracking';
+  }
+  for (const re of MASTHEAD_PATTERNS) {
+    if (re.test(pathAndSearch)) return 'masthead';
+  }
+
+  // Homepage-style link (host root with no query) — the publisher logo
+  // pointing at their root URL is the classic masthead pattern.
+  if ((parsed.pathname === '' || parsed.pathname === '/') && parsed.search === '') {
+    return 'masthead';
+  }
+
+  return 'article';
+}
+
 /**
  * Pull links out of an email body. Prefers HTML when available (parses
  * <a href>); falls back to bare-URL regex on plain text. Returns links in
- * document order with a 0-based positional index. Filters out anchors,
- * mailto:, javascript:, and obvious unsubscribe URLs (which carry no
- * editorial signal and would pollute the inbox_links join).
+ * document order with a 0-based positional index and a kind classification
+ * (article|masthead|social|tracking|other) used by feed-worker to pick the
+ * canonical article URL.
+ *
+ * Filters out anchors, mailto:, javascript:, tel:, and obvious unsubscribe
+ * URLs entirely — those carry no editorial signal and would pollute the
+ * inbox_links join.
  */
 export function extractLinks(opts: {
   html?: string | null;
@@ -69,7 +146,7 @@ export function extractLinks(opts: {
     }
     if (seen.has(url)) return;
     seen.add(url);
-    out.push({ url, pos: out.length });
+    out.push({ url, pos: out.length, kind: classifyLink(url) });
   };
 
   if (opts.html && opts.html.length > 0) {

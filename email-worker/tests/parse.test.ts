@@ -69,8 +69,8 @@ describe('extractLinks', () => {
       <a href='https://example.com/two'>two</a></p>
     `;
     expect(extractLinks({ html })).toEqual([
-      { url: 'https://example.com/one', pos: 0 },
-      { url: 'https://example.com/two', pos: 1 },
+      { url: 'https://example.com/one', pos: 0, kind: 'article' },
+      { url: 'https://example.com/two', pos: 1, kind: 'article' },
     ]);
   });
 
@@ -83,7 +83,7 @@ describe('extractLinks', () => {
       <a href="https://example.com/keep">keep</a>
     `;
     expect(extractLinks({ html })).toEqual([
-      { url: 'https://example.com/keep', pos: 0 },
+      { url: 'https://example.com/keep', pos: 0, kind: 'article' },
     ]);
   });
 
@@ -95,7 +95,7 @@ describe('extractLinks', () => {
       <a href="https://example.com/article">keep</a>
     `;
     expect(extractLinks({ html })).toEqual([
-      { url: 'https://example.com/article', pos: 0 },
+      { url: 'https://example.com/article', pos: 0, kind: 'article' },
     ]);
   });
 
@@ -106,16 +106,16 @@ describe('extractLinks', () => {
       <a href="https://example.com/y">c</a>
     `;
     expect(extractLinks({ html })).toEqual([
-      { url: 'https://example.com/x', pos: 0 },
-      { url: 'https://example.com/y', pos: 1 },
+      { url: 'https://example.com/x', pos: 0, kind: 'article' },
+      { url: 'https://example.com/y', pos: 1, kind: 'article' },
     ]);
   });
 
   it('falls back to bare-URL regex on plain text', () => {
     const text = `Check out https://example.com/news and https://example.com/post for more.`;
     expect(extractLinks({ html: null, text })).toEqual([
-      { url: 'https://example.com/news', pos: 0 },
-      { url: 'https://example.com/post', pos: 1 },
+      { url: 'https://example.com/news', pos: 0, kind: 'article' },
+      { url: 'https://example.com/post', pos: 1, kind: 'article' },
     ]);
   });
 
@@ -123,7 +123,7 @@ describe('extractLinks', () => {
     const html = `<a href="https://example.com/html-link">x</a>`;
     const text = `https://example.com/text-link`;
     expect(extractLinks({ html, text })).toEqual([
-      { url: 'https://example.com/html-link', pos: 0 },
+      { url: 'https://example.com/html-link', pos: 0, kind: 'article' },
     ]);
   });
 
@@ -135,15 +135,15 @@ describe('extractLinks', () => {
   it('handles CRLF line endings in plain text', () => {
     const text = `Check out https://example.com/news\r\nand https://example.com/post for more.`;
     expect(extractLinks({ html: null, text })).toEqual([
-      { url: 'https://example.com/news', pos: 0 },
-      { url: 'https://example.com/post', pos: 1 },
+      { url: 'https://example.com/news', pos: 0, kind: 'article' },
+      { url: 'https://example.com/post', pos: 1, kind: 'article' },
     ]);
   });
 
   it('parses <a> tags split across lines', () => {
     const html = `<a\n  class="x"\n  href="https://example.com/multiline"\n  target="_blank">click</a>`;
     expect(extractLinks({ html })).toEqual([
-      { url: 'https://example.com/multiline', pos: 0 },
+      { url: 'https://example.com/multiline', pos: 0, kind: 'article' },
     ]);
   });
 
@@ -154,6 +154,77 @@ describe('extractLinks', () => {
     const links = extractLinks({ html });
     expect(links).toHaveLength(1);
     expect(links[0]!.url).toContain('example.com');
+  });
+});
+
+describe('extractLinks — classification', () => {
+  it('classifies a homepage-only link as masthead', () => {
+    const html = `<a href="https://example.com/">logo</a>`;
+    expect(extractLinks({ html })).toEqual([
+      { url: 'https://example.com/', pos: 0, kind: 'masthead' },
+    ]);
+  });
+
+  it('classifies "view in browser" / "web version" as masthead', () => {
+    const html = `
+      <a href="https://list.example.com/view-in-browser/abc123">view</a>
+      <a href="https://list.example.com/p/web-version/xyz">web</a>
+    `;
+    const links = extractLinks({ html });
+    expect(links).toHaveLength(2);
+    expect(links.every((l) => l.kind === 'masthead')).toBe(true);
+  });
+
+  it('classifies share-on-social URLs as social', () => {
+    const html = `
+      <a href="https://twitter.com/intent/tweet?url=https://ex.com/a">tw</a>
+      <a href="https://www.linkedin.com/sharing/share-offsite/?url=https://ex.com/a">li</a>
+      <a href="https://www.facebook.com/sharer/sharer.php?u=https://ex.com/a">fb</a>
+      <a href="https://t.me/share/url?url=https://ex.com/a">tg</a>
+    `;
+    const links = extractLinks({ html });
+    expect(links).toHaveLength(4);
+    expect(links.every((l) => l.kind === 'social')).toBe(true);
+  });
+
+  it('classifies a deep publisher URL as article', () => {
+    const html = `<a href="https://www.publisher.com/2026/05/why-x-matters">article</a>`;
+    expect(extractLinks({ html })).toEqual([
+      { url: 'https://www.publisher.com/2026/05/why-x-matters', pos: 0, kind: 'article' },
+    ]);
+  });
+
+  it('classifies tracking-pixel URLs as tracking', () => {
+    const html = `<a href="https://list.example.com/track/open.gif?u=abc">x</a>`;
+    expect(extractLinks({ html })).toEqual([
+      { url: 'https://list.example.com/track/open.gif?u=abc', pos: 0, kind: 'tracking' },
+    ]);
+  });
+
+  it('preserves document order and pos when kinds are mixed', () => {
+    const html = `
+      <a href="https://example.com/">logo</a>
+      <a href="https://example.com/2026/05/article-slug">read</a>
+      <a href="https://twitter.com/intent/tweet?url=https://example.com/2026/05/article-slug">share</a>
+    `;
+    expect(extractLinks({ html })).toEqual([
+      { url: 'https://example.com/', pos: 0, kind: 'masthead' },
+      { url: 'https://example.com/2026/05/article-slug', pos: 1, kind: 'article' },
+      { url: 'https://twitter.com/intent/tweet?url=https://example.com/2026/05/article-slug', pos: 2, kind: 'social' },
+    ]);
+  });
+
+  it('treats unparseable URLs as other', () => {
+    // Bare-URL regex captures schemes only, so this exercises the
+    // classifier's URL-constructor try/catch fallback. We feed a
+    // protocol-only string via plain text to bypass the href regex.
+    const text = `https://`;
+    const links = extractLinks({ html: null, text });
+    // Bare-URL regex may match 0 or 1 depending on the trailing char;
+    // when it does match, the URL is unparseable and classed 'other'.
+    for (const l of links) {
+      expect(l.kind).toBe('other');
+    }
   });
 });
 

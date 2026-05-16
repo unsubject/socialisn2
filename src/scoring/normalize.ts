@@ -36,6 +36,13 @@ const SYSTEM_PROMPT = readFileSync(PROMPT_PATH, 'utf-8');
 
 const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 
+// SPEC §7.3 mandates 3-7 keywords; the prompt also instructs the model to
+// target that range. The downstream §11.2 RSS feed UX assumes the count is
+// in this range, so we fail loudly rather than letting a sparse or noisy
+// keyword set leak through.
+const MIN_KEYWORDS = 3;
+const MAX_KEYWORDS = 7;
+
 export const VALID_DOMAINS = ['economy', 'economics', 'scitech', 'geopolitics', 'national'] as const;
 export type Domain = (typeof VALID_DOMAINS)[number];
 
@@ -112,6 +119,25 @@ export async function normalizeItem(
 }
 
 /**
+ * Build the canonical embedding input for an item per SPEC §7.3 step 2:
+ * `summary_en + context_en + entities`. Order and separator are fixed so
+ * every call site — ingestion orchestrator, archive-overlap lookup, any
+ * future re-embed pass — hashes identically. Entities are joined with
+ * ", " so the model sees them as a list rather than glued together.
+ *
+ * The Phase 3 PR 4 orchestrator threads this through `embed({ inputs })`;
+ * other consumers should call this helper rather than rolling their own
+ * concatenation so any future SPEC change lands in one place.
+ */
+export function buildEmbeddingInput(
+  item: Pick<NormalizedItem, 'summaryEn' | 'contextEn' | 'entities'>,
+): string {
+  const entitiesPart =
+    item.entities.length > 0 ? `\nEntities: ${item.entities.join(', ')}` : '';
+  return `${item.summaryEn}\n\n${item.contextEn}${entitiesPart}`;
+}
+
+/**
  * Parse the LLM response into a validated NormalizedItem. Exported for
  * tests; production code should call `normalizeItem`.
  */
@@ -155,12 +181,9 @@ export function parseAndValidate(rawText: string): NormalizedItem {
     );
   }
 
-  if (keywords.length < 1 || keywords.length > 10) {
-    // SPEC §7.3 asks for 3-7. Be permissive on the bounds (1-10) so the
-    // pipeline doesn't fail noisily on a borderline output; the prompt
-    // pressures the model toward 3-7 in normal operation.
+  if (keywords.length < MIN_KEYWORDS || keywords.length > MAX_KEYWORDS) {
     throw new Error(
-      `normalize: keywords length ${keywords.length} out of range (expected 1-10)`,
+      `normalize: keywords length ${keywords.length} out of range (expected ${MIN_KEYWORDS}-${MAX_KEYWORDS} per SPEC §7.3)`,
     );
   }
 

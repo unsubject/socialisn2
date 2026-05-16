@@ -30,14 +30,24 @@ export const PRICING: Record<string, ModelPricing> = {
   'gemini-2.5-flash-lite': { inputUsdPerToken: 0.1 / M, outputUsdPerToken: 0.4 / M },
 };
 
-/**
- * Pessimistic fallback for unknown models. Sonnet rates — the most
- * expensive entry we currently bill. The rationale is documented in
- * `pricingFor`: a hard cost ceiling MUST count every call. Throwing on
- * unknown models would let an unbilled call sneak past the ceiling, which
- * is the exact failure mode SPEC §12 is designed to prevent.
- */
-const PESSIMISTIC_FALLBACK: ModelPricing = PRICING['claude-sonnet-4.5']!;
+// Pessimistic fallback for unknown models. Sonnet rates — the most
+// expensive entry we currently bill. The rationale is documented in
+// `pricingFor`: a hard cost ceiling MUST count every call. Throwing on
+// unknown models would let an unbilled call sneak past the ceiling, which
+// is the exact failure mode SPEC §12 is designed to prevent.
+//
+// Module-init guard rather than a non-null assertion: if the table ever
+// loses the claude-sonnet-4.5 key (rename, table edit), we want a clear
+// error at import time, not a runtime crash on the first pricingFor()
+// call to an unknown model.
+const PESSIMISTIC_FALLBACK_KEY = 'claude-sonnet-4.5';
+const pessimisticFallbackEntry = PRICING[PESSIMISTIC_FALLBACK_KEY];
+if (!pessimisticFallbackEntry) {
+  throw new Error(
+    `pricing: PRICING table is missing "${PESSIMISTIC_FALLBACK_KEY}" — needed as the pessimistic fallback for unknown models`,
+  );
+}
+const PESSIMISTIC_FALLBACK: ModelPricing = pessimisticFallbackEntry;
 
 /**
  * Look up pricing for a model. If the model isn't in the table — e.g.
@@ -51,7 +61,7 @@ export function pricingFor(model: string): ModelPricing {
   if (p) return p;
   console.warn(
     `[pricing] No entry for model "${model}" — billing at pessimistic ` +
-      `fallback (claude-sonnet-4.5 rates). Add the entry to src/cost/pricing.ts.`,
+      `fallback (${PESSIMISTIC_FALLBACK_KEY} rates). Add the entry to src/cost/pricing.ts.`,
   );
   return PESSIMISTIC_FALLBACK;
 }

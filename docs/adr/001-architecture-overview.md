@@ -35,7 +35,7 @@ Deployment is a single docker-compose stack on the Hostinger VPS, sitting next t
 ```
 hostinger-vps/
 ├── 2nd-brain (existing)     postgres-A, redis-A, app-A
-└── socialisn2 (new)         postgres-B, redis-B, app-B, ingestion-worker, scoring-worker, whisper-worker
+└── socialisn2 (new)         postgres-B, redis-B, litellm, app-B, ingestion-worker, scoring-worker, whisper-worker
 ```
 
 The two Cloudflare Workers behind SPEC §6.9 (`email-worker` + `feed-worker`, see ADR-003) are the one exception — they run at the CF edge against a shared D1 database, independent of the VPS.

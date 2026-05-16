@@ -18,7 +18,7 @@ The stack needs to be runnable on one operator's Hostinger VPS alongside an exis
 | Database | PostgreSQL 16 + pgvector | Single store for relational + vector. Separate vector DB (Qdrant/Weaviate) is a second container, second backup target, second failure mode. |
 | Queue | BullMQ + Redis 7 | BullMQ for job orchestration; Redis already needed for caching. RabbitMQ is overkill for one-machine workloads. |
 | Scheduler | node-cron | In-process. External scheduler (k8s CronJob / systemd timers) wastes infra for a single VPS. |
-| LLM router | LiteLLM proxy | Simon's existing instance — unified billing, retry, and model swap surface. |
+| LLM router | LiteLLM proxy | Runs in this repo's docker-compose (`litellm` service + `config/litellm.yaml`); unified billing, retry, and model-swap surface. The original ADR text assumed a pre-existing operator-managed instance; in practice this repo ships its own. |
 | Embeddings | OpenAI `text-embedding-3-small` | 1536-dim, cheap, multilingual. Local embedding models cost more VPS RAM than they save in API spend at this volume. |
 | Summarisation LLM | Gemini 2.5 Flash-Lite | Cheapest model that produces usable English normalisations at scale. |
 | Curation LLM | Claude Sonnet 4.5 | Top-of-funnel decisions only — quality matters more than throughput here. |

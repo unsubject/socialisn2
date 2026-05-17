@@ -79,36 +79,40 @@ describe.skipIf(!DATABASE_URL)('telegram bot (buildBot)', () => {
     // Intercept ALL outgoing Bot API calls. We return synthetic success
     // for the methods used by command handlers; everything else passes
     // through (and would fail real HTTP — keep the suite hermetic).
+    // grammy's api.config.use chain expects raw Telegram response
+    // shape ({ok: true, result: <data>}) — ApiClient.callApi treats
+    // any falsy `ok` as an API failure and throws GrammyError. Wrap
+    // all synthetic responses accordingly.
     bot.api.config.use((_prev, method, payload) => {
       apiCalls.push({ method, payload: payload as Record<string, unknown> });
       if (method === 'getMe') {
-        // bot.init() calls getMe at startup. Synthetic bot info so the
-        // init phase doesn't hit the real Telegram API with the fake
-        // token; without this, init throws GrammyError and the test
-        // suite blows up before any handler runs.
         return Promise.resolve({
-          id: 999999,
-          is_bot: true,
-          first_name: 'TestBot',
-          username: 'test_bot',
-          can_join_groups: true,
-          can_read_all_group_messages: false,
-          supports_inline_queries: false,
+          ok: true,
+          result: {
+            id: 999999,
+            is_bot: true,
+            first_name: 'TestBot',
+            username: 'test_bot',
+            can_join_groups: true,
+            can_read_all_group_messages: false,
+            supports_inline_queries: false,
+          },
         }) as unknown as ReturnType<typeof _prev>;
       }
       if (method === 'sendMessage') {
         return Promise.resolve({
           ok: true,
-          // grammy expects a Message object here; minimal shape.
-          message_id: 1,
-          date: 0,
-          chat: { id: Number(ALLOWED_CHAT_ID), type: 'private' as const, first_name: 'T' },
+          result: {
+            message_id: 1,
+            date: 0,
+            chat: { id: Number(ALLOWED_CHAT_ID), type: 'private' as const, first_name: 'T' },
+          },
         }) as unknown as ReturnType<typeof _prev>;
       }
       if (method === 'answerCallbackQuery') {
-        return Promise.resolve(true) as unknown as ReturnType<typeof _prev>;
+        return Promise.resolve({ ok: true, result: true }) as unknown as ReturnType<typeof _prev>;
       }
-      return Promise.resolve(true) as unknown as ReturnType<typeof _prev>;
+      return Promise.resolve({ ok: true, result: true }) as unknown as ReturnType<typeof _prev>;
     });
     await bot.init();
   });

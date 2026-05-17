@@ -15,10 +15,9 @@
 
 import type { Db } from '../../db/client.js';
 import type { BotContext } from '../bot.js';
+import { UUID_RE } from '../../lib/uuid.js';
 import { decide, type Decision } from '../decisions.js';
 import { escapeMarkdownV2 } from '../format.js';
-
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 /** Slash-command handler — `/pick <id> [reason]`, etc. */
 export async function handleDecide(

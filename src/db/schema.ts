@@ -135,6 +135,9 @@ export const items = pgTable(
     authorityWeighted: doublePrecision('authority_weighted'),
   },
   (t) => ({
+    // raw_item_id is UNIQUE (migration 011) — at most one items row per
+    // raw_item. Multi-worker race safety net + per-raw_item lookup index.
+    rawItemIdUnique: uniqueIndex('items_raw_item_id_unique').on(t.rawItemId),
     clusterIdx: index('idx_items_cluster_id').on(t.clusterId),
     publishedAtIdx: index('idx_items_published_at').on(t.publishedAt.desc()),
     primaryDomainIdx: index('idx_items_primary_domain').on(t.primaryDomain),

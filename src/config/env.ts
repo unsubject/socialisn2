@@ -68,6 +68,13 @@ export const env = {
   // OpenAI direct — embeddings only (text-embedding-3-small). See
   // src/lib/embeddings.ts for why we don't proxy this through LiteLLM.
   openaiApiKey: () => required('OPENAI_API_KEY'),
+  // 2nd-brain MCP — consumed by src/lib/two_brain_client.ts for
+  // archive_search + record_pick. Intentionally OPTIONAL: if either is
+  // unset, the client treats every call as a degraded no-op and the
+  // scoring run proceeds with archive_overlap=0 (SPEC §10.2 graceful
+  // fallback). Hard-failing at startup would conflict with that contract.
+  twoBrainMcpUrl: () => optional('TWO_BRAIN_MCP_URL', ''),
+  twoBrainMcpToken: () => optional('TWO_BRAIN_MCP_TOKEN', ''),
   // SPEC §12 cost enforcement. Hard ceiling, not advisory.
   costCeilingDailyUsd: () => {
     const raw = process.env.COST_CEILING_DAILY_USD ?? '1.50';

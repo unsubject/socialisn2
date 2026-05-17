@@ -122,7 +122,7 @@ export async function listCandidates(
 export async function getCandidate(
   db: Db,
   rawArgs: unknown,
-): Promise<{ candidate: CandidateDetail } | { error: string }> {
+): Promise<{ candidate: CandidateDetail }> {
   const args = GetCandidateArgs.parse(rawArgs);
   const rows = await db.execute<CandidateDetailRow>(sql`
     SELECT id, cluster_id, headline, context_summary, primary_domain, domains,
@@ -134,7 +134,11 @@ export async function getCandidate(
     LIMIT 1
   `);
   const row = rows[0];
-  if (!row) return { error: `no candidate ${args.id}` };
+  // Throw on missing — server.ts's call-tool wrapper catches and sets
+  // isError:true so MCP clients can distinguish "not found" from a
+  // valid "found and here's the data". Returning {error} inline would
+  // serialize into a success-shaped content block with no isError flag.
+  if (!row) throw new Error(`no candidate ${args.id}`);
 
   const sources = await db.execute<SourceRow>(sql`
     SELECT s.id, s.name, ri.url, ri.published_at

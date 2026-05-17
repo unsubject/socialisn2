@@ -135,6 +135,22 @@ describe.skipIf(!DATABASE_URL)('computeExclusive (SPEC §6.1 note)', () => {
     expect(result.headStartHours).toBeNull();
   });
 
+  it('returns not-exclusive when cluster has multiple items but only ONE distinct source', async () => {
+    // Regression guard for the Codex-flagged LIMIT 2 bug: previously
+    // returned two rows from the same source and computed a bogus
+    // intra-source head start. With the DISTINCT ON (s.id) collapse,
+    // a single-source cluster correctly returns headStartHours=null.
+    const cluster = await makeCluster();
+    const only = await makeSource(85);
+    await attachItem(cluster, only, new Date(Date.now() - 12 * 3_600_000));
+    await attachItem(cluster, only, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, only, new Date(Date.now() - 1 * 3_600_000));
+    const result = await computeExclusive(db, cluster);
+    expect(result.isExclusive).toBe(false);
+    expect(result.headStartHours).toBeNull();
+    expect(result.firstSourceAuthority).toBe(85);
+  });
+
   it('exclusive=true when first authority ≥ 75 AND head start > 4h', async () => {
     const cluster = await makeCluster();
     const high = await makeSource(85);
@@ -149,6 +165,30 @@ describe.skipIf(!DATABASE_URL)('computeExclusive (SPEC §6.1 note)', () => {
     expect(result.exclusiveSourceId).toBe(high);
     expect(result.firstSourceAuthority).toBe(85);
     expect(result.headStartHours).toBeCloseTo(6, 5);
+  });
+
+  it('exclusive=true when first publisher posts MULTIPLE items before second source (Codex bug fix)', async () => {
+    // The pre-fix LIMIT 2 returned two rows from `high` (its t0 and its
+    // t1 repost), computing headStartHours=2h and missing the actual
+    // scoop. With the DISTINCT ON collapse, the second slot is the
+    // genuinely-second source (`other`) and the 8h gap (high@t0 →
+    // other@t1) correctly registers as exclusive.
+    const cluster = await makeCluster();
+    const high = await makeSource(85);
+    const other = await makeSource(60);
+    const t0 = new Date(Date.now() - 12 * 3_600_000);
+    const tHighRepost = new Date(Date.now() - 10 * 3_600_000); // high's second post, +2h
+    const tOther = new Date(Date.now() - 4 * 3_600_000);       // other lands at +8h
+    await attachItem(cluster, high, t0);
+    await attachItem(cluster, high, tHighRepost);
+    await attachItem(cluster, other, tOther);
+
+    const result = await computeExclusive(db, cluster);
+    expect(result.isExclusive).toBe(true);
+    expect(result.exclusiveSourceId).toBe(high);
+    expect(result.firstSourceAuthority).toBe(85);
+    // 12h − 4h = 8h between first publisher's earliest and second source's earliest.
+    expect(result.headStartHours).toBeCloseTo(8, 5);
   });
 
   it('NOT exclusive when first authority < 75', async () => {

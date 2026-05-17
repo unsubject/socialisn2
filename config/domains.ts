@@ -9,10 +9,19 @@
 //                             populating items.authority_weighted, AND the
 //                             value handed to heuristic.ts as
 //                             HeuristicSignals.domainWeight.
-//   clusterThreshold        — cosine-similarity floor for SPEC §7.4 cluster
-//                             matching (an item only joins an existing
-//                             cluster when similarity to the centroid is
-//                             at or above this).
+//   clusterSimilarityFloor  — cosine-SIMILARITY floor for SPEC §7.4
+//                             cluster matching (an item only joins an
+//                             existing cluster when similarity to the
+//                             centroid is at or above this).
+//
+// **Unit warning.** SPEC §8 speaks in cosine SIMILARITY (0.70-0.72 etc).
+// pgvector and src/scoring/cluster.ts speak in cosine DISTANCE
+// (= 1 - similarity), and assignCluster joins when distance < threshold.
+// Passing a similarity value where a distance is expected (or vice versa)
+// inverts the join boundary and either over-merges or rejects everything.
+// The helpers below are named for the unit they return: use
+// `clusterSimilarityThreshold(d)` when you need the SPEC value and
+// `clusterJoinDistance(d)` when you're wiring into cluster.ts.
 //
 // Values mirror the table in SPEC §8 verbatim. Edits here are real
 // editorial choices — audit against the SPEC table before changing.
@@ -23,7 +32,8 @@ export interface DomainConfig {
   domain: Domain;
   recencyHalfLifeHours: number;
   defaultAuthorityWeight: number;
-  clusterThreshold: number;
+  /** Cosine SIMILARITY floor for cluster join — SPEC §8 unit. */
+  clusterSimilarityFloor: number;
 }
 
 /**
@@ -36,31 +46,31 @@ export const DOMAIN_CONFIGS: Record<Domain, DomainConfig> = {
     domain: 'economy',
     recencyHalfLifeHours: 48,
     defaultAuthorityWeight: 1.0,
-    clusterThreshold: 0.70,
+    clusterSimilarityFloor: 0.70,
   },
   economics: {
     domain: 'economics',
     recencyHalfLifeHours: 14 * 24, // 14 days — working papers stay relevant
     defaultAuthorityWeight: 1.2,   // academic-source boost per SPEC §8
-    clusterThreshold: 0.72,
+    clusterSimilarityFloor: 0.72,
   },
   scitech: {
     domain: 'scitech',
     recencyHalfLifeHours: 7 * 24,
     defaultAuthorityWeight: 1.0,
-    clusterThreshold: 0.70,
+    clusterSimilarityFloor: 0.70,
   },
   geopolitics: {
     domain: 'geopolitics',
     recencyHalfLifeHours: 5 * 24,
     defaultAuthorityWeight: 1.1,
-    clusterThreshold: 0.68,
+    clusterSimilarityFloor: 0.68,
   },
   national: {
     domain: 'national',
     recencyHalfLifeHours: 3 * 24,
     defaultAuthorityWeight: 1.0,
-    clusterThreshold: 0.70,
+    clusterSimilarityFloor: 0.70,
   },
 };
 
@@ -87,7 +97,29 @@ export function domainWeight(domain: Domain): number {
   return DOMAIN_CONFIGS[domain].defaultAuthorityWeight;
 }
 
-/** Per-domain cluster-join cosine threshold per SPEC §7.4. */
-export function clusterThreshold(domain: Domain): number {
-  return DOMAIN_CONFIGS[domain].clusterThreshold;
+/**
+ * Per-domain cosine SIMILARITY floor for cluster join per SPEC §8. Use
+ * this when you need the SPEC value as a similarity (e.g. for logging /
+ * reporting). If you're wiring into src/scoring/cluster.ts's threshold
+ * option, use `clusterJoinDistance` instead — cluster.ts expects a
+ * distance, and passing a similarity here would invert the join
+ * boundary and over-merge.
+ */
+export function clusterSimilarityThreshold(domain: Domain): number {
+  return DOMAIN_CONFIGS[domain].clusterSimilarityFloor;
+}
+
+/**
+ * Per-domain cosine DISTANCE threshold for cluster join. This is
+ * `1 - clusterSimilarityThreshold(domain)` and is the value to pass
+ * into `assignCluster(..., { threshold })`, which joins when
+ * `distance < threshold`. Wired this way the SPEC §8 similarity floors
+ * map straight to the join behaviour described there (an item with
+ * similarity ≥ floor joins; below floor does not).
+ *
+ * Example: economy similarity 0.70 → distance 0.30. assignCluster's
+ * existing default is 0.30, matching economy verbatim.
+ */
+export function clusterJoinDistance(domain: Domain): number {
+  return 1 - DOMAIN_CONFIGS[domain].clusterSimilarityFloor;
 }

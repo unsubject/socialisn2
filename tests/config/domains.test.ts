@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   DOMAIN_CONFIGS,
-  clusterThreshold,
+  clusterJoinDistance,
+  clusterSimilarityThreshold,
   decayForDomain,
   domainWeight,
   recencyDecay,
@@ -19,31 +20,31 @@ describe('DOMAIN_CONFIGS', () => {
     expect(configKeys).toEqual(validKeys);
   });
 
-  it('matches the SPEC §8 table verbatim', () => {
+  it('matches the SPEC §8 table verbatim (similarity floors, not distances)', () => {
     expect(DOMAIN_CONFIGS.economy).toMatchObject({
       recencyHalfLifeHours: 48,
       defaultAuthorityWeight: 1.0,
-      clusterThreshold: 0.70,
+      clusterSimilarityFloor: 0.70,
     });
     expect(DOMAIN_CONFIGS.economics).toMatchObject({
       recencyHalfLifeHours: 14 * 24,
       defaultAuthorityWeight: 1.2,
-      clusterThreshold: 0.72,
+      clusterSimilarityFloor: 0.72,
     });
     expect(DOMAIN_CONFIGS.scitech).toMatchObject({
       recencyHalfLifeHours: 7 * 24,
       defaultAuthorityWeight: 1.0,
-      clusterThreshold: 0.70,
+      clusterSimilarityFloor: 0.70,
     });
     expect(DOMAIN_CONFIGS.geopolitics).toMatchObject({
       recencyHalfLifeHours: 5 * 24,
       defaultAuthorityWeight: 1.1,
-      clusterThreshold: 0.68,
+      clusterSimilarityFloor: 0.68,
     });
     expect(DOMAIN_CONFIGS.national).toMatchObject({
       recencyHalfLifeHours: 3 * 24,
       defaultAuthorityWeight: 1.0,
-      clusterThreshold: 0.70,
+      clusterSimilarityFloor: 0.70,
     });
   });
 
@@ -53,10 +54,10 @@ describe('DOMAIN_CONFIGS', () => {
     }
   });
 
-  it('every cluster threshold is in (0, 1)', () => {
+  it('every similarity floor is in (0, 1)', () => {
     for (const cfg of Object.values(DOMAIN_CONFIGS)) {
-      expect(cfg.clusterThreshold).toBeGreaterThan(0);
-      expect(cfg.clusterThreshold).toBeLessThan(1);
+      expect(cfg.clusterSimilarityFloor).toBeGreaterThan(0);
+      expect(cfg.clusterSimilarityFloor).toBeLessThan(1);
     }
   });
 });
@@ -80,7 +81,7 @@ describe('recencyDecay', () => {
   });
 });
 
-describe('decayForDomain / domainWeight / clusterThreshold accessors', () => {
+describe('decayForDomain / domainWeight accessors', () => {
   it('decayForDomain plumbs through to recencyDecay with the right half-life', () => {
     expect(decayForDomain('economy', 48)).toBeCloseTo(0.5, 9);
     expect(decayForDomain('economics', 14 * 24)).toBeCloseTo(0.5, 9);
@@ -90,8 +91,32 @@ describe('decayForDomain / domainWeight / clusterThreshold accessors', () => {
     expect(domainWeight('geopolitics')).toBe(1.1);
     expect(domainWeight('economy')).toBe(1.0);
   });
-  it('clusterThreshold returns the per-domain cosine floor', () => {
-    expect(clusterThreshold('economy')).toBe(0.70);
-    expect(clusterThreshold('geopolitics')).toBe(0.68);
+});
+
+describe('cluster threshold helpers (similarity vs distance)', () => {
+  it('clusterSimilarityThreshold returns the SPEC §8 similarity verbatim', () => {
+    expect(clusterSimilarityThreshold('economy')).toBe(0.70);
+    expect(clusterSimilarityThreshold('economics')).toBe(0.72);
+    expect(clusterSimilarityThreshold('geopolitics')).toBe(0.68);
+  });
+
+  it('clusterJoinDistance returns 1 - similarity for direct use as cluster.ts threshold', () => {
+    expect(clusterJoinDistance('economy')).toBeCloseTo(0.30, 9);
+    expect(clusterJoinDistance('economics')).toBeCloseTo(0.28, 9);
+    expect(clusterJoinDistance('geopolitics')).toBeCloseTo(0.32, 9);
+  });
+
+  it('the two helpers always sum to 1 (units are consistent)', () => {
+    for (const d of VALID_DOMAINS) {
+      expect(clusterSimilarityThreshold(d) + clusterJoinDistance(d)).toBeCloseTo(1, 9);
+    }
+  });
+
+  it('economy clusterJoinDistance matches the existing cluster.ts default of 0.30', () => {
+    // Regression guard: if someone re-tunes economy's SPEC §8 value,
+    // they need to be aware the historical cluster.ts default was
+    // chosen to match this domain. Fails loudly so the audit is
+    // visible at the PR diff level.
+    expect(clusterJoinDistance('economy')).toBeCloseTo(0.30, 9);
   });
 });

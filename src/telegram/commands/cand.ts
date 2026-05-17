@@ -5,14 +5,13 @@ import { sql } from 'drizzle-orm';
 
 import type { Db } from '../../db/client.js';
 import type { BotContext } from '../bot.js';
+import { UUID_RE } from '../../lib/uuid.js';
 import {
   candidateKeyboard,
   escapeMarkdownV2,
   formatCandidateDetail,
   type RenderCandidate,
 } from '../format.js';
-
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 type CandidateDetailRow = {
   id: string;

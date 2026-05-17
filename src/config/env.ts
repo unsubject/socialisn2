@@ -111,4 +111,12 @@ export const env = {
     optional('SCORING_WORKER_COMPACTION_CRON', '0 4 * * *'),
   scoringWorkerBatchSize: () => positiveIntEnv('SCORING_WORKER_BATCH_SIZE', 20),
   scoringWorkerMaxAttempts: () => positiveIntEnv('SCORING_WORKER_MAX_ATTEMPTS', 3),
+  // RSS output (SPEC §11.2). Both are required when generation is wired
+  // — the orchestrator gates the regeneration call on `rssPath()` being
+  // non-empty so non-prod environments (tests, manual scoring runs) can
+  // skip the disk write entirely. `publicHost` is only read when
+  // `rssPath` is set, so a non-prod env that leaves both empty doesn't
+  // need to set either.
+  rssPath: () => optional('RSS_PATH', ''),
+  publicHost: () => required('PUBLIC_HOST'),
 };

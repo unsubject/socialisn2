@@ -30,11 +30,14 @@ export const mcpPlugin: FastifyPluginAsync<McpPluginOptions> = async (
   app,
   opts,
 ) => {
+  // SDK Server stays alive across requests (it's a tool registry +
+  // dispatcher, stateless from the request's perspective). Each
+  // request gets its OWN transport — a single shared transport in
+  // stateless mode holds the in-flight response writer, and concurrent
+  // requests would race on that state (one client's response could
+  // land in the other's socket). Mirrors the SDK's own
+  // simpleStreamableHttp example.
   const server = opts.buildServer();
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-  });
-  await server.connect(transport);
 
   // Auth gates EVERY request to this prefix — including GET /mcp (used
   // by some MCP clients for the SSE channel in stateful mode; we
@@ -49,18 +52,36 @@ export const mcpPlugin: FastifyPluginAsync<McpPluginOptions> = async (
   });
 
   app.post('/', async (request, reply) => {
-    // Hand the raw req/res to the SDK. reply.hijack() tells Fastify
-    // "I'm taking over reply.raw; don't try to call reply.send for
-    // me." Without it, Fastify would attempt to also send a response
-    // after the transport already wrote one.
-    reply.hijack();
-    await transport.handleRequest(request.raw, reply.raw, request.body);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    try {
+      await server.connect(transport);
+      // reply.hijack() tells Fastify "I'm taking over reply.raw; don't
+      // try to call reply.send for me." Without it, Fastify would
+      // attempt to also send a response after the transport wrote one.
+      reply.hijack();
+      // Pass request.body as the third arg — Fastify has pre-parsed
+      // the JSON body, so the transport must not try to re-read the
+      // already-consumed stream (it would hang waiting for bytes).
+      await transport.handleRequest(request.raw, reply.raw, request.body);
+    } finally {
+      await transport.close();
+    }
   });
 
   // GET /mcp is used by stateful-mode clients for SSE; in stateless
   // mode the SDK returns 405. Still route it so auth fires.
   app.get('/', async (request, reply) => {
-    reply.hijack();
-    await transport.handleRequest(request.raw, reply.raw);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    try {
+      await server.connect(transport);
+      reply.hijack();
+      await transport.handleRequest(request.raw, reply.raw);
+    } finally {
+      await transport.close();
+    }
   });
 };

@@ -14,7 +14,8 @@
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "db:migrate": "tsx scripts/migrate.ts",
-    "worker:ingestion": "tsx src/workers/ingestion.ts"
+    "worker:ingestion": "tsx src/workers/ingestion.ts",
+    "worker:scoring": "tsx src/workers/scoring.ts"
   },
   "dependencies": {
     "bullmq": "^5.21.0",

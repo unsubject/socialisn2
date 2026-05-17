@@ -29,6 +29,29 @@ function mkVec(prefix: number[]): number[] {
   return v.map((x) => x / norm);
 }
 
+/**
+ * Return an embed stub that hands out a fresh orthogonal unit basis
+ * vector on each call: e_0, e_1, e_2, ... Pairwise cosine is exactly 0
+ * (distance 1.0), comfortably above both the 0.93 dedup threshold and
+ * the 0.30 cluster-join threshold. Avoids the random-vector flake where
+ * two positive-octant draws could pass either threshold.
+ *
+ * Each test scope gets its own counter via the factory, so tests can be
+ * reordered safely without cross-test state.
+ */
+function orthEmbedFactory(): (opts: unknown) => Promise<EmbedResult> {
+  let idx = 0;
+  return async (): Promise<EmbedResult> => {
+    const v = new Array(EMBEDDING_DIM).fill(0);
+    // Wrap with % EMBEDDING_DIM so a hypothetical test that grew past
+    // the basis dimensionality would fail loudly (collision back to e_0)
+    // instead of crashing with an out-of-bounds write.
+    v[idx % EMBEDDING_DIM] = 1;
+    idx += 1;
+    return { vectors: [v], inputTokens: 80, usd: 0.0000016 };
+  };
+}
+
 function stubNormalizeResult(domain: 'economy' | 'scitech' = 'economy'): NormalizeResult {
   return {
     item: {
@@ -183,12 +206,10 @@ describe.skipIf(!DATABASE_URL)('scoring-worker tickOnce / compactOnce', () => {
       maxAttempts: 3,
       deps: {
         normalize: async () => stubNormalizeResult('economy'),
-        // Each row gets a distinct vector so they create separate clusters
-        // (no accidental dedup hit changing the path).
-        embed: async () => {
-          const v = mkVec([Math.random(), Math.random(), Math.random()]);
-          return stubEmbedResult(v);
-        },
+        // Deterministic orthogonal basis — each row gets e_0, e_1, e_2 →
+        // pairwise cosine 0 → no chance of accidental dedup-hit collapsing
+        // normalProcessed below 3.
+        embed: orthEmbedFactory(),
       },
     });
 
@@ -215,7 +236,7 @@ describe.skipIf(!DATABASE_URL)('scoring-worker tickOnce / compactOnce', () => {
       maxAttempts: 3,
       deps: {
         normalize: async () => stubNormalizeResult('economy'),
-        embed: async () => stubEmbedResult(mkVec([Math.random()])),
+        embed: orthEmbedFactory(),
       },
     });
     expect(stats.pulled).toBe(2);
@@ -231,7 +252,7 @@ describe.skipIf(!DATABASE_URL)('scoring-worker tickOnce / compactOnce', () => {
       maxAttempts: 3,
       deps: {
         normalize: async () => stubNormalizeResult('economy'),
-        embed: async () => stubEmbedResult(mkVec([Math.random()])),
+        embed: orthEmbedFactory(),
       },
     });
 

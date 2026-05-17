@@ -48,7 +48,10 @@ export function escapeXml(s: string): string {
   // Strip C0 controls forbidden in XML 1.0 text: 0x00-0x08, 0x0B-0x0C,
   // 0x0E-0x1F. TAB (0x09), LF (0x0A), CR (0x0D) pass through. Hex
   // escapes (not literal bytes) so the source survives editor / VCS /
-  // diff round-trips intact.
+  // diff round-trips intact. eslint's no-control-regex flags the
+  // character class even via \x escapes — disable explicitly here since
+  // stripping these characters is the entire point of the function.
+  // eslint-disable-next-line no-control-regex
   const stripped = s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
   return stripped
     .replace(/&/g, '&amp;')

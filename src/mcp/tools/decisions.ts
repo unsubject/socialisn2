@@ -6,13 +6,7 @@
 
 import type { Db } from '../../db/client.js';
 import { decide } from '../../telegram/decisions.js';
-import { DecideArgs, DecisionArgs, DeferArgs } from '../schemas.js';
-
-// Re-export the per-tool args schema name as decoupled aliases so
-// downstream readers don't have to chase the cross-import; SDK
-// handlers use these directly.
-const _ = { DecisionArgs, DeferArgs, DecideArgs };
-void _;
+import { DecisionArgs, DeferArgs } from '../schemas.js';
 
 export async function pickCandidate(
   db: Db,

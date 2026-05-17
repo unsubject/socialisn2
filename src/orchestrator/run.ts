@@ -111,14 +111,20 @@ export interface RunResult {
   error?: string;
 }
 
-interface ClusterRow {
+// Row shapes for db.execute<T>. Declared as `type` aliases (not
+// `interface`) because drizzle's execute<T> requires T extends
+// Record<string, unknown> and TS treats interface declarations as
+// closed — no implicit index signature — so an interface here would
+// fail to satisfy the constraint and the typecheck would reject the
+// call. Type aliases of object literals are structurally Record-compatible.
+type ClusterRow = {
   id: string;
   centroid: string;
   primary_domain: string;
   domains: string[];
   item_count: number;
   first_seen_at: string;
-}
+};
 
 interface ScoredCluster extends ClusterRow {
   heuristicScore: number;
@@ -335,7 +341,9 @@ export async function runScoring(
 // helpers
 // ---------------------------------------------------------------------------
 
-interface ClusterItemRow {
+// Same `type` (not `interface`) treatment as ClusterRow above — see
+// the comment there for why db.execute<T> rejects closed interfaces.
+type ClusterItemRow = {
   id: string;
   summary_en: string;
   context_en: string;
@@ -343,7 +351,7 @@ interface ClusterItemRow {
   source_name: string;
   authority_score: number;
   published_at: string;
-}
+};
 
 async function loadClusterItems(db: Db, clusterId: string): Promise<ClusterItemRow[]> {
   return db.execute<ClusterItemRow>(sql`

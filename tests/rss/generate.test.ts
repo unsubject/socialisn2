@@ -102,10 +102,15 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
   // helpers
   // -------------------------------------------------------------------------
 
+  type DomainCode = 'economy' | 'economics' | 'scitech' | 'geopolitics' | 'national';
+
   interface SeedCandidate {
     headline?: string;
     contextSummary?: string;
-    primaryDomain?: 'economy' | 'economics' | 'scitech' | 'geopolitics' | 'national';
+    primaryDomain?: DomainCode;
+    /** Multi-label domains[]. Defaults to [primaryDomain]; pass explicitly
+     *  to exercise the strict-primary contract on per-domain feeds. */
+    domains?: DomainCode[];
     keywords?: string[];
     tags?: string[];
     temperature?: 'cold' | 'warm' | 'hot' | 'over_saturated';
@@ -119,6 +124,8 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
   async function seedCandidate(opts: SeedCandidate = {}): Promise<string> {
     const id = uuidv7();
     const runId = uuidv7();
+    const primary = opts.primaryDomain ?? 'economy';
+    const domains = opts.domains ?? [primary];
     const expires = (opts.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000)).toISOString();
     await client`
       INSERT INTO candidates (
@@ -131,8 +138,8 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
         ${id}, ${clusterId},
         ${opts.headline ?? 'Default headline'},
         ${opts.contextSummary ?? 'Default context.'},
-        ${opts.primaryDomain ?? 'economy'},
-        ARRAY[${opts.primaryDomain ?? 'economy'}]::text[],
+        ${primary},
+        ${domains}::text[],
         ${opts.temperature ?? 'warm'},
         ${opts.trajectory ?? 'rising'},
         ${opts.isExclusive ?? false},
@@ -198,6 +205,28 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
 
     const nat = await parser.parseString(await readFile(join(outDir, 'national.xml'), 'utf-8'));
     expect(nat.items).toEqual([]);
+  });
+
+  it('per-domain feed uses primary_domain strictly — multi-label domains[] does NOT route', async () => {
+    // Candidate is primarily economy but ALSO labelled geopolitics.
+    // SPEC §11.2 contract: it appears in all.xml + economy.xml ONLY,
+    // NOT in geopolitics.xml. Multi-label is for search/filter UI
+    // (Phase 4 PR 2-3), not for static feed membership.
+    const id = await seedCandidate({
+      primaryDomain: 'economy',
+      domains: ['economy', 'geopolitics'],
+      headline: 'Cross-domain story',
+    });
+
+    await generateAllFeeds(db, outDir, PUBLIC_HOST);
+
+    const all = await parser.parseString(await readFile(join(outDir, 'all.xml'), 'utf-8'));
+    const econ = await parser.parseString(await readFile(join(outDir, 'economy.xml'), 'utf-8'));
+    const geo = await parser.parseString(await readFile(join(outDir, 'geopolitics.xml'), 'utf-8'));
+
+    expect(all.items.map((i) => i.guid)).toEqual([id]);
+    expect(econ.items.map((i) => i.guid)).toEqual([id]);
+    expect(geo.items).toEqual([]);
   });
 
   it('excludes candidates whose status is not new', async () => {

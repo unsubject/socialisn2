@@ -16,14 +16,13 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { sql } from 'drizzle-orm';
 
 import type { Db } from './db/client.js';
+import { UUID_RE } from './lib/uuid.js';
 import { renderDetail, renderNotFound } from './rss/render-detail.js';
 
 // Strict 8-4-4-4-12 hex UUID pattern. The route uses this as a
 // pre-filter BEFORE the DB query so a UUID-shaped-but-syntactically-
 // invalid path (e.g. last group not 12 hex chars) becomes a clean 404
 // instead of a PG "invalid input syntax for type uuid" → Fastify 500.
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
 // Raw row shapes — `db.execute<T>` does not run pg type parsers, so
 // timestamptz columns come back as strings and arrays come back as
 // JS arrays (postgres-js handles the latter automatically).

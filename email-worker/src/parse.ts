@@ -85,6 +85,42 @@ const TRACKING_PATTERNS: RegExp[] = [
   /\b(beacon|pixel|open\.gif|open\.png|tracking\.gif|track\/open)\b/,
 ];
 
+// Query params known to carry tracking metadata only — not content
+// intent. Used by the homepage-masthead check to recognise URLs like
+// `https://publisher.com/?utm_source=newsletter` as masthead even
+// though `parsed.search` is non-empty. Conservative set: each entry
+// here is unambiguously a tracking-only param across the public web.
+// We don't strip these from the stored link_url — classification just
+// reads through them.
+const TRACKING_QUERY_PARAMS = new Set<string>([
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+  'utm_id',
+  'utm_name',
+  'utm_brand',
+  'fbclid',
+  'gclid',
+  'msclkid',
+  'dclid',
+  'yclid',
+  'mc_cid', // Mailchimp campaign id
+  'mc_eid', // Mailchimp encrypted recipient id
+  '_hsmi', // HubSpot
+  '_hsenc', // HubSpot
+  'mkt_tok', // Marketo
+]);
+
+function hasOnlyTrackingParams(searchParams: URLSearchParams): boolean {
+  for (const key of searchParams.keys()) {
+    if (!TRACKING_QUERY_PARAMS.has(key.toLowerCase())) return false;
+  }
+  // Empty params satisfy vacuously — the no-query case is also "homepage".
+  return true;
+}
+
 function classifyLink(rawUrl: string): LinkKind {
   let parsed: URL;
   try {
@@ -106,9 +142,15 @@ function classifyLink(rawUrl: string): LinkKind {
     if (re.test(pathAndSearch)) return 'masthead';
   }
 
-  // Homepage-style link (host root with no query) — the publisher logo
-  // pointing at their root URL is the classic masthead pattern.
-  if ((parsed.pathname === '' || parsed.pathname === '/') && parsed.search === '') {
+  // Homepage-style link (host root with no meaningful query) — the
+  // publisher logo pointing at their root URL is the classic masthead
+  // pattern. Newsletters routinely tack utm_*/mc_*/etc. tracking params
+  // onto the masthead URL; treat search as empty when only such params
+  // are present so the masthead doesn't get mis-classified as article.
+  if (
+    (parsed.pathname === '' || parsed.pathname === '/') &&
+    hasOnlyTrackingParams(parsed.searchParams)
+  ) {
     return 'masthead';
   }
 

@@ -226,6 +226,54 @@ describe('extractLinks — classification', () => {
       expect(l.kind).toBe('other');
     }
   });
+
+  it('classifies a UTM-tracked homepage URL as masthead', () => {
+    const html = `<a href="https://publisher.com/?utm_source=newsletter&utm_medium=email">logo</a>`;
+    expect(extractLinks({ html })).toEqual([
+      {
+        url: 'https://publisher.com/?utm_source=newsletter&utm_medium=email',
+        pos: 0,
+        kind: 'masthead',
+      },
+    ]);
+  });
+
+  it('classifies a Mailchimp/HubSpot/Marketo-tracked homepage URL as masthead', () => {
+    const html = `
+      <a href="https://publisher.com/?mc_cid=abc&mc_eid=def">mc</a>
+      <a href="https://another.com/?_hsmi=123&_hsenc=p2A">hs</a>
+      <a href="https://third.com/?mkt_tok=eyJpIjo">mkt</a>
+      <a href="https://fourth.com/?fbclid=IwAR0">fb</a>
+    `;
+    const links = extractLinks({ html });
+    expect(links).toHaveLength(4);
+    expect(links.every((l) => l.kind === 'masthead')).toBe(true);
+  });
+
+  it('keeps tracked deep-path URLs as article (path is non-root)', () => {
+    const html = `<a href="https://publisher.com/2026/05/article-x?utm_source=newsletter">read</a>`;
+    expect(extractLinks({ html })).toEqual([
+      {
+        url: 'https://publisher.com/2026/05/article-x?utm_source=newsletter',
+        pos: 0,
+        kind: 'article',
+      },
+    ]);
+  });
+
+  it('does NOT classify homepage URLs as masthead when a non-tracking param is present', () => {
+    // `q` is content-meaningful (a search query) — the link likely has
+    // intent beyond a logo masthead. Stay conservative and classify
+    // as article so the feed can pick it if no deeper article URL exists.
+    const html = `<a href="https://publisher.com/?q=hong+kong&utm_source=newsletter">search</a>`;
+    expect(extractLinks({ html })).toEqual([
+      {
+        url: 'https://publisher.com/?q=hong+kong&utm_source=newsletter',
+        pos: 0,
+        kind: 'article',
+      },
+    ]);
+  });
 });
 
 describe('stripBoilerplate — CRLF', () => {

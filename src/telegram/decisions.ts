@@ -33,6 +33,26 @@ import {
 } from '../lib/two_brain_client.js';
 
 export type Decision = PickDecision;
+type CandidateStatus = 'picked' | 'passed' | 'deferred';
+
+/** Decision → candidate status. Exhaustive switch so adding a new
+ *  Decision value without updating this map fails the build instead
+ *  of silently routing to the `deferred` branch (which the previous
+ *  nested-ternary form did). */
+function statusFor(d: Decision): CandidateStatus {
+  switch (d) {
+    case 'pick':
+      return 'picked';
+    case 'pass':
+      return 'passed';
+    case 'defer':
+      return 'deferred';
+    default: {
+      const _exhaustive: never = d;
+      throw new Error(`statusFor: unhandled decision ${String(_exhaustive)}`);
+    }
+  }
+}
 
 export interface DecideResult {
   ok: boolean;
@@ -89,13 +109,14 @@ export async function decide(
   deps: DecideDependencies = {},
 ): Promise<DecideResult> {
   const recordPick = deps.recordPick ?? defaultRecordPick;
+  const newStatus = statusFor(decision);
 
   // Steps 1 + 2 in a single tx — the candidate's status change and the
   // feedback row land together or not at all.
   const candidate = await db.transaction(async (tx) => {
     const rows = await tx.execute<CandidateRow>(sql`
       UPDATE candidates
-      SET status          = ${decision === 'pick' ? 'picked' : decision === 'pass' ? 'passed' : 'deferred'},
+      SET status          = ${newStatus},
           decided_at      = NOW(),
           decision_reason = ${reason ?? null}
       WHERE id = ${candidateId}

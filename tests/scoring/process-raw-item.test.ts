@@ -61,6 +61,12 @@ function stubEmbedResult(vector: number[]): EmbedResult {
   return { vectors: [vector], inputTokens: 80, usd: 0.0000016 };
 }
 
+/** A timestamp safely within the 7-day recency windows the dedup +
+ *  cluster modules use. NOW - 2h is comfortably inside both. */
+function recentTs(): Date {
+  return new Date(Date.now() - 2 * 60 * 60 * 1000);
+}
+
 describe.skipIf(!DATABASE_URL)('processRawItem (Phase 2 per-item orchestrator)', () => {
   let client: ReturnType<typeof postgres>;
   let db: ReturnType<typeof drizzle<typeof schema>>;
@@ -215,7 +221,7 @@ describe.skipIf(!DATABASE_URL)('processRawItem (Phase 2 per-item orchestrator)',
   // -------------------------------------------------------------------------
 
   it('normal path: inserts items + new cluster, marks raw_item processed, records cost', async () => {
-    const rawId = await insertRawItem({ publishedAt: new Date('2026-05-15T10:00:00Z') });
+    const rawId = await insertRawItem({ publishedAt: recentTs() });
 
     const outcome = await processRawItem(
       db,
@@ -224,7 +230,7 @@ describe.skipIf(!DATABASE_URL)('processRawItem (Phase 2 per-item orchestrator)',
         title: 'something',
         content: 'body',
         language: 'en',
-        publishedAt: new Date('2026-05-15T10:00:00Z'),
+        publishedAt: recentTs(),
       },
       {
         normalize: async () => stubNormalizeResult('economy'),
@@ -265,12 +271,12 @@ describe.skipIf(!DATABASE_URL)('processRawItem (Phase 2 per-item orchestrator)',
     const seed = await seedItemAndCluster({
       embedding: vA,
       primaryDomain: 'economy',
-      publishedAt: new Date('2026-05-15T08:00:00Z'),
+      // Relative-time seed keeps the test out of the 7-day expiry trap
+      // that hard-coded dates fall into a few weeks after merge.
+      publishedAt: recentTs(),
     });
 
-    const rawId = await insertRawItem({
-      publishedAt: new Date('2026-05-15T10:00:00Z'),
-    });
+    const rawId = await insertRawItem({ publishedAt: recentTs() });
 
     const outcome = await processRawItem(
       db,
@@ -279,7 +285,7 @@ describe.skipIf(!DATABASE_URL)('processRawItem (Phase 2 per-item orchestrator)',
         title: 'near-duplicate headline',
         content: 'body',
         language: 'en',
-        publishedAt: new Date('2026-05-15T10:00:00Z'),
+        publishedAt: recentTs(),
       },
       {
         normalize: async () => stubNormalizeResult('economy'),
@@ -317,9 +323,10 @@ describe.skipIf(!DATABASE_URL)('processRawItem (Phase 2 per-item orchestrator)',
   // -------------------------------------------------------------------------
 
   it('ceiling-hit: short-circuits before normalise, leaves raw_item untouched', async () => {
-    // Default COST_CEILING_DAILY_USD is 1.50; project 0.001 brings the check
-    // to 1.499 + 0.001 >= 1.50 → trips. Pre-seed today's ledger at $1.499.
-    await seedCostLedger(1.499);
+    // Default COST_CEILING_DAILY_USD is 1.50. Seed today's ledger AT the
+    // ceiling so the +$0.001 projection unambiguously trips it without
+    // dancing around FP precision at the boundary.
+    await seedCostLedger(1.5);
 
     const rawId = await insertRawItem();
 

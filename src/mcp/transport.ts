@@ -30,14 +30,15 @@ export const mcpPlugin: FastifyPluginAsync<McpPluginOptions> = async (
   app,
   opts,
 ) => {
-  // SDK Server stays alive across requests (it's a tool registry +
-  // dispatcher, stateless from the request's perspective). Each
-  // request gets its OWN transport — a single shared transport in
-  // stateless mode holds the in-flight response writer, and concurrent
-  // requests would race on that state (one client's response could
-  // land in the other's socket). Mirrors the SDK's own
-  // simpleStreamableHttp example.
-  const server = opts.buildServer();
+  // Fresh Server AND Transport per request — concurrency-safe stateless
+  // pattern per the SDK's simpleStreamableHttp example. The Server
+  // wrapper has internal `_transport` state that connect() overwrites,
+  // so two parallel connect() calls on a shared Server race and one
+  // request's transport reference gets blown away by the other. The
+  // tool registry itself is set up inside buildServer() — that's a
+  // cheap call (no DB, no network), just wiring handlers, so per-
+  // request rebuild is fine. If profiling ever shows this is hot,
+  // memoize the handler functions outside buildServer.
 
   // Auth gates EVERY request to this prefix — including GET /mcp (used
   // by some MCP clients for the SSE channel in stateful mode; we
@@ -52,6 +53,7 @@ export const mcpPlugin: FastifyPluginAsync<McpPluginOptions> = async (
   });
 
   app.post('/', async (request, reply) => {
+    const server = opts.buildServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
@@ -73,6 +75,7 @@ export const mcpPlugin: FastifyPluginAsync<McpPluginOptions> = async (
   // GET /mcp is used by stateful-mode clients for SSE; in stateless
   // mode the SDK returns 405. Still route it so auth fires.
   app.get('/', async (request, reply) => {
+    const server = opts.buildServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });

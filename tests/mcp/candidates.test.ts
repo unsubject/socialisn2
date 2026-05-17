@@ -11,6 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import * as schema from '../../src/db/schema.js';
 import { EMBEDDING_DIM } from '../../src/db/schema.js';
+import type { EmbedResult } from '../../src/lib/embeddings.js';
 import {
   getCandidate,
   listCandidates,
@@ -190,9 +191,8 @@ describe.skipIf(!DATABASE_URL)('mcp tools/candidates', () => {
     expect(result.candidate.sources[0]?.name).toBe('mcp-cand-test');
   });
 
-  it('get_candidate: returns error for missing id', async () => {
-    const result = (await getCandidate(db, { id: uuidv7() })) as { error: string };
-    expect(result.error).toContain('no candidate');
+  it('get_candidate: throws on missing id (server.ts maps to isError content block)', async () => {
+    await expect(getCandidate(db, { id: uuidv7() })).rejects.toThrow(/no candidate/);
   });
 
   it('get_candidate: rejects non-UUID id via zod', async () => {
@@ -205,7 +205,7 @@ describe.skipIf(!DATABASE_URL)('mcp tools/candidates', () => {
 
   it('search_candidates: returns candidates ordered by cluster cosine similarity', async () => {
     const id = await seed({ headline: 'Match me' });
-    const stub: any = async () => ({
+    const stub = async (): Promise<EmbedResult> => ({
       vectors: [unitVec([1])],
       inputTokens: 10,
       usd: 0.0000001,
@@ -219,7 +219,7 @@ describe.skipIf(!DATABASE_URL)('mcp tools/candidates', () => {
 
   it('search_candidates: records cost to cost_ledger', async () => {
     await seed();
-    const stub: any = async () => ({
+    const stub = async (): Promise<EmbedResult> => ({
       vectors: [unitVec([1])],
       inputTokens: 42,
       usd: 0.0000084,
@@ -234,7 +234,7 @@ describe.skipIf(!DATABASE_URL)('mcp tools/candidates', () => {
 
   it('search_candidates: returns empty when embed returns null vector', async () => {
     await seed();
-    const stub: any = async () => ({ vectors: [null], inputTokens: 0, usd: 0 });
+    const stub = async (): Promise<EmbedResult> => ({ vectors: [null], inputTokens: 0, usd: 0 });
     const result = await searchCandidates(db, { query: 'q' }, { embed: stub });
     expect(result.candidates).toEqual([]);
   });

@@ -22,7 +22,11 @@ import {
 
 import * as schema from '../../src/db/schema.js';
 import { EMBEDDING_DIM } from '../../src/db/schema.js';
-import { runScoring } from '../../src/orchestrator/run.js';
+import {
+  runScoring,
+  type DigestPushInput,
+  type ExclusivePushInput,
+} from '../../src/orchestrator/run.js';
 import {
   assertDestructiveAllowed,
 } from '../helpers/destructive-guard.js';
@@ -37,8 +41,6 @@ function unitVec(): number[] {
 
 const ORIGINAL_ENV = { ...process.env };
 beforeEach(() => {
-  // Generous ceiling so the happy paths don't trip; specific tests
-  // override to exercise the halt path.
   process.env.COST_CEILING_DAILY_USD = '100.00';
   process.env.COST_ALERT_THRESHOLD = '0.80';
 });
@@ -174,8 +176,6 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     });
   }
 
-  // archiveSearcher matches two_brain_client.archiveSearch signature
-  // ((embedding, topK, opts?) => Promise<ArchiveMatch[]>).
   function makeStubArchive(matches: Array<{
     id: string;
     title: string;
@@ -236,7 +236,7 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
       { kind: 'manual' },
       {
         summarise: makeStubSummarise(),
-        curate: makeStubCurate(75), // shouldn't be reached
+        curate: makeStubCurate(75),
         archiveSearcher: makeStubArchive([
           {
             id: 'e1',
@@ -309,21 +309,6 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
   });
 
   it('halts mid-run with status=completed + error=cost_ceiling_hit when ceiling fires', async () => {
-    // Tuning rationale: stub Gemini cost is 0.0006, Sonnet 0.007.
-    // Projection constants in run.ts are GEMINI=0.001, SONNET=0.008.
-    //
-    //   cluster 1 Gemini assert: 0 + 0.001 = 0.001       < ceiling  PASS
-    //   cluster 1 Gemini call:   spent now 0.0006
-    //   cluster 1 Sonnet assert: 0.0006 + 0.008 = 0.0086 < ceiling  PASS
-    //   cluster 1 Sonnet call:   spent now 0.0076
-    //   cluster 1 candidate:     PERSISTED
-    //
-    //   cluster 2 Gemini assert: 0.0076 + 0.001 = 0.0086 < ceiling  PASS
-    //   cluster 2 Gemini call:   spent now 0.0082
-    //   cluster 2 Sonnet assert: 0.0082 + 0.008 = 0.0162 ≥ ceiling  THROW
-    //
-    // Ceiling must be > 0.0086 (cluster 1 Sonnet passes) AND ≤ 0.0162
-    // (cluster 2 Sonnet fires). 0.015 sits cleanly in the middle.
     process.env.COST_CEILING_DAILY_USD = '0.015';
 
     const c1 = await makeCluster();
@@ -345,7 +330,6 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
 
     expect(result.status).toBe('completed');
     expect(result.error).toBe('cost_ceiling_hit');
-    // c1's candidate persisted; the halt fires inside c2's Sonnet assertion.
     expect(result.candidatesPersisted).toBe(1);
     const runs = await client`SELECT status, error FROM runs`;
     expect(runs[0]!.status).toBe('completed');
@@ -414,9 +398,6 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
       },
     );
 
-    // Status stays completed — candidates are already persisted; feed
-    // regen is a delivery concern, not a scoring concern. The error
-    // field surfaces both halt reason (none here) and the feed failure.
     expect(result.status).toBe('completed');
     expect(result.candidatesPersisted).toBe(1);
     expect(result.error).toMatch(/rss_regeneration_failed/);
@@ -427,5 +408,99 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     `;
     expect(runs[0]!.status).toBe('completed');
     expect(runs[0]!.error).toMatch(/rss_regeneration_failed/);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 4 PR 2: Telegram digest + exclusive push hook wiring
+  // ---------------------------------------------------------------------------
+
+  it('calls notifyDigest exactly once on success with per-domain + exclusive summary', async () => {
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+
+    const digestCalls: DigestPushInput[] = [];
+    const result = await runScoring(
+      db,
+      { kind: 'morning' },
+      {
+        summarise: makeStubSummarise(),
+        curate: makeStubCurate(75),
+        archiveSearcher: makeStubArchive([]),
+        notifyDigest: async (input) => {
+          digestCalls.push(input);
+        },
+      },
+    );
+
+    expect(result.status).toBe('completed');
+    expect(digestCalls).toHaveLength(1);
+    expect(digestCalls[0]?.runKind).toBe('morning');
+    expect(digestCalls[0]?.candidates).toHaveLength(1);
+    expect(digestCalls[0]?.candidates[0]?.primaryDomain).toBe('economy');
+  });
+
+  it('records telegram_digest_failed in runs.error when notifyDigest throws', async () => {
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+
+    const result = await runScoring(
+      db,
+      { kind: 'manual' },
+      {
+        summarise: makeStubSummarise(),
+        curate: makeStubCurate(75),
+        archiveSearcher: makeStubArchive([]),
+        notifyDigest: async () => {
+          throw new Error('telegram down');
+        },
+      },
+    );
+
+    expect(result.status).toBe('completed');
+    expect(result.candidatesPersisted).toBe(1);
+    expect(result.error).toMatch(/telegram_digest_failed/);
+    expect(result.error).toMatch(/telegram down/);
+  });
+
+  it('passes the persisted candidate to notifyExclusive when computeExclusive flags the cluster', async () => {
+    // The default 2-source / 1-each fixture currently produces an
+    // exclusive cluster (computeExclusive's first-publisher logic
+    // qualifies a same-cluster sourceA item published 6h before any
+    // sourceB item). This test pins the wiring contract: when the
+    // orchestrator decides a candidate is exclusive, the hook is
+    // invoked exactly once with id/headline/primaryDomain matching
+    // the persisted candidate. The opposite case (no-exclusive →
+    // no-call) is harder to set up without a single-source fixture
+    // and is tracked as a follow-up in the PR body.
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+
+    const exclusiveCalls: ExclusivePushInput[] = [];
+    const result = await runScoring(
+      db,
+      { kind: 'manual' },
+      {
+        summarise: makeStubSummarise(),
+        curate: makeStubCurate(75),
+        archiveSearcher: makeStubArchive([]),
+        notifyExclusive: async (input) => {
+          exclusiveCalls.push(input);
+        },
+      },
+    );
+
+    expect(result.candidatesPersisted).toBe(1);
+    expect(exclusiveCalls).toHaveLength(1);
+    expect(exclusiveCalls[0]?.headline).toBe('Fed holds rates steady');
+    expect(exclusiveCalls[0]?.primaryDomain).toBe('economy');
+    expect(exclusiveCalls[0]?.id).toMatch(/^[0-9a-f-]{36}$/);
+    const candidates = await client<{ id: string; is_exclusive: boolean }[]>`
+      SELECT id, is_exclusive FROM candidates
+    `;
+    expect(candidates[0]?.is_exclusive).toBe(true);
+    expect(candidates[0]?.id).toBe(exclusiveCalls[0]?.id);
   });
 });

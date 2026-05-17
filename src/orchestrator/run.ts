@@ -11,22 +11,25 @@
 //   Stage 6 — curation via Sonnet (curate.ts). Persists only clusters
 //             scoring ≥ 60.
 //   Stage 7 — INSERT candidates row.
-//   Post-run — when env.rssPath() is set, regenerate the 6 RSS feeds
-//             per SPEC §11.2 ("Regenerated on every notify-telegram
-//             event, i.e. after every scoring run"). Failures here
-//             populate runs.error but do NOT roll back persisted
-//             candidates — feed regeneration is a delivery concern.
+//   Per-insert — for is_exclusive=true candidates, notifyExclusive
+//               fires immediately (SPEC §11.3 "instant standalone
+//               push, regardless of run cadence"). Errors logged but
+//               not surfaced — losing one push shouldn't crowd out
+//               the run-level error field.
+//   Post-run — regenerate RSS feeds (SPEC §11.2) AND push the digest
+//             to Telegram (SPEC §11.3). Both wrapped + their errors
+//             joined into runs.error via `; ` — neither rolls back
+//             persisted candidates.
 //
 // Cost ceiling per SPEC §12 — assertWithinCeiling fires BEFORE each
 // Gemini / Sonnet call, with a conservative per-call projection.
 // CostCeilingHitError halts the loop; partial candidates already
 // persisted remain (SPEC §12 "partial candidates are still persisted").
-// The run row is updated with status='completed' + error='cost_ceiling_hit'
-// so /status surfaces the halt without treating it as a runtime failure.
 //
-// External dependencies (summarise, curate, archiveSearcher) are
-// dependency-injected so tests can stub the LLM + MCP surface without
-// touching the env or fetch globals.
+// External dependencies (summarise, curate, archiveSearcher,
+// regenerateFeeds, notifyDigest, notifyExclusive) are dependency-
+// injected so tests can stub the LLM / MCP / Telegram surface without
+// touching env or fetch globals.
 
 import { type SQL, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
@@ -37,6 +40,8 @@ import type { Db } from '../db/client.js';
 import { assertWithinCeiling, CostCeilingHitError } from '../cost/ceiling.js';
 import { recordCost } from '../cost/ledger.js';
 import { generateAllFeeds } from '../rss/generate.js';
+import { formatDigest, formatExclusivePush } from '../telegram/format.js';
+import { sendMessage as defaultSendTelegram } from '../telegram/push.js';
 import {
   archiveOverlapDecision,
   computeArchiveOverlap,
@@ -72,41 +77,47 @@ import {
 } from '../scoring/trajectory.js';
 import { archiveSearch as defaultArchiveSearch } from '../lib/two_brain_client.js';
 
-// Conservative pre-call projections so a single call can't sneak under
-// an exact-ceiling check. Real cost is recorded post-call.
-//   Gemini Flash-Lite: ~$0.0006/call empirically (5K input + 250 output).
-//   Sonnet 4.5:        ~$0.007/call empirically (1.5K input + 200 output).
 const GEMINI_PROJECTED_USD = 0.001;
 const SONNET_PROJECTED_USD = 0.008;
-
-/** SPEC §9 active-cluster window — reuse the recency floor from the
- *  clustering join (7 days). Older clusters are not considered for scoring. */
 const ACTIVE_WINDOW_DAYS = 7;
-
-/** SPEC §9.4 cutoff — curate must score ≥ 60 to become a candidate. */
 const CURATION_CUTOFF = 60;
 
 export type RunKind = 'morning' | 'afternoon' | 'manual';
 
 export interface RunOptions {
   kind: RunKind;
-  /** Cap on clusters advanced to Stage 4. Default 200 per SPEC §9.1. */
   topN?: number;
 }
 
+/** Minimal shape passed to notifyExclusive — keeps the dep contract
+ *  narrow so tests can hand-build the input without recreating the full
+ *  candidate row. */
+export interface ExclusivePushInput {
+  id: string;
+  headline: string;
+  primaryDomain: string;
+}
+
+/** Aggregated input to the tail digest push — one entry per persisted
+ *  candidate, with just what formatDigest needs. */
+export interface DigestPushInput {
+  runKind: RunKind;
+  candidates: Array<{ primaryDomain: string; isExclusive: boolean }>;
+}
+
 export interface RunDependencies {
-  /** Override Stage 4 (Gemini) — tests stub here. */
   summarise?: (input: SummariseInput) => Promise<SummariseResult>;
-  /** Override Stage 6 (Sonnet) — tests stub here. */
   curate?: (input: CurateInput) => Promise<CurateResult>;
-  /** Override Stage 5 (2nd-brain) — tests stub here. Same signature as
-   *  src/lib/two_brain_client.archiveSearch. */
   archiveSearcher?: typeof defaultArchiveSearch;
-  /** Override the post-run RSS regeneration — tests inject this when
-   *  they want to assert the hook fired without touching the disk. The
-   *  default reads env.rssPath() + env.publicHost() and writes to the
-   *  configured static-output directory. */
+  /** Post-run RSS regeneration. Default reads env.rssPath() and no-ops
+   *  on empty. Tests stub here to assert the hook fired. */
   regenerateFeeds?: (db: Db) => Promise<void>;
+  /** Tail digest push to Telegram. Default reads env.telegramBotToken()
+   *  + telegramChatId() and no-ops on empty. Tests stub. */
+  notifyDigest?: (input: DigestPushInput) => Promise<void>;
+  /** Per-insert exclusive push to Telegram. Default reads same env
+   *  and no-ops on empty. Tests stub. */
+  notifyExclusive?: (input: ExclusivePushInput) => Promise<void>;
 }
 
 export interface RunResult {
@@ -119,18 +130,12 @@ export interface RunResult {
   candidatesPersisted: number;
   totalCostUsd: number;
   status: 'completed' | 'failed';
-  /** Non-empty when status='completed' with halt reason ('cost_ceiling_hit')
-   *  OR a post-run feed-regeneration failure. Multiple causes are joined
-   *  with `; ` so the surface field carries both signals. */
+  /** Non-empty when status='completed' with halt reason
+   *  ('cost_ceiling_hit') OR a tail-hook failure (RSS regen, digest
+   *  push). Multiple causes joined with `; `. */
   error?: string;
 }
 
-// Row shapes for db.execute<T>. Declared as `type` aliases (not
-// `interface`) because drizzle's execute<T> requires T extends
-// Record<string, unknown> and TS treats interface declarations as
-// closed — no implicit index signature — so an interface here would
-// fail to satisfy the constraint and the typecheck would reject the
-// call. Type aliases of object literals are structurally Record-compatible.
 type ClusterRow = {
   id: string;
   centroid: string;
@@ -157,6 +162,8 @@ export async function runScoring(
   const curate = deps.curate ?? curateCluster;
   const archiveSearcher = deps.archiveSearcher ?? defaultArchiveSearch;
   const regenerateFeeds = deps.regenerateFeeds ?? defaultRegenerateFeeds;
+  const notifyDigest = deps.notifyDigest ?? defaultNotifyDigest;
+  const notifyExclusive = deps.notifyExclusive ?? defaultNotifyExclusive;
   const topN = opts.topN ?? 200;
 
   const runId = uuidv7();
@@ -175,24 +182,19 @@ export async function runScoring(
     totalCostUsd: 0,
   };
   let halt: { reason: string; err: Error } | null = null;
+  // Aggregated per-domain + exclusive list for the tail digest push.
+  const digestCandidates: DigestPushInput['candidates'] = [];
 
   try {
-    // Stage 3 — fetch active clusters in the recency window.
     const clusters = await db.execute<ClusterRow>(sql`
-      SELECT id,
-             centroid::text AS centroid,
-             primary_domain,
-             domains,
-             item_count,
-             first_seen_at
+      SELECT id, centroid::text AS centroid, primary_domain,
+             domains, item_count, first_seen_at
       FROM clusters
       WHERE status = 'active'
         AND last_seen_at > NOW() - make_interval(days => ${ACTIVE_WINDOW_DAYS})
     `);
     stats.clustersConsidered = clusters.length;
 
-    // Per-cluster signal computation. We score in-memory so the top-N
-    // selection is a single sort — no second DB pass.
     const scored: ScoredCluster[] = [];
     for (const c of clusters) {
       const [temperature, trajectory, exclusive] = await Promise.all([
@@ -223,8 +225,6 @@ export async function runScoring(
 
     const top = selectTopN(scored, topN);
 
-    // Stage 4-7 per cluster. We break on CostCeilingHitError but let
-    // other errors propagate — the outer try/catch marks the run failed.
     for (const cluster of top) {
       try {
         await assertWithinCeiling(db, GEMINI_PROJECTED_USD);
@@ -237,12 +237,7 @@ export async function runScoring(
       }
 
       const summariseItems = await loadClusterItems(db, cluster.id);
-      if (summariseItems.length === 0) {
-        // Cluster has no items rows (shouldn't happen post-Phase 2 but be
-        // defensive). Skip silently; the cluster will be re-evaluated
-        // next run.
-        continue;
-      }
+      if (summariseItems.length === 0) continue;
 
       const summary = await summarise({
         primaryDomain: cluster.primary_domain as Domain,
@@ -263,9 +258,6 @@ export async function runScoring(
         stage: 'stage4_summarise',
       });
 
-      // Stage 5 — archive overlap. Graceful by construction (returns
-      // {overlap: 0, links: []} when 2nd-brain is unreachable / missing
-      // tool), so no cost or ceiling check needed here.
       const centroidVec = parsePgvectorLiteral(cluster.centroid);
       const overlap: ArchiveOverlapResult = await computeArchiveOverlap(
         centroidVec,
@@ -322,7 +314,7 @@ export async function runScoring(
         continue;
       }
 
-      await insertCandidate(db, {
+      const candidateId = await insertCandidate(db, {
         runId,
         cluster,
         summary: summary.output,
@@ -331,56 +323,52 @@ export async function runScoring(
         curation: curation.output,
       });
       stats.candidatesPersisted += 1;
+      digestCandidates.push({
+        primaryDomain: cluster.primary_domain,
+        isExclusive: cluster.exclusive.isExclusive,
+      });
+
+      // SPEC §11.3 — instant push for is_exclusive=true. Inside the
+      // per-cluster loop, not at the tail, so the notification arrives
+      // before the next cluster's LLM round-trip rather than after
+      // every batch completes.
+      if (cluster.exclusive.isExclusive) {
+        await safeNotifyExclusive(notifyExclusive, {
+          id: candidateId,
+          headline: summary.output.headline,
+          primaryDomain: cluster.primary_domain,
+        });
+      }
     }
 
-    // Post-run: regenerate RSS feeds per SPEC §11.2. Wrapped in its own
-    // try so a feed-write failure becomes a recorded error rather than a
-    // run rollback — candidates are already persisted, the feed file
-    // can be regenerated on the next run.
+    // Tail hooks. Each safe-wrapped; their errors are joined with the
+    // halt reason (if any) into the final runs.error field.
     const feedError = await safeRegenerateFeeds(db, regenerateFeeds);
-    const finalError = combineErrors(halt?.reason, feedError);
+    const digestError = await safeNotifyDigest(notifyDigest, {
+      runKind: opts.kind,
+      candidates: digestCandidates,
+    });
+    const finalError = combineErrors(halt?.reason, feedError, digestError);
 
     await finaliseRun(db, runId, 'completed', stats, finalError);
-    return {
-      runId,
-      ...stats,
-      status: 'completed',
-      error: finalError,
-    };
+    return { runId, ...stats, status: 'completed', error: finalError };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     await finaliseRun(db, runId, 'failed', stats, msg.slice(0, 1_000));
-    return {
-      runId,
-      ...stats,
-      status: 'failed',
-      error: msg,
-    };
+    return { runId, ...stats, status: 'failed', error: msg };
   }
 }
 
 // ---------------------------------------------------------------------------
-// helpers
+// hooks — defaults + safe wrappers
 // ---------------------------------------------------------------------------
 
-/**
- * Default RSS regenerate hook. Reads `env.rssPath()` and `env.publicHost()`
- * at call time so a per-run env change (test fixtures setting `RSS_PATH`
- * before invoking) is picked up. No-ops when `RSS_PATH` is empty — that's
- * the contract for non-prod environments that don't need static feeds.
- */
 async function defaultRegenerateFeeds(db: Db): Promise<void> {
   const outputDir = env.rssPath();
   if (!outputDir) return;
   await generateAllFeeds(db, outputDir, env.publicHost());
 }
 
-/**
- * Run the regenerate hook, never throwing. Returns a short error
- * description if it failed, or `undefined` on success / no-op. Logged
- * to stderr so ops sees the cause; the `runs.error` field carries the
- * short form.
- */
 async function safeRegenerateFeeds(
   db: Db,
   hook: (db: Db) => Promise<void>,
@@ -391,9 +379,65 @@ async function safeRegenerateFeeds(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[orchestrator] RSS regeneration failed:', err);
-    // Cap so a 5-line stack doesn't blow up runs.error and crowd out
-    // the halt reason in the same field.
     return `rss_regeneration_failed: ${msg.slice(0, 200)}`;
+  }
+}
+
+/** Default tail digest. No-ops when Telegram env unset. Reads env at
+ *  call time so a per-run env change is picked up. */
+async function defaultNotifyDigest(input: DigestPushInput): Promise<void> {
+  if (!env.telegramBotToken() || !env.telegramChatId()) return;
+  const text = formatDigest(input);
+  const result = await defaultSendTelegram({ text, disableLinkPreview: true });
+  if (!result.ok) {
+    // Surface to safe wrapper so the failure reaches runs.error.
+    throw new Error(result.description ?? 'unknown sendMessage error');
+  }
+}
+
+async function safeNotifyDigest(
+  hook: (input: DigestPushInput) => Promise<void>,
+  input: DigestPushInput,
+): Promise<string | undefined> {
+  try {
+    await hook(input);
+    return undefined;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[orchestrator] telegram digest push failed:', err);
+    return `telegram_digest_failed: ${msg.slice(0, 200)}`;
+  }
+}
+
+/** Default per-insert exclusive push. Same env-gate as digest. */
+async function defaultNotifyExclusive(input: ExclusivePushInput): Promise<void> {
+  if (!env.telegramBotToken() || !env.telegramChatId()) return;
+  // formatExclusivePush takes Pick<RenderCandidate, 'id'|'headline'|'primaryDomain'>
+  // — ExclusivePushInput satisfies that shape exactly, so no hand-built
+  // RenderCandidate is needed. (Pre-narrow this hand-built fake values
+  // for unused fields; the narrowed type makes the contract explicit.)
+  const text = formatExclusivePush(input);
+  const result = await defaultSendTelegram({ text });
+  if (!result.ok) {
+    throw new Error(result.description ?? 'unknown sendMessage error');
+  }
+}
+
+/** Exclusive-push wrapper — log only, don't surface to runs.error.
+ *  Exclusives can fail individually without contaminating the run-level
+ *  signal (which would otherwise crowd out the digest error / halt
+ *  reason). */
+async function safeNotifyExclusive(
+  hook: (input: ExclusivePushInput) => Promise<void>,
+  input: ExclusivePushInput,
+): Promise<void> {
+  try {
+    await hook(input);
+  } catch (err) {
+    console.error(
+      `[orchestrator] telegram exclusive push failed for candidate ${input.id}:`,
+      err,
+    );
   }
 }
 
@@ -402,8 +446,10 @@ function combineErrors(...parts: Array<string | undefined>): string | undefined 
   return filtered.length === 0 ? undefined : filtered.join('; ');
 }
 
-// Same `type` (not `interface`) treatment as ClusterRow above — see
-// the comment there for why db.execute<T> rejects closed interfaces.
+// ---------------------------------------------------------------------------
+// existing helpers
+// ---------------------------------------------------------------------------
+
 type ClusterItemRow = {
   id: string;
   summary_en: string;
@@ -416,9 +462,7 @@ type ClusterItemRow = {
 
 async function loadClusterItems(db: Db, clusterId: string): Promise<ClusterItemRow[]> {
   return db.execute<ClusterItemRow>(sql`
-    SELECT i.id,
-           i.summary_en,
-           i.context_en,
+    SELECT i.id, i.summary_en, i.context_en,
            s.id            AS source_id,
            s.name          AS source_name,
            s.authority_score,
@@ -465,21 +509,16 @@ interface CandidateInsertInput {
   curation: { curationScore: number; curationRationale: string };
 }
 
-async function insertCandidate(db: Db, input: CandidateInsertInput): Promise<void> {
+async function insertCandidate(
+  db: Db,
+  input: CandidateInsertInput,
+): Promise<string> {
   const candidateId = uuidv7();
-  // expires_at per SPEC §9.6: "compute from domain decay". v1 picks the
-  // half-life so the candidate decays to 50% relevance at expiry —
-  // matches the spec's example ("economy: NOW + 48h").
   const halfLifeHours = DOMAIN_CONFIGS[input.cluster.primary_domain as Domain]
     .recencyHalfLifeHours;
   const expiresIso = new Date(
     Date.now() + halfLifeHours * 3_600_000,
   ).toISOString();
-
-  // archive_overlap_links includes the flag in a wrapper so downstream
-  // RSS / MCP can render the "related to recent work" UX without an extra
-  // candidate-side column. Mirrors how PR 51 designed the flag to project
-  // into the existing candidates schema.
   const archivePayload = {
     overlap: input.overlap.overlap,
     flagRelatedToRecentWork: input.flagRelatedToRecentWork,
@@ -519,6 +558,7 @@ async function insertCandidate(db: Db, input: CandidateInsertInput): Promise<voi
       ${expiresIso}::timestamptz
     )
   `);
+  return candidateId;
 }
 
 async function finaliseRun(
@@ -563,8 +603,6 @@ function textArrayLiteral(items: string[]): SQL {
   )}]::text[]`;
 }
 
-// Re-export for callers that want to construct a SummariseInput or
-// CurateInput from cluster items directly (smoke fixtures, tests).
 export type { SummariseInput, SummariseResult } from '../scoring/headline.js';
 export type { CurateInput, CurateResult } from '../scoring/curate.js';
 export type { ArchiveMatch } from '../lib/two_brain_client.js';

@@ -1,6 +1,6 @@
-// Real-PG integration test for src/workers/scoring.ts tickOnce + compactOnce.
-// Resets schema, applies all migrations, then drives the worker's exported
-// helpers against live tables. Mirrors the pattern in
+// Real-PG integration test for src/workers/scoring-core.ts tickOnce +
+// compactOnce. Resets schema, applies all migrations, then drives the
+// worker's exported helpers against live tables. Mirrors the pattern in
 // tests/scoring/cluster.test.ts.
 
 import { readFileSync, readdirSync } from 'node:fs';
@@ -16,7 +16,7 @@ import * as schema from '../../src/db/schema.js';
 import { EMBEDDING_DIM } from '../../src/db/schema.js';
 import type { NormalizeResult } from '../../src/scoring/normalize.js';
 import type { EmbedResult } from '../../src/lib/embeddings.js';
-import { compactOnce, tickOnce } from '../../src/workers/scoring.js';
+import { compactOnce, tickOnce } from '../../src/workers/scoring-core.js';
 import { assertDestructiveAllowed } from '../helpers/destructive-guard.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;

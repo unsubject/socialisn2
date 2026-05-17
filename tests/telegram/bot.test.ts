@@ -81,6 +81,21 @@ describe.skipIf(!DATABASE_URL)('telegram bot (buildBot)', () => {
     // through (and would fail real HTTP — keep the suite hermetic).
     bot.api.config.use((_prev, method, payload) => {
       apiCalls.push({ method, payload: payload as Record<string, unknown> });
+      if (method === 'getMe') {
+        // bot.init() calls getMe at startup. Synthetic bot info so the
+        // init phase doesn't hit the real Telegram API with the fake
+        // token; without this, init throws GrammyError and the test
+        // suite blows up before any handler runs.
+        return Promise.resolve({
+          id: 999999,
+          is_bot: true,
+          first_name: 'TestBot',
+          username: 'test_bot',
+          can_join_groups: true,
+          can_read_all_group_messages: false,
+          supports_inline_queries: false,
+        }) as unknown as ReturnType<typeof _prev>;
+      }
       if (method === 'sendMessage') {
         return Promise.resolve({
           ok: true,

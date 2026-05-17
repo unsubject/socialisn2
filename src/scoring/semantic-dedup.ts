@@ -6,8 +6,9 @@
 // candidate is a near-duplicate of the existing item and should NOT be
 // re-ingested as a new `items` row — per SPEC §7.2 step 2, the raw_item is
 // "merged into the same cluster without creating new items rows". The
-// caller threads the existing item's cluster_id to the candidate's
-// raw_item (Phase 3 PR 4 wires this).
+// caller threads the existing item's cluster_id onto the candidate's
+// raw_item (`raw_items.dedup_cluster_id`, added in migration 011); see
+// `src/scoring/process-raw-item.ts` for the runtime wiring.
 //
 // This is a pure query — no writes. The decision to skip insertion is the
 // caller's. The HNSW index on `items.embedding` (idx_items_embedding) makes

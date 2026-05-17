@@ -262,6 +262,26 @@ describe.skipIf(!DATABASE_URL)('Fastify app (src/app.ts)', () => {
     expect(res.body).toContain('404');
   });
 
+  it('returns 404 for a UUID-shaped id whose last group is wrong length', async () => {
+    // Hex-only, dash-positioned correctly, BUT last group is 7 chars
+    // (UUID requires 12). PG's UUID cast rejects → without the strict
+    // regex pre-filter this would 500 from Fastify's default handler.
+    const res = await app.inject({
+      method: 'GET',
+      url: '/c/abcdefab-1234-5678-9012-3456789',
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toContain('404');
+  });
+
+  it('returns 404 for a 32-hex string with no dashes (not UUID-shaped)', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/c/abcdefab12345678901234567890abcd',
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
   it('escapes the bogus id in the 404 body', async () => {
     const res = await app.inject({ method: 'GET', url: '/c/abcdefgh-1234' });
     expect(res.statusCode).toBe(404);

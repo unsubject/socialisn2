@@ -96,4 +96,19 @@ export const env = {
     }
     return parsed;
   },
+  // Continuous scoring worker (src/workers/scoring.ts) knobs.
+  //   tick:        how often to drain pending raw_items.
+  //   compaction:  daily compactClusters pass (SPEC §7.4 step 4). 04:00 UTC
+  //                lands ~5-6h before the 05:00 ET orchestrator run so a
+  //                long compaction can't push the run.
+  //   batch:       max raw_items pulled per tick. Each costs ~$0.0006 so a
+  //                batch of 20 is ~$0.012 per minute worst-case.
+  //   maxAttempts: poison-row cap. A row that has failed N times stops being
+  //                re-pulled (still visible by SELECT WHERE processed_at IS NULL
+  //                for triage).
+  scoringWorkerTickCron: () => optional('SCORING_WORKER_TICK_CRON', '* * * * *'),
+  scoringWorkerCompactionCron: () =>
+    optional('SCORING_WORKER_COMPACTION_CRON', '0 4 * * *'),
+  scoringWorkerBatchSize: () => positiveIntEnv('SCORING_WORKER_BATCH_SIZE', 20),
+  scoringWorkerMaxAttempts: () => positiveIntEnv('SCORING_WORKER_MAX_ATTEMPTS', 3),
 };

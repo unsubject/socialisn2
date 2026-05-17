@@ -309,12 +309,22 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
   });
 
   it('halts mid-run with status=completed + error=cost_ceiling_hit when ceiling fires', async () => {
-    process.env.COST_CEILING_DAILY_USD = '0.005'; // smaller than GEMINI_PROJECTED_USD = 0.001? no, larger so first goes through
-    // Actually we want the FIRST cluster to pass and the SECOND to halt.
-    // GEMINI_PROJECTED_USD is 0.001 and SONNET_PROJECTED_USD is 0.008.
-    // Set ceiling so spend (cluster1's Gemini+Sonnet recorded = 0.0006+0.007=0.0076) is fine
-    // but cluster2's GEMINI projection (0.001 added) would push 0.0076 + 0.001 = 0.0086 >= ceiling.
-    process.env.COST_CEILING_DAILY_USD = '0.0085';
+    // Tuning rationale: stub Gemini cost is 0.0006, Sonnet 0.007.
+    // Projection constants in run.ts are GEMINI=0.001, SONNET=0.008.
+    //
+    //   cluster 1 Gemini assert: 0 + 0.001 = 0.001       < ceiling  PASS
+    //   cluster 1 Gemini call:   spent now 0.0006
+    //   cluster 1 Sonnet assert: 0.0006 + 0.008 = 0.0086 < ceiling  PASS
+    //   cluster 1 Sonnet call:   spent now 0.0076
+    //   cluster 1 candidate:     PERSISTED
+    //
+    //   cluster 2 Gemini assert: 0.0076 + 0.001 = 0.0086 < ceiling  PASS
+    //   cluster 2 Gemini call:   spent now 0.0082
+    //   cluster 2 Sonnet assert: 0.0082 + 0.008 = 0.0162 ≥ ceiling  THROW
+    //
+    // Ceiling must be > 0.0086 (cluster 1 Sonnet passes) AND ≤ 0.0162
+    // (cluster 2 Sonnet fires). 0.015 sits cleanly in the middle.
+    process.env.COST_CEILING_DAILY_USD = '0.015';
 
     const c1 = await makeCluster();
     const c2 = await makeCluster();
@@ -335,7 +345,7 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
 
     expect(result.status).toBe('completed');
     expect(result.error).toBe('cost_ceiling_hit');
-    // One candidate persisted (from c1), then the halt fires before c2's Stage 4.
+    // c1's candidate persisted; the halt fires inside c2's Sonnet assertion.
     expect(result.candidatesPersisted).toBe(1);
     const runs = await client`SELECT status, error FROM runs`;
     expect(runs[0]!.status).toBe('completed');

@@ -4,11 +4,11 @@
 //     and TELEGRAM_CHAT_ID are both set
 //
 // docker-compose `app` service runs `node dist/index.js`. SIG handlers
-// drain components in dependency order on shutdown.
+// drain components in dependency order on shutdown (see ADR-010).
 
 import process from 'node:process';
 
-import { Bot } from 'grammy';
+import type { Bot } from 'grammy';
 
 import { buildApp } from './app.js';
 import { env } from './config/env.js';
@@ -29,12 +29,19 @@ async function main(): Promise<void> {
   let bot: Bot | null = null;
   if (env.telegramBotToken() && env.telegramChatId()) {
     bot = buildBot(db);
-    // grammy's bot.start() returns when polling stops, which never
-    // happens during normal operation. Deliberately NOT awaited — we
-    // attach a catch so a startup error (bad token, network issue at
-    // boot) gets logged rather than crashing the process before SIG
-    // handlers are installed. The actual stop happens via bot.stop()
-    // in the shutdown handler.
+    // bot.init() handles getMe + handler registration synchronously
+    // before we hand off to long-polling. Awaiting it here closes the
+    // startup-vs-SIGTERM race: by the time we register SIG handlers,
+    // bot.stop() will see polling state it can actually stop. Without
+    // this, a SIGTERM in the sub-second window between bot.start()
+    // being called and grammy reaching its polling loop would cause
+    // bot.stop() to no-op while the in-flight start continues.
+    await bot.init();
+    // bot.start() returns when polling stops, which never happens
+    // during normal operation. Deliberately NOT awaited — we attach a
+    // catch so a runtime polling error (network drop, getUpdates 5xx
+    // loop) gets logged rather than crashing the process. The actual
+    // stop happens via bot.stop() in the shutdown handler.
     bot.start().catch((err: unknown) => {
       console.error('[telegram-bot] start failed:', err);
     });
@@ -47,14 +54,9 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[app] ${signal} received; shutting down`);
-    // Order matters:
-    //   1. Stop the bot first so in-flight update handlers can drain
-    //      against a still-valid DB connection.
-    //   2. Close Fastify so in-flight HTTP requests can complete.
-    //   3. Release the DB connection.
-    // Getting this wrong (closing DB first) means update handlers
-    // throw "connection ended" mid-response, which then surfaces as
-    // a Telegram retry next polling cycle on the same update.
+    // Order matters — see ADR-010. Bot first (handlers depend on DB),
+    // then Fastify (also depends on DB), then DB last. Closing DB
+    // first wedges in-flight handlers with "connection ended" errors.
     if (bot) {
       try {
         await bot.stop();

@@ -41,6 +41,13 @@ interface JsonRpcResponse {
   error?: { code: number; message: string };
 }
 
+interface JsonRpcRequest {
+  jsonrpc: '2.0';
+  id: number;
+  method: string;
+  params: unknown;
+}
+
 describe.skipIf(!DATABASE_URL)('mcp integration via POST /mcp', () => {
   let client: ReturnType<typeof postgres>;
   let db: ReturnType<typeof drizzle<typeof schema>>;
@@ -79,12 +86,16 @@ describe.skipIf(!DATABASE_URL)('mcp integration via POST /mcp', () => {
     await app.close();
   });
 
-  function rpc(method: string, params: unknown, id: number = 1): unknown {
+  function rpc(method: string, params: unknown, id: number = 1): JsonRpcRequest {
     return { jsonrpc: '2.0', id, method, params };
   }
 
-  function parseRpcBody(body: string, headers: Record<string, string | string[] | undefined>): JsonRpcResponse {
-    const ct = String(headers['content-type'] ?? '');
+  function parseRpcBody(
+    body: string,
+    headers: Record<string, string | string[] | number | undefined>,
+  ): JsonRpcResponse {
+    const ctRaw = headers['content-type'];
+    const ct = typeof ctRaw === 'string' ? ctRaw : String(ctRaw ?? '');
     if (ct.includes('text/event-stream')) {
       // SSE format — find the last `data: {...}` line and parse it.
       const lines = body.split(/\r?\n/);

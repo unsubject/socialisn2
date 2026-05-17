@@ -30,13 +30,34 @@
 //   if the path fails between normalise + embed, the normalise spend is
 //   real and the ledger must reflect it.
 //
-// Idempotency:
+// Failure modes — what consumes a retry attempt vs what doesn't:
 //
-//   A crash between normalise+embed and the items insert leaves the
-//   raw_item with processed_at IS NULL and the normalise/embed cost
-//   recorded. Next tick re-runs from scratch and re-pays ~$0.0006.
-//   Acceptable for v1; documented here so a future review doesn't
-//   "fix" it by attempting partial-state recovery.
+//   - **Caught exceptions** (LLM 5xx, schema violation, dim mismatch,
+//     UNIQUE(items.raw_item_id) violation under multi-worker race) flow
+//     through the outer catch → `markProcessingAttempt` →
+//     `processing_attempts += 1` and the error message is stashed in
+//     `raw_meta.last_processing_error`. Three transient errors in a row
+//     therefore poisons a legit raw_item. That's the right pressure
+//     relief in v1 — manual triage queries on poisoned rows
+//     (`WHERE processed_at IS NULL AND processing_attempts >= 3`) are
+//     how operators surface upstream LLM / API issues — but it does
+//     mean transient-failure tolerance is exactly 3 by default.
+//   - **Process death** (SIGKILL, OOM, container restart) between
+//     `recordCost` and the items insert leaves the raw_item pending with
+//     attempts UNCHANGED — the catch never runs. Next tick re-runs from
+//     scratch and re-pays ~$0.0006. Acceptable for v1.
+//   - **Successful processing** (normal-path OR dedup-hit) does NOT
+//     bump attempts. The polling query filters on
+//     `processed_at IS NULL` so the row stops being pulled regardless.
+//
+// Manual replay of a successfully-processed normal-path row requires
+// clearing `processed_at` AND deleting the corresponding `items` row
+// (`DELETE FROM items WHERE raw_item_id = $1` then
+//  `UPDATE raw_items SET processed_at = NULL WHERE id = $1`).
+// Skipping the DELETE means the next tick re-runs through to the items
+// insert, hits the UNIQUE constraint, rolls back, attempts++ — three
+// such retries poisons the row, which is the wrong failure mode for an
+// intentional replay. See ADR-009 for the rationale.
 
 import { type SQL, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
@@ -329,6 +350,14 @@ async function markProcessingAttempt(
   // raw_meta for human triage. Truncate aggressively because raw_meta is
   // a jsonb document and we don't want a multi-KB stack trace bloating
   // the row.
+  //
+  // If THIS UPDATE itself fails (DB connection dropped mid-call), the
+  // exception propagates to the worker, which logs it. The raw_item
+  // stays pending with attempts unchanged — next tick re-runs the row
+  // and re-fails on the same upstream issue, then attempts++ runs
+  // correctly. That's acceptable: a single missed bump under DB outage
+  // is better than wrapping this in its own retry loop that could
+  // disagree with the worker's view of "tried N times".
   const errMsg = error.message.slice(0, 240);
   await db.execute(sql`
     UPDATE raw_items

@@ -226,4 +226,30 @@ describe.skipIf(!DATABASE_URL)('mcp integration via POST /mcp', () => {
     const text = parsed.result?.content?.[0]?.text ?? '';
     expect(text).toContain('Unknown tool');
   });
+
+  it('concurrent tools/call requests both succeed (per-request transport, no shared response-writer race)', async () => {
+    const send = (id: number) =>
+      app.inject({
+        method: 'POST',
+        url: '/mcp',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          authorization: `Bearer ${MCP_TOKEN}`,
+        },
+        payload: rpc('tools/call', { name: 'system_status', arguments: {} }, id),
+      });
+    const [a, b] = await Promise.all([send(1), send(2)]);
+    expect(a.statusCode).toBe(200);
+    expect(b.statusCode).toBe(200);
+    const pa = parseRpcBody(a.body, a.headers);
+    const pb = parseRpcBody(b.body, b.headers);
+    // Each response carries the id of its OWN request — a shared
+    // transport would have one request's writer leak into the other,
+    // producing duplicated or interleaved bodies.
+    expect(pa.id).toBe(1);
+    expect(pb.id).toBe(2);
+    expect(pa.result?.content?.[0]?.text).toBeDefined();
+    expect(pb.result?.content?.[0]?.text).toBeDefined();
+  });
 });

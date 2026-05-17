@@ -37,45 +37,24 @@ function positiveIntEnv(name: string, fallback: number): number {
 export const env = {
   databaseUrl: () => required('DATABASE_URL'),
   redisUrl: () => required('REDIS_URL'),
-  // Scheduler tick frequency — every minute by default. The scheduler checks
-  // each source's last_fetched_at + fetch_interval_min on every tick and
-  // enqueues those that are due, so a 1-min tick gives ~1-min granularity on
-  // top of the per-source cadences. Tighten only if very-fast cadences are
-  // added (none in v1 — minimum is 30 min).
   schedulerTickCron: () => optional('INGESTION_SCHEDULER_TICK_CRON', '* * * * *'),
-  // Cap on concurrent fetches the BullMQ worker processes. RSS fetches are
-  // I/O bound; 8 is a safe default for a small VPS.
   ingestionConcurrency: () => positiveIntEnv('INGESTION_CONCURRENCY', 8),
-  // User-Agent string for outbound HTTP fetches. Some publishers gate non-
-  // browser UAs (Caixin returned 406 to the verifier in PR #1). Override
-  // per-deployment if needed.
   httpUserAgent: () =>
     optional(
       'HTTP_USER_AGENT',
       'socialisn2/0.1 (+https://github.com/unsubject/socialisn2)',
     ),
   httpTimeoutMs: () => positiveIntEnv('HTTP_TIMEOUT_MS', 30_000),
-  // GDELT requires an identifying User-Agent per their terms (no API key —
-  // the UA + low traffic profile is the rate-limit budget). See ADR-005.
   gdeltUserAgent: () =>
     optional(
       'GDELT_USER_AGENT',
       'socialisn2/0.1 (+https://github.com/unsubject/socialisn2)',
     ),
-  // LiteLLM proxy — chat-completion calls in scoring stages route here.
   litellmBaseUrl: () => required('LITELLM_BASE_URL'),
   litellmApiKey: () => required('LITELLM_API_KEY'),
-  // OpenAI direct — embeddings only (text-embedding-3-small). See
-  // src/lib/embeddings.ts for why we don't proxy this through LiteLLM.
   openaiApiKey: () => required('OPENAI_API_KEY'),
-  // 2nd-brain MCP — consumed by src/lib/two_brain_client.ts for
-  // archive_search + record_pick. Intentionally OPTIONAL: if either is
-  // unset, the client treats every call as a degraded no-op and the
-  // scoring run proceeds with archive_overlap=0 (SPEC §10.2 graceful
-  // fallback). Hard-failing at startup would conflict with that contract.
   twoBrainMcpUrl: () => optional('TWO_BRAIN_MCP_URL', ''),
   twoBrainMcpToken: () => optional('TWO_BRAIN_MCP_TOKEN', ''),
-  // SPEC §12 cost enforcement. Hard ceiling, not advisory.
   costCeilingDailyUsd: () => {
     const raw = process.env.COST_CEILING_DAILY_USD ?? '1.50';
     const parsed = Number(raw);
@@ -96,27 +75,19 @@ export const env = {
     }
     return parsed;
   },
-  // Continuous scoring worker (src/workers/scoring.ts) knobs.
-  //   tick:        how often to drain pending raw_items.
-  //   compaction:  daily compactClusters pass (SPEC §7.4 step 4). 04:00 UTC
-  //                lands ~5-6h before the 05:00 ET orchestrator run so a
-  //                long compaction can't push the run.
-  //   batch:       max raw_items pulled per tick. Each costs ~$0.0006 so a
-  //                batch of 20 is ~$0.012 per minute worst-case.
-  //   maxAttempts: poison-row cap. A row that has failed N times stops being
-  //                re-pulled (still visible by SELECT WHERE processed_at IS NULL
-  //                for triage).
   scoringWorkerTickCron: () => optional('SCORING_WORKER_TICK_CRON', '* * * * *'),
   scoringWorkerCompactionCron: () =>
     optional('SCORING_WORKER_COMPACTION_CRON', '0 4 * * *'),
   scoringWorkerBatchSize: () => positiveIntEnv('SCORING_WORKER_BATCH_SIZE', 20),
   scoringWorkerMaxAttempts: () => positiveIntEnv('SCORING_WORKER_MAX_ATTEMPTS', 3),
-  // RSS output (SPEC §11.2). Both are required when generation is wired
-  // — the orchestrator gates the regeneration call on `rssPath()` being
-  // non-empty so non-prod environments (tests, manual scoring runs) can
-  // skip the disk write entirely. `publicHost` is only read when
-  // `rssPath` is set, so a non-prod env that leaves both empty doesn't
-  // need to set either.
   rssPath: () => optional('RSS_PATH', ''),
   publicHost: () => required('PUBLIC_HOST'),
+  // Telegram bot (SPEC §11.3). Both required when the bot lifecycle
+  // starts and when the orchestrator's push hooks fire. Optional at the
+  // env-loader level so tests / non-prod environments leaving them
+  // empty silently skip the bot start and skip the push (consistent
+  // with the rssPath / publicHost pattern). src/index.ts gates
+  // bot.start() on both being non-empty.
+  telegramBotToken: () => optional('TELEGRAM_BOT_TOKEN', ''),
+  telegramChatId: () => optional('TELEGRAM_CHAT_ID', ''),
 };

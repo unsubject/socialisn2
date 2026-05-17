@@ -15,8 +15,11 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { sql } from 'drizzle-orm';
 
+import { env } from './config/env.js';
 import type { Db } from './db/client.js';
 import { UUID_RE } from './lib/uuid.js';
+import { buildMcpServer } from './mcp/server.js';
+import { mcpPlugin } from './mcp/transport.js';
 import { renderDetail, renderNotFound } from './rss/render-detail.js';
 
 // Strict 8-4-4-4-12 hex UUID pattern. The route uses this as a
@@ -130,6 +133,20 @@ export function buildApp(db: Db): FastifyInstance {
     });
     return reply.type('text/html; charset=utf-8').send(html);
   });
+
+  // MCP server (SPEC §11.4). Gated on env — empty SOCIALISN2_MCP_TOKEN
+  // disables the mount so non-prod environments (tests, dev) skip the
+  // bearer-protected route. Mounted with prefix=/mcp so the bearer
+  // preHandler in mcpPlugin scopes ONLY to /mcp routes, not the
+  // /healthz or /c/:id surfaces.
+  const mcpToken = env.socialisn2McpToken();
+  if (mcpToken) {
+    void app.register(mcpPlugin, {
+      prefix: '/mcp',
+      token: mcpToken,
+      buildServer: () => buildMcpServer(db),
+    });
+  }
 
   return app;
 }

@@ -29,10 +29,7 @@ export async function compareAgainstArchive(
   db: Db,
   rawArgs: unknown,
   deps: CompareDeps = {},
-): Promise<
-  | { matches: ArchiveOverlapResult['links']; max_similarity: number }
-  | { error: string }
-> {
+): Promise<{ matches: ArchiveOverlapResult['links']; max_similarity: number }> {
   const args = CompareAgainstArchiveArgs.parse(rawArgs);
   const searcher = deps.archiveSearcher ?? defaultArchiveSearch;
 
@@ -46,11 +43,14 @@ export async function compareAgainstArchive(
     LIMIT 1
   `);
   const row = rows[0];
-  if (!row) return { error: `no candidate ${args.candidate_id}` };
+  // Throw on missing / malformed — server.ts catches and emits
+  // isError:true. Returning {error} inline would serialize as a
+  // success-shaped content block.
+  if (!row) throw new Error(`no candidate ${args.candidate_id}`);
 
   const centroid = JSON.parse(row.centroid) as unknown;
   if (!Array.isArray(centroid) || !centroid.every((x) => typeof x === 'number')) {
-    return { error: `candidate ${args.candidate_id} has malformed centroid` };
+    throw new Error(`candidate ${args.candidate_id} has malformed centroid`);
   }
 
   const overlap: ArchiveOverlapResult = await computeArchiveOverlap(

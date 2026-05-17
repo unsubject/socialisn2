@@ -1,4 +1,4 @@
-// Telegram bot wiring (SPEC §11.3).
+// Telegram bot wiring (SPEC §11.3, ADR-010).
 //
 // Single-user bot — all updates from a chat ID other than
 // TELEGRAM_CHAT_ID are silently dropped. The whitelist middleware runs
@@ -7,18 +7,11 @@
 //
 // Long-polling transport via grammy's `bot.start()`. The single-process
 // app deployment (src/index.ts) starts polling alongside the Fastify
-// HTTP server. Webhook mode would need setWebhook + Caddy/nginx path +
-// secret header — three new moving parts that buy nothing at v1 single-
-// user single-VPS scale.
+// HTTP server. See ADR-010 for the transport / process-boundary
+// rationale.
 //
 // What's NOT wired here (deferred to a follow-up PR — see PR body):
-//   /search         — needs vector embedding of query text, overlaps
-//                     with Stage 5 archive plumbing.
-//   /add_competitor — overlaps with the MCP server's add_competitor
-//                     tool (Phase 4 PR 3); shipping in both surfaces
-//                     now invites divergence.
-//   /add_influencer — same overlap concern.
-//
+//   /search, /add_competitor, /add_influencer.
 // What IS wired: /today, /domain, /cand, /pick, /pass, /defer, /status,
 // /help — the daily-use loop.
 
@@ -49,14 +42,10 @@ export interface BuildBotOptions {
 export function buildBot(db: Db, opts: BuildBotOptions = {}): Bot {
   const token = opts.token ?? env.telegramBotToken();
   if (!token) {
-    // Caller's responsibility to gate on this, but a clear throw here
-    // beats a confusing grammy startup error if someone forgets.
     throw new Error('buildBot: TELEGRAM_BOT_TOKEN is empty — gate bot lifecycle on env');
   }
   const bot = new Bot(token);
 
-  // Chat-id whitelist. Empty allowedChatId disables the gate — only
-  // sensible in tests.
   const allowedChatId = opts.allowedChatId ?? env.telegramChatId();
   if (allowedChatId) {
     bot.use(async (ctx, next) => {
@@ -64,7 +53,10 @@ export function buildBot(db: Db, opts: BuildBotOptions = {}): Bot {
       if (chatId !== allowedChatId) {
         // Silent drop. No reply, no log of message text — an
         // unauthorised user gets a non-response, which is the right
-        // signal that the bot isn't for them.
+        // signal that the bot isn't for them. NOTE for ops:
+        // Telegram group chat IDs are NEGATIVE (e.g. -100xxx).
+        // If TELEGRAM_CHAT_ID is set without the leading `-` for a
+        // group, every update silently drops here.
         console.warn(
           `[telegram-bot] dropped update from chat ${chatId || '<unknown>'} (whitelist=${allowedChatId})`,
         );
@@ -73,10 +65,6 @@ export function buildBot(db: Db, opts: BuildBotOptions = {}): Bot {
       await next();
     });
   }
-
-  // ------------------------------------------------------------------
-  // Commands
-  // ------------------------------------------------------------------
 
   bot.command('today', (ctx) => handleToday(db, ctx));
   bot.command('domain', (ctx) => handleDomain(db, ctx));
@@ -87,21 +75,19 @@ export function buildBot(db: Db, opts: BuildBotOptions = {}): Bot {
   bot.command('status', (ctx) => handleStatus(db, ctx));
   bot.command('help', (ctx) => handleHelp(ctx));
 
-  // Inline keyboard callbacks for pick/pass/defer — see
-  // candidateKeyboard in format.ts for the payload shape
-  // (`decide:<action>:<id>`).
   bot.on('callback_query:data', (ctx) => handleDecideCallback(db, ctx));
 
-  // Catch-all error handler — log + continue (grammy auto-acks the
-  // update on handler return). Without this a thrown error would crash
-  // the polling loop on the next update.
+  // Catch-all error handler. Include the update id so ops can re-fetch
+  // the exact update via the Bot API and reproduce the failure;
+  // err.error is the underlying handler exception.
   bot.catch((err) => {
-    console.error('[telegram-bot] handler error:', err.error);
+    console.error(
+      `[telegram-bot] handler error on update_id=${err.ctx?.update?.update_id ?? '?'}:`,
+      err.error,
+    );
   });
 
   return bot;
 }
 
-/** Re-exported type alias so command handler files don't need to
- *  re-import grammy just for Context typings. */
 export type BotContext = Context;

@@ -74,7 +74,6 @@ describe.skipIf(!DATABASE_URL)('telegram bot (buildBot)', () => {
       VALUES (${clusterId}, ${vec}::vector(1536),
               NOW(), NOW(), 1, ARRAY['economy']::text[], 'economy', 'active')
     `;
-    apiCalls = [];
     bot = buildBot(db, { token: 'fake-test-token', allowedChatId: ALLOWED_CHAT_ID });
     // Intercept ALL outgoing Bot API calls. We return synthetic success
     // for the methods used by command handlers; everything else passes
@@ -115,6 +114,9 @@ describe.skipIf(!DATABASE_URL)('telegram bot (buildBot)', () => {
       return Promise.resolve({ ok: true, result: true }) as unknown as ReturnType<typeof _prev>;
     });
     await bot.init();
+    // Reset apiCalls AFTER init so the getMe call grammy fires during
+    // init() doesn't pollute per-test assertions on apiCalls.length.
+    apiCalls = [];
   });
 
   afterEach(async () => {

@@ -165,18 +165,19 @@ describe.skipIf(!DATABASE_URL)('scoring-worker tickOnce / compactOnce', () => {
 
   it('tickOnce pulls pending rows FIFO and processes each', async () => {
     // Insert three rows out-of-order of fetched_at so the FIFO ordering
-    // matters for the assertion.
+    // matters for the assertion. Relative-to-NOW timestamps keep this
+    // independent of the calendar.
+    const now = Date.now();
     const oldest = await insertRawItem({
-      fetchedAt: new Date('2026-05-10T00:00:00Z'),
+      fetchedAt: new Date(now - 3 * 60 * 60 * 1000),
     });
     const middle = await insertRawItem({
-      fetchedAt: new Date('2026-05-15T00:00:00Z'),
+      fetchedAt: new Date(now - 2 * 60 * 60 * 1000),
     });
     const newest = await insertRawItem({
-      fetchedAt: new Date('2026-05-17T00:00:00Z'),
+      fetchedAt: new Date(now - 1 * 60 * 60 * 1000),
     });
 
-    const processedOrder: string[] = [];
     const stats = await tickOnce(db, {
       batchSize: 20,
       maxAttempts: 3,
@@ -248,10 +249,16 @@ describe.skipIf(!DATABASE_URL)('scoring-worker tickOnce / compactOnce', () => {
   });
 
   it('tickOnce short-circuits on ceiling_hit; remaining rows untouched', async () => {
-    // Pre-load the ledger to within $0.001 of the default $1.50 ceiling.
-    await seedCostLedger(1.499);
-    const r1 = await insertRawItem({ fetchedAt: new Date('2026-05-10T00:00:00Z') });
-    const r2 = await insertRawItem({ fetchedAt: new Date('2026-05-11T00:00:00Z') });
+    // Seed AT the default $1.50 ceiling so the +$0.001 projection
+    // unambiguously trips. Avoids dancing around FP precision near the
+    // boundary; the test cares about behaviour, not threshold arithmetic.
+    await seedCostLedger(1.5);
+    const r1 = await insertRawItem({
+      fetchedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+    });
+    const r2 = await insertRawItem({
+      fetchedAt: new Date(Date.now() - 1 * 60 * 60 * 1000),
+    });
 
     const stats = await tickOnce(db, {
       batchSize: 20,

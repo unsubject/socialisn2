@@ -165,8 +165,15 @@ export function formatDigest(opts: {
  * Instant push for is_exclusive=true candidates per SPEC §11.3. Pre-pends
  * a ⚡ marker so the user-side notification is unambiguous even before
  * the full text loads.
+ *
+ * Parameter type narrowed to the three fields actually consumed — keeps
+ * callers (orchestrator's `defaultNotifyExclusive`) from hand-building
+ * fake RenderCandidate values for unused fields, and prevents the bug
+ * class where a future renderer extension reads a placeholder field.
  */
-export function formatExclusivePush(c: RenderCandidate): string {
+export function formatExclusivePush(
+  c: Pick<RenderCandidate, 'id' | 'headline' | 'primaryDomain'>,
+): string {
   return `⚡ *Exclusive:* ${escapeMarkdownV2(c.headline)}\n\n${escapeMarkdownV2(c.primaryDomain)} · /cand ${escapeMarkdownV2(c.id)}`;
 }
 

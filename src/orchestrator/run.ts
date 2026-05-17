@@ -23,7 +23,7 @@
 // dependency-injected so tests can stub the LLM + MCP surface without
 // touching the env or fetch globals.
 
-import { sql } from 'drizzle-orm';
+import { type SQL, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
 
 import { DOMAIN_CONFIGS, domainWeight } from '../../config/domains.js';
@@ -63,10 +63,7 @@ import {
   computeTrajectory,
   type TrajectoryResult,
 } from '../scoring/trajectory.js';
-import {
-  archiveSearch as defaultArchiveSearch,
-  type ArchiveMatch,
-} from '../lib/two_brain_client.js';
+import { archiveSearch as defaultArchiveSearch } from '../lib/two_brain_client.js';
 
 // Conservative pre-call projections so a single call can't sneak under
 // an exact-ceiling check. Real cost is recorded post-call.
@@ -488,8 +485,6 @@ async function finaliseRun(
     WHERE id = ${runId}
   `);
 }
-
-import { type SQL } from 'drizzle-orm';
 
 function textArrayLiteral(items: string[]): SQL {
   if (items.length === 0) return sql`ARRAY[]::text[]`;

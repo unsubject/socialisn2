@@ -62,6 +62,15 @@ export const rawItems = pgTable(
     fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
     language: text('language'),
     rawMeta: jsonb('raw_meta').default(sql`'{}'::jsonb`),
+    // Phase 2 processing tracking — added by migration 011. processed_at
+    // marks completion of normalise → embed → dedup/cluster regardless of
+    // path (normal items insert OR dedup-hit). dedup_cluster_id is set
+    // ONLY for dedup hits — the normal path keeps cluster_id on items.
+    // processing_attempts caps retries on poison rows; see
+    // src/workers/scoring.ts for the cap value.
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+    dedupClusterId: uuid('dedup_cluster_id').references((): AnyPgColumn => clusters.id),
+    processingAttempts: integer('processing_attempts').notNull().default(0),
   },
   (t) => ({
     sourceExternalUnique: uniqueIndex('raw_items_source_external_unique').on(
@@ -71,6 +80,10 @@ export const rawItems = pgTable(
     urlHashIdx: index('idx_raw_items_url_hash').on(t.urlHash),
     titleHashIdx: index('idx_raw_items_title_hash').on(t.titleHash),
     publishedAtIdx: index('idx_raw_items_published_at').on(t.publishedAt.desc()),
+    // idx_raw_items_pending is a partial index (WHERE processed_at IS NULL)
+    // — declared in migration 011's SQL only. The drizzle index builder
+    // here would create a full b-tree; the runtime query path doesn't need
+    // the typed handle, so leaving it out of the schema avoids drift.
   }),
 );
 

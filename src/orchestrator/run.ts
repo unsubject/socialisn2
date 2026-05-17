@@ -412,18 +412,11 @@ async function safeNotifyDigest(
 /** Default per-insert exclusive push. Same env-gate as digest. */
 async function defaultNotifyExclusive(input: ExclusivePushInput): Promise<void> {
   if (!env.telegramBotToken() || !env.telegramChatId()) return;
-  const text = formatExclusivePush({
-    id: input.id,
-    headline: input.headline,
-    primaryDomain: input.primaryDomain,
-    domains: [input.primaryDomain],
-    temperature: 'hot',
-    trajectory: 'new',
-    isExclusive: true,
-    archiveOverlap: 0,
-    keywords: [],
-    tags: [],
-  });
+  // formatExclusivePush takes Pick<RenderCandidate, 'id'|'headline'|'primaryDomain'>
+  // — ExclusivePushInput satisfies that shape exactly, so no hand-built
+  // RenderCandidate is needed. (Pre-narrow this hand-built fake values
+  // for unused fields; the narrowed type makes the contract explicit.)
+  const text = formatExclusivePush(input);
   const result = await defaultSendTelegram({ text });
   if (!result.ok) {
     throw new Error(result.description ?? 'unknown sendMessage error');

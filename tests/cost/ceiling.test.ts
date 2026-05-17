@@ -82,11 +82,22 @@ describe.skipIf(!DATABASE_URL)('cost ceiling (SPEC §12)', () => {
   });
 
   it('flags atAlertThreshold once spend crosses 80% of ceiling', async () => {
-    await insertSpend(1.2); // 80% of 1.50
+    await insertSpend(1.2); // 80% of 1.50 — FP-fragile (1.2/1.5 = 0.7999…)
     const status = await checkCeiling(db);
     expect(status.pctOfCeiling).toBeCloseTo(0.8, 5);
     expect(status.atAlertThreshold).toBe(true);
     expect(status.hitCeiling).toBe(false);
+  });
+
+  it('atAlertThreshold tolerates IEEE 754 sub-ulp slack at the boundary', async () => {
+    // Regression guard: 1.2 / 1.5 = 0.7999999999999999. Without
+    // COMPARISON_EPSILON the pct >= 0.8 check is one ulp short of true
+    // and the alert silently fails to fire at the configured threshold.
+    process.env.COST_ALERT_THRESHOLD = '0.8';
+    await insertSpend(1.2);
+    const status = await checkCeiling(db);
+    expect(status.pctOfCeiling < 0.8).toBe(true); // confirms the FP gap exists
+    expect(status.atAlertThreshold).toBe(true);  // epsilon makes it pass anyway
   });
 
   it('flags hitCeiling once spend reaches ceiling', async () => {

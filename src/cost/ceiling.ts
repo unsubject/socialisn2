@@ -20,6 +20,15 @@ import { dailyTotalUsd } from './ledger.js';
 import { env } from '../config/env.js';
 import type { Db } from '../db/client.js';
 
+// FP slack at threshold boundaries. Without this, IEEE 754 surprises
+// like 1.2 / 1.5 = 0.7999999999999999 make a spend that's operationally
+// AT 80% of ceiling fail the >= alertThreshold check. 1e-9 is six orders
+// of magnitude below the smallest USD amount we'd ever ledger
+// (cost_ledger.usd is numeric(10,6), so the minimum representable
+// non-zero spend is $0.000001), so the epsilon cannot mask a real spend
+// crossing the threshold.
+const COMPARISON_EPSILON = 1e-9;
+
 export interface CeilingStatus {
   /** USD spent so far in the current UTC day. */
   spent: number;
@@ -29,9 +38,9 @@ export interface CeilingStatus {
   alertThreshold: number;
   /** spent / ceiling, can exceed 1.0 if a single call pushed past. */
   pctOfCeiling: number;
-  /** True when pctOfCeiling ≥ alertThreshold — caller fires the alert. */
+  /** True when pctOfCeiling ≥ alertThreshold (with FP slack) — caller fires the alert. */
   atAlertThreshold: boolean;
-  /** True when pctOfCeiling ≥ 1.0 — ceiling already breached. */
+  /** True when pctOfCeiling ≥ 1.0 (with FP slack) — ceiling already breached. */
   hitCeiling: boolean;
 }
 
@@ -67,7 +76,9 @@ export async function checkCeiling(db: Db): Promise<CeilingStatus> {
  *
  * Use `≥` (not `>`) at the boundary: a call that exactly hits the
  * ceiling is treated as a hit. The intent is to NOT spend the marginal
- * cent that takes us across.
+ * cent that takes us across. COMPARISON_EPSILON folds FP slack into the
+ * same direction — a sum that's mathematically at the ceiling but lands
+ * one ulp below in floats still trips.
  */
 export async function assertWithinCeiling(
   db: Db,
@@ -80,7 +91,7 @@ export async function assertWithinCeiling(
   }
   const ceiling = env.costCeilingDailyUsd();
   const spent = await dailyTotalUsd(db);
-  if (spent + projectedCostUsd >= ceiling) {
+  if (spent + projectedCostUsd + COMPARISON_EPSILON >= ceiling) {
     throw new CostCeilingHitError(spent, projectedCostUsd, ceiling);
   }
   return buildStatus(spent);
@@ -95,7 +106,7 @@ function buildStatus(spent: number): CeilingStatus {
     ceiling,
     alertThreshold,
     pctOfCeiling,
-    atAlertThreshold: pctOfCeiling >= alertThreshold,
-    hitCeiling: pctOfCeiling >= 1,
+    atAlertThreshold: pctOfCeiling + COMPARISON_EPSILON >= alertThreshold,
+    hitCeiling: pctOfCeiling + COMPARISON_EPSILON >= 1,
   };
 }

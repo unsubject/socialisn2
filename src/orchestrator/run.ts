@@ -11,6 +11,11 @@
 //   Stage 6 — curation via Sonnet (curate.ts). Persists only clusters
 //             scoring ≥ 60.
 //   Stage 7 — INSERT candidates row.
+//   Post-run — when env.rssPath() is set, regenerate the 6 RSS feeds
+//             per SPEC §11.2 ("Regenerated on every notify-telegram
+//             event, i.e. after every scoring run"). Failures here
+//             populate runs.error but do NOT roll back persisted
+//             candidates — feed regeneration is a delivery concern.
 //
 // Cost ceiling per SPEC §12 — assertWithinCeiling fires BEFORE each
 // Gemini / Sonnet call, with a conservative per-call projection.
@@ -27,9 +32,11 @@ import { type SQL, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
 
 import { DOMAIN_CONFIGS, domainWeight } from '../../config/domains.js';
+import { env } from '../config/env.js';
 import type { Db } from '../db/client.js';
 import { assertWithinCeiling, CostCeilingHitError } from '../cost/ceiling.js';
 import { recordCost } from '../cost/ledger.js';
+import { generateAllFeeds } from '../rss/generate.js';
 import {
   archiveOverlapDecision,
   computeArchiveOverlap,
@@ -95,6 +102,11 @@ export interface RunDependencies {
   /** Override Stage 5 (2nd-brain) — tests stub here. Same signature as
    *  src/lib/two_brain_client.archiveSearch. */
   archiveSearcher?: typeof defaultArchiveSearch;
+  /** Override the post-run RSS regeneration — tests inject this when
+   *  they want to assert the hook fired without touching the disk. The
+   *  default reads env.rssPath() + env.publicHost() and writes to the
+   *  configured static-output directory. */
+  regenerateFeeds?: (db: Db) => Promise<void>;
 }
 
 export interface RunResult {
@@ -107,7 +119,9 @@ export interface RunResult {
   candidatesPersisted: number;
   totalCostUsd: number;
   status: 'completed' | 'failed';
-  /** Non-empty when status='completed' with halt reason ('cost_ceiling_hit'). */
+  /** Non-empty when status='completed' with halt reason ('cost_ceiling_hit')
+   *  OR a post-run feed-regeneration failure. Multiple causes are joined
+   *  with `; ` so the surface field carries both signals. */
   error?: string;
 }
 
@@ -142,6 +156,7 @@ export async function runScoring(
   const summarise = deps.summarise ?? summariseCluster;
   const curate = deps.curate ?? curateCluster;
   const archiveSearcher = deps.archiveSearcher ?? defaultArchiveSearch;
+  const regenerateFeeds = deps.regenerateFeeds ?? defaultRegenerateFeeds;
   const topN = opts.topN ?? 200;
 
   const runId = uuidv7();
@@ -318,12 +333,19 @@ export async function runScoring(
       stats.candidatesPersisted += 1;
     }
 
-    await finaliseRun(db, runId, 'completed', stats, halt?.reason);
+    // Post-run: regenerate RSS feeds per SPEC §11.2. Wrapped in its own
+    // try so a feed-write failure becomes a recorded error rather than a
+    // run rollback — candidates are already persisted, the feed file
+    // can be regenerated on the next run.
+    const feedError = await safeRegenerateFeeds(db, regenerateFeeds);
+    const finalError = combineErrors(halt?.reason, feedError);
+
+    await finaliseRun(db, runId, 'completed', stats, finalError);
     return {
       runId,
       ...stats,
       status: 'completed',
-      error: halt?.reason,
+      error: finalError,
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -340,6 +362,45 @@ export async function runScoring(
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Default RSS regenerate hook. Reads `env.rssPath()` and `env.publicHost()`
+ * at call time so a per-run env change (test fixtures setting `RSS_PATH`
+ * before invoking) is picked up. No-ops when `RSS_PATH` is empty — that's
+ * the contract for non-prod environments that don't need static feeds.
+ */
+async function defaultRegenerateFeeds(db: Db): Promise<void> {
+  const outputDir = env.rssPath();
+  if (!outputDir) return;
+  await generateAllFeeds(db, outputDir, env.publicHost());
+}
+
+/**
+ * Run the regenerate hook, never throwing. Returns a short error
+ * description if it failed, or `undefined` on success / no-op. Logged
+ * to stderr so ops sees the cause; the `runs.error` field carries the
+ * short form.
+ */
+async function safeRegenerateFeeds(
+  db: Db,
+  hook: (db: Db) => Promise<void>,
+): Promise<string | undefined> {
+  try {
+    await hook(db);
+    return undefined;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[orchestrator] RSS regeneration failed:', err);
+    // Cap so a 5-line stack doesn't blow up runs.error and crowd out
+    // the halt reason in the same field.
+    return `rss_regeneration_failed: ${msg.slice(0, 200)}`;
+  }
+}
+
+function combineErrors(...parts: Array<string | undefined>): string | undefined {
+  const filtered = parts.filter((p): p is string => Boolean(p));
+  return filtered.length === 0 ? undefined : filtered.join('; ');
+}
 
 // Same `type` (not `interface`) treatment as ClusterRow above — see
 // the comment there for why db.execute<T> rejects closed interfaces.

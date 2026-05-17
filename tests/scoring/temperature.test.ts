@@ -17,6 +17,7 @@ import { EMBEDDING_DIM } from '../../src/db/schema.js';
 import {
   bucketBaseTemperature,
   computeTemperature,
+  computeVolumeZ,
 } from '../../src/scoring/temperature.js';
 import { assertDestructiveAllowed } from '../helpers/destructive-guard.js';
 
@@ -36,6 +37,41 @@ describe('bucketBaseTemperature', () => {
     expect(bucketBaseTemperature(1)).toBe('hot');
     expect(bucketBaseTemperature(2.4)).toBe('hot');
     expect(bucketBaseTemperature(10)).toBe('hot');
+  });
+});
+
+describe('computeVolumeZ', () => {
+  it('returns 0 when mean is null (no baseline at all)', () => {
+    expect(computeVolumeZ(50, null, 0)).toBe(0);
+  });
+
+  it('uses the standard z formula when observed stddev exceeds the Poisson floor', () => {
+    // mean=2, observed stddev=10 (high variance), Poisson floor sqrt(2) ≈ 1.41.
+    // effective stddev = max(10, 1.41) = 10. z = (50-2)/10 = 4.8.
+    expect(computeVolumeZ(50, 2, 10)).toBeCloseTo(4.8, 5);
+  });
+
+  it('falls back to the Poisson floor when observed stddev is 0', () => {
+    // Quiet domain: every other cluster has identical item_count=2 →
+    // observed STDDEV is 0. Without the floor, z would be 0 and a
+    // 50-item cluster would silently look warm. With Poisson floor
+    // sqrt(2): z = (50-2)/sqrt(2) ≈ 33.9 → hot.
+    expect(computeVolumeZ(50, 2, 0)).toBeCloseTo(48 / Math.sqrt(2), 5);
+  });
+
+  it('uses Poisson floor when observed stddev is small but non-zero', () => {
+    // mean=2, tiny observed stddev=0.5. Poisson floor sqrt(2) ≈ 1.41
+    // wins. z = (50-2)/sqrt(2) ≈ 33.9.
+    expect(computeVolumeZ(50, 2, 0.5)).toBeCloseTo(48 / Math.sqrt(2), 5);
+  });
+
+  it('handles mean=0 with the floor=1 clamp', () => {
+    // mean=0 → sqrt(max(0,1)) = 1 → z = (50-0)/1 = 50.
+    expect(computeVolumeZ(50, 0, 0)).toBe(50);
+  });
+
+  it('returns negative z when itemCount is below mean', () => {
+    expect(computeVolumeZ(1, 10, 0)).toBeLessThan(0);
   });
 });
 
@@ -161,7 +197,7 @@ describe.skipIf(!DATABASE_URL)('computeTemperature (SPEC §9.5)', () => {
   });
 
   it('returns cold when item_count is below the domain mean', async () => {
-    // Other clusters in the domain have 10 items each; target has 1.
+    // Other clusters in the domain have 10-12 items; target has 1.
     const target = await insertCluster({ primaryDomain: 'economy', itemCount: 1 });
     await insertCluster({ primaryDomain: 'economy', itemCount: 10 });
     await insertCluster({ primaryDomain: 'economy', itemCount: 10 });
@@ -175,9 +211,10 @@ describe.skipIf(!DATABASE_URL)('computeTemperature (SPEC §9.5)', () => {
     expect(result.temperature).toBe('cold');
   });
 
-  it('returns hot when item_count is well above the domain mean', async () => {
+  it('returns hot when item_count is well above the domain mean (Poisson floor handles zero variance)', async () => {
     const target = await insertCluster({ primaryDomain: 'economy', itemCount: 50 });
-    // 10 quiet clusters → z-score of 50 is huge.
+    // 10 identical quiet clusters → observed STDDEV=0, but Poisson floor
+    // sqrt(2) ≈ 1.41 → z = (50-2)/1.41 ≈ 33.9 → hot.
     for (let i = 0; i < 10; i++) {
       await insertCluster({ primaryDomain: 'economy', itemCount: 2 });
     }

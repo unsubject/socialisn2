@@ -59,17 +59,9 @@ export async function computeTemperature(
       AND first_seen_at > NOW() - make_interval(days => ${DOMAIN_WINDOW_DAYS})
   `);
 
-  const meanRow = stats[0]?.mean;
-  const stddevRow = stats[0]?.stddev;
-  const stddev = stddevRow ?? 0;
-
-  // Guard against:
-  //   - no other clusters in domain → mean is null → z = 0 (warm baseline)
-  //   - zero-variance domain → stddev = 0 → division would yield Infinity
-  const volumeZ =
-    meanRow !== null && meanRow !== undefined && stddev > 0
-      ? (input.itemCount - meanRow) / stddev
-      : 0;
+  const mean = stats[0]?.mean;
+  const observedStddev = stats[0]?.stddev ?? 0;
+  const volumeZ = computeVolumeZ(input.itemCount, mean ?? null, observedStddev);
 
   if (volumeZ < OVER_SAT_FLOOR_Z) {
     return { volumeZ, temperature: bucketBaseTemperature(volumeZ) };
@@ -94,6 +86,33 @@ export async function computeTemperature(
     temperature: upgradedToOverSaturated ? 'over_saturated' : 'hot',
     avgPairwiseSimilarity: avgSim ?? undefined,
   };
+}
+
+/**
+ * Z-score with a Poisson stddev floor. item_count is count data, so the
+ * natural lower bound on the spread is sqrt(mean). We use
+ * max(observed_stddev, sqrt(max(mean, 1))) so the score behaves sensibly
+ * even when every other cluster in the domain has an identical
+ * item_count (observed STDDEV = 0 — a real production case for quiet
+ * domains) and avoids the silent "runaway cluster looks warm because
+ * stddev was 0" bug.
+ *
+ * Returns 0 when there's no baseline at all (no other clusters in the
+ * domain → mean is null) so single-cluster domains stay at the warm
+ * default rather than asserting a phantom z-score.
+ *
+ * Exposed for unit testing.
+ */
+export function computeVolumeZ(
+  itemCount: number,
+  mean: number | null,
+  observedStddev: number,
+): number {
+  if (mean === null || mean === undefined) return 0;
+  const poissonFloor = Math.sqrt(Math.max(mean, 1));
+  const effectiveStddev = Math.max(observedStddev, poissonFloor);
+  if (effectiveStddev <= 0) return 0; // belt-and-braces; reachable only if mean < 0
+  return (itemCount - mean) / effectiveStddev;
 }
 
 /**

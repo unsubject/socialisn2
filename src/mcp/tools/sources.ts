@@ -96,6 +96,12 @@ export async function addInfluencer(
   const domains = args.domain ? [args.domain] : ['economy'];
   const id = uuidv7();
 
+  // No ON CONFLICT clause — sources has no natural unique key beyond
+  // `id`, and the earlier attempt at `ON CONFLICT (source_id,
+  // external_id)` referenced a constraint that only exists on
+  // raw_items (PG raises "no unique or exclusion constraint matching
+  // the ON CONFLICT specification" on every call). Duplicate URLs CAN
+  // land; operator dedupes via SQL if it happens.
   const rows = await db.execute<{ id: string }>(sql`
     INSERT INTO sources (
       id, kind, url, name, language, domains,
@@ -110,14 +116,8 @@ export async function addInfluencer(
       ${INFLUENCER_DEFAULT_FETCH_INTERVAL_MIN},
       true
     )
-    ON CONFLICT (source_id, external_id) DO NOTHING
     RETURNING id
   `);
-  // The ON CONFLICT above is a no-op because sources has no
-  // (source_id, external_id) constraint — that's on raw_items. Sources
-  // doesn't have a natural unique key beyond `id`, so duplicate URLs
-  // CAN land. Operator can dedupe via SQL if it happens; v1 doesn't
-  // gate this. Return the freshly-inserted row.
   const sourceId = rows[0]?.id ?? id;
   return { source_id: sourceId };
 }

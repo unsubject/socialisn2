@@ -366,4 +366,66 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     expect(result.clustersConsidered).toBe(0);
     expect(result.candidatesPersisted).toBe(0);
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 4 PR 1: RSS regen hook wiring
+  // ---------------------------------------------------------------------------
+
+  it('calls regenerateFeeds exactly once on a successful run', async () => {
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+
+    let calls = 0;
+    const result = await runScoring(
+      db,
+      { kind: 'manual' },
+      {
+        summarise: makeStubSummarise(),
+        curate: makeStubCurate(75),
+        archiveSearcher: makeStubArchive([]),
+        regenerateFeeds: async (_db) => {
+          calls += 1;
+        },
+      },
+    );
+
+    expect(result.status).toBe('completed');
+    expect(result.candidatesPersisted).toBe(1);
+    expect(calls).toBe(1);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('records rss_regeneration_failed in runs.error when the hook throws', async () => {
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+
+    const result = await runScoring(
+      db,
+      { kind: 'manual' },
+      {
+        summarise: makeStubSummarise(),
+        curate: makeStubCurate(75),
+        archiveSearcher: makeStubArchive([]),
+        regenerateFeeds: async () => {
+          throw new Error('disk full');
+        },
+      },
+    );
+
+    // Status stays completed — candidates are already persisted; feed
+    // regen is a delivery concern, not a scoring concern. The error
+    // field surfaces both halt reason (none here) and the feed failure.
+    expect(result.status).toBe('completed');
+    expect(result.candidatesPersisted).toBe(1);
+    expect(result.error).toMatch(/rss_regeneration_failed/);
+    expect(result.error).toMatch(/disk full/);
+
+    const runs = await client<{ status: string; error: string | null }[]>`
+      SELECT status, error FROM runs
+    `;
+    expect(runs[0]!.status).toBe('completed');
+    expect(runs[0]!.error).toMatch(/rss_regeneration_failed/);
+  });
 });

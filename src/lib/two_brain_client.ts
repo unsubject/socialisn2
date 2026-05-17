@@ -17,6 +17,13 @@
 // already uses raw fetch; the SDK adds dependency weight without
 // unlocking anything we need at v1.
 //
+// Transport compliance: the MCP Streamable HTTP spec requires POST
+// clients to advertise BOTH application/json AND text/event-stream in
+// Accept, and to accept either response shape. SDK-based MCP servers
+// enforce this with a 406 before processing tools/call. 2nd-brain's own
+// mcp-worker happens to always return JSON, but we follow the spec so
+// the same client works against any compliant server.
+//
 // Graceful-fallback wrappers (`archiveSearch`, `recordPick`) swallow
 // final failures and return empty results so callers don't need to
 // implement the SPEC §10.2 contract themselves. A wrong-sized embedding
@@ -28,13 +35,18 @@ import { env } from '../config/env.js';
 /** Embedding dimension required by SPEC §10 — must match text-embedding-3-small. */
 export const EXPECTED_QUERY_EMBEDDING_DIM = 1536;
 
+/** Accept header value sent on every MCP POST — see module header for why. */
+export const MCP_ACCEPT_HEADER = 'application/json, text/event-stream';
+
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_ATTEMPTS = 3;
 const INITIAL_BACKOFF_MS = 500;
 
 // HTTP status codes we treat as permanent (no retry). 401/403 won't fix
-// themselves on retry; 404 means the MCP URL is wrong; the rest of the
-// 4xx range we treat the same. 5xx and network errors retry per SPEC.
+// themselves on retry; 404 means the MCP URL is wrong; 406 means the
+// server rejected our Accept (shouldn't happen now we send both, but if
+// it does it's a config issue not a transient failure). 5xx and network
+// errors retry per SPEC.
 function isPermanentHttpStatus(status: number): boolean {
   return status >= 400 && status < 500;
 }
@@ -83,6 +95,59 @@ class PermanentMcpError extends Error {
 }
 
 /**
+ * Parse an MCP-style SSE response body and return the JSON payload from
+ * the last `message` event. Implements just enough of the SSE format
+ * (https://html.spec.whatwg.org/multipage/server-sent-events.html) for
+ * a one-shot MCP tools/call response — we don't need to stream-decode
+ * multiple events or maintain a connection.
+ *
+ * SSE rules we honour: events separated by blank lines, default event
+ * type is `message` when no `event:` field is present, multi-line
+ * `data:` fields concatenate with `\n`, leading single space after
+ * `data:` is stripped.
+ */
+export function parseSseResponse(text: string): unknown {
+  const events = text.split(/\r?\n\r?\n/).filter((e) => e.trim());
+  // Walk events newest-first so a server emitting heartbeats before the
+  // payload still resolves to the actual message event.
+  for (let i = events.length - 1; i >= 0; i--) {
+    const block = events[i];
+    if (!block) continue;
+    const lines = block.split(/\r?\n/);
+    let eventType: string = 'message';
+    const dataLines: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith('event:')) {
+        eventType = line.slice('event:'.length).trim();
+      } else if (line.startsWith('data:')) {
+        // Strip the optional single leading space per the SSE spec.
+        const value = line.slice('data:'.length);
+        dataLines.push(value.startsWith(' ') ? value.slice(1) : value);
+      }
+      // Other fields (id:, retry:, comment lines) are ignored — they
+      // don't affect a single-call tools/call response.
+    }
+    if (eventType === 'message' && dataLines.length > 0) {
+      return JSON.parse(dataLines.join('\n'));
+    }
+  }
+  throw new Error('SSE response contained no message event with data');
+}
+
+/**
+ * Read the JSON-RPC response from an HTTP Response, transparently
+ * handling either content-type the MCP Streamable HTTP transport allows.
+ */
+async function readRpcResponse(res: Response): Promise<JsonRpcResponse> {
+  const contentType = res.headers.get('content-type') ?? '';
+  if (contentType.includes('text/event-stream')) {
+    const body = await res.text();
+    return parseSseResponse(body) as JsonRpcResponse;
+  }
+  return (await res.json()) as JsonRpcResponse;
+}
+
+/**
  * Single attempt at an MCP tools/call. Returns the parsed tool output
  * on success. Throws on any failure — `callMcpTool` decides whether to
  * retry based on the error type.
@@ -109,7 +174,7 @@ async function attemptMcpCall<T>(
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        accept: 'application/json',
+        accept: MCP_ACCEPT_HEADER,
         authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
@@ -133,7 +198,16 @@ async function attemptMcpCall<T>(
     throw new Error(msg);
   }
 
-  const json = (await res.json()) as JsonRpcResponse;
+  let json: JsonRpcResponse;
+  try {
+    json = await readRpcResponse(res);
+  } catch (err) {
+    // Either content-type lied or the SSE/JSON body was malformed. Treat
+    // as permanent — retrying won't fix a misbehaving server.
+    throw new PermanentMcpError(
+      `Failed to read MCP response for ${toolName}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   if (json.error) {
     // -32601 (method not found) / -32602 (invalid params, includes "Unknown
     // tool" in 2nd-brain's impl) are server-config issues — don't retry.

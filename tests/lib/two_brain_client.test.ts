@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   archiveSearch,
   EXPECTED_QUERY_EMBEDDING_DIM,
+  MCP_ACCEPT_HEADER,
+  parseSseResponse,
   recordPick,
   type ArchiveMatch,
 } from '../../src/lib/two_brain_client.js';
@@ -30,6 +32,13 @@ function stubResponse(body: unknown, init: { status?: number } = {}): Response {
   return new Response(JSON.stringify(body), {
     status: init.status ?? 200,
     headers: { 'content-type': 'application/json' },
+  });
+}
+
+function stubSseResponse(body: string, init: { status?: number } = {}): Response {
+  return new Response(body, {
+    status: init.status ?? 200,
+    headers: { 'content-type': 'text/event-stream' },
   });
 }
 
@@ -80,7 +89,29 @@ describe('archiveSearch', () => {
     expect(fakeFetch).toHaveBeenCalledTimes(1);
   });
 
-  it('posts a JSON-RPC 2.0 tools/call envelope with bearer auth', async () => {
+  it('parses MCP responses sent as text/event-stream', async () => {
+    const matches: ArchiveMatch[] = [
+      {
+        id: 'e2',
+        title: 'SSE-delivered essay',
+        url: 'https://example.com/e2',
+        published_at: '2026-04-15T00:00:00Z',
+        similarity: 0.91,
+        type: 'essay',
+      },
+    ];
+    const sseBody =
+      `event: message\n` +
+      `data: ${JSON.stringify(mcpResult(matches))}\n` +
+      `\n`;
+    const fakeFetch = (async () => stubSseResponse(sseBody)) as unknown as typeof fetch;
+
+    const result = await archiveSearch(makeEmbedding(), 5, { fetchFn: fakeFetch });
+
+    expect(result).toEqual(matches);
+  });
+
+  it('posts a JSON-RPC 2.0 tools/call envelope with bearer auth + dual Accept', async () => {
     let capturedUrl: string | URL = '';
     let capturedHeaders: Record<string, string> = {};
     let capturedBody: { jsonrpc?: string; method?: string; params?: { name?: string; arguments?: Record<string, unknown> } } = {};
@@ -98,6 +129,10 @@ describe('archiveSearch', () => {
 
     expect(String(capturedUrl)).toBe('https://2ndbrain.test.example/mcp');
     expect(capturedHeaders.authorization).toBe('Bearer tk-test');
+    // Required by MCP Streamable HTTP spec; SDK servers 406 without this.
+    expect(capturedHeaders.accept).toBe(MCP_ACCEPT_HEADER);
+    expect(capturedHeaders.accept).toContain('application/json');
+    expect(capturedHeaders.accept).toContain('text/event-stream');
     expect(capturedBody.jsonrpc).toBe('2.0');
     expect(capturedBody.method).toBe('tools/call');
     expect(capturedBody.params?.name).toBe('archive_search');
@@ -144,6 +179,19 @@ describe('archiveSearch', () => {
     const fakeFetch = (async (): Promise<Response> => {
       attempt += 1;
       return new Response('unauthorised', { status: 401 });
+    }) as unknown as typeof fetch;
+
+    const result = await archiveSearch(makeEmbedding(), 5, { fetchFn: fakeFetch });
+
+    expect(result).toEqual([]);
+    expect(attempt).toBe(1);
+  });
+
+  it('fails fast on HTTP 406 (Accept rejection — misconfig, not transient)', async () => {
+    let attempt = 0;
+    const fakeFetch = (async (): Promise<Response> => {
+      attempt += 1;
+      return new Response('Not Acceptable', { status: 406 });
     }) as unknown as typeof fetch;
 
     const result = await archiveSearch(makeEmbedding(), 5, { fetchFn: fakeFetch });
@@ -281,5 +329,78 @@ describe('recordPick', () => {
 
     expect(result).toEqual({ ok: false });
     expect(fakeFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('parseSseResponse', () => {
+  it('parses a single message event with one data line', () => {
+    const body = `event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"x":1}}\n\n`;
+    expect(parseSseResponse(body)).toEqual({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { x: 1 },
+    });
+  });
+
+  it('treats events without an `event:` field as the default message type', () => {
+    // Per SSE spec, default event type is 'message' when no event: field present.
+    const body = `data: {"jsonrpc":"2.0","id":1,"result":{"x":2}}\n\n`;
+    expect(parseSseResponse(body)).toEqual({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { x: 2 },
+    });
+  });
+
+  it('concatenates multi-line data fields with newlines', () => {
+    const payload = { jsonrpc: '2.0', id: 1, result: { nested: 'yes' } };
+    const serialised = JSON.stringify(payload, null, 2);
+    const body =
+      `event: message\n` +
+      serialised
+        .split('\n')
+        .map((l) => `data: ${l}`)
+        .join('\n') +
+      `\n\n`;
+    expect(parseSseResponse(body)).toEqual(payload);
+  });
+
+  it('strips the optional leading single space after `data:`', () => {
+    // Per SSE spec: "If value starts with a U+0020 SPACE character, remove
+    // that character from value." Make sure we don't double-strip.
+    const body = `data:  {"jsonrpc":"2.0","id":1,"result":{"trimmed":true}}\n\n`;
+    // Body has TWO spaces after `data:` — we strip one; the JSON parse must
+    // still succeed (the second space is harmless leading whitespace in JSON).
+    expect(parseSseResponse(body)).toEqual({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { trimmed: true },
+    });
+  });
+
+  it('returns the last message event if multiple are present', () => {
+    // Servers may emit heartbeats / progress before the final response.
+    const body =
+      `event: heartbeat\ndata: {}\n\n` +
+      `event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"final":true}}\n\n`;
+    expect(parseSseResponse(body)).toEqual({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { final: true },
+    });
+  });
+
+  it('tolerates CRLF line endings', () => {
+    const body = `event: message\r\ndata: {"jsonrpc":"2.0","id":1,"result":{"crlf":true}}\r\n\r\n`;
+    expect(parseSseResponse(body)).toEqual({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { crlf: true },
+    });
+  });
+
+  it('throws when there is no message event with data', () => {
+    const body = `event: heartbeat\ndata: {}\n\n`;
+    expect(() => parseSseResponse(body)).toThrow(/no message event/);
   });
 });

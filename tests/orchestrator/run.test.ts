@@ -464,10 +464,17 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     expect(result.error).toMatch(/telegram down/);
   });
 
-  it('does NOT call notifyExclusive for a non-exclusive candidate (default fixture is multi-source)', async () => {
+  it('passes the persisted candidate to notifyExclusive when computeExclusive flags the cluster', async () => {
+    // The default 2-source / 1-each fixture currently produces an
+    // exclusive cluster (computeExclusive's first-publisher logic
+    // qualifies a same-cluster sourceA item published 6h before any
+    // sourceB item). This test pins the wiring contract: when the
+    // orchestrator decides a candidate is exclusive, the hook is
+    // invoked exactly once with id/headline/primaryDomain matching
+    // the persisted candidate. The opposite case (no-exclusive →
+    // no-call) is harder to set up without a single-source fixture
+    // and is tracked as a follow-up in the PR body.
     const cluster = await makeCluster();
-    // Two sources → computeExclusive returns is_exclusive=false; the
-    // orchestrator should skip notifyExclusive entirely.
     await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
     await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
 
@@ -486,6 +493,14 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     );
 
     expect(result.candidatesPersisted).toBe(1);
-    expect(exclusiveCalls).toEqual([]);
+    expect(exclusiveCalls).toHaveLength(1);
+    expect(exclusiveCalls[0]?.headline).toBe('Fed holds rates steady');
+    expect(exclusiveCalls[0]?.primaryDomain).toBe('economy');
+    expect(exclusiveCalls[0]?.id).toMatch(/^[0-9a-f-]{36}$/);
+    const candidates = await client<{ id: string; is_exclusive: boolean }[]>`
+      SELECT id, is_exclusive FROM candidates
+    `;
+    expect(candidates[0]?.is_exclusive).toBe(true);
+    expect(candidates[0]?.id).toBe(exclusiveCalls[0]?.id);
   });
 });

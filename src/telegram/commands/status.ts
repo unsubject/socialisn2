@@ -59,10 +59,14 @@ export async function handleStatus(db: Db, ctx: BotContext): Promise<void> {
 }
 
 export async function handleHelp(ctx: BotContext): Promise<void> {
+  // Apostrophes ('), colons (:), and ordinary letters/digits are NOT
+  // MarkdownV2-reserved per spec — no escape needed. The static body
+  // here only needs escapes around the `.` periods and `-` em-dashes
+  // which ARE reserved.
   const body = [
     '*Socialisn2 bot commands*',
     '',
-    '`/today` — list today\\\'s candidates',
+    "`/today` — list today's candidates",
     '`/domain <code>` — filter to one domain',
     '`/cand <id>` — full candidate detail \\+ Pick/Pass/Defer buttons',
     '`/pick <id> [reason]` — mark picked',

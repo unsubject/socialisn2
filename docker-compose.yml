@@ -85,6 +85,9 @@ services:
   scoring-worker:
     build: .
     restart: unless-stopped
+    # DOES depend on litellm — every tick runs normalise (Gemini Flash-Lite
+    # via the proxy). A LiteLLM outage means no Phase 2 progress; that's
+    # the correct failure mode here (cost-bearing path).
     depends_on:
       postgres:
         condition: service_healthy
@@ -93,8 +96,7 @@ services:
       litellm:
         condition: service_healthy
     env_file: .env
-    # Phase 2/3 replaces this stub with the normalise/cluster/curate pipeline.
-    command: ["node", "-e", "console.log('scoring-worker placeholder'); setInterval(()=>{}, 1<<30)"]
+    command: ["node", "dist/workers/scoring.js"]
 
   whisper-worker:
     build: .

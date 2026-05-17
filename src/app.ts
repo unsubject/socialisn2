@@ -18,6 +18,12 @@ import { sql } from 'drizzle-orm';
 import type { Db } from './db/client.js';
 import { renderDetail, renderNotFound } from './rss/render-detail.js';
 
+// Strict 8-4-4-4-12 hex UUID pattern. The route uses this as a
+// pre-filter BEFORE the DB query so a UUID-shaped-but-syntactically-
+// invalid path (e.g. last group not 12 hex chars) becomes a clean 404
+// instead of a PG "invalid input syntax for type uuid" → Fastify 500.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 // Raw row shapes — `db.execute<T>` does not run pg type parsers, so
 // timestamptz columns come back as strings and arrays come back as
 // JS arrays (postgres-js handles the latter automatically).
@@ -61,11 +67,12 @@ export function buildApp(db: Db): FastifyInstance {
   app.get<{ Params: { id: string } }>('/c/:id', async (req, reply) => {
     const id = req.params.id;
 
-    // Loose UUID shape check — rejects obviously bogus paths before
-    // hitting the DB. The schema-level WHERE id=$1 still catches
-    // non-existent valid UUIDs; this is just a cheap pre-filter that
-    // avoids a round trip on /c/foo.
-    if (!/^[0-9a-fA-F-]{8,}$/.test(id)) {
+    // Strict UUID pre-filter — rejects anything PG's UUID cast would
+    // also reject, before we hit the DB. A loose check would let
+    // pathological-but-hex strings through, and an uncaught
+    // "invalid input syntax for type uuid" error from the candidate
+    // fetch would surface as a 500 rather than the intended 404.
+    if (!UUID_RE.test(id)) {
       return reply.code(404).type('text/html; charset=utf-8').send(renderNotFound(id));
     }
 

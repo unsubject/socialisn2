@@ -16,12 +16,6 @@ function optional(name: string, fallback: string): string {
   return process.env[name] ?? fallback;
 }
 
-/**
- * Parse an env var as a positive integer, falling back to `fallback` when
- * unset. Throws on NaN, zero, negative, or non-integer — values that would
- * lead to silent runtime weirdness (zero-concurrency BullMQ worker, zero-ms
- * fetch timeout) if `Number()` had been used directly.
- */
 function positiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
@@ -82,12 +76,10 @@ export const env = {
   scoringWorkerMaxAttempts: () => positiveIntEnv('SCORING_WORKER_MAX_ATTEMPTS', 3),
   rssPath: () => optional('RSS_PATH', ''),
   publicHost: () => required('PUBLIC_HOST'),
-  // Telegram bot (SPEC §11.3). Both required when the bot lifecycle
-  // starts and when the orchestrator's push hooks fire. Optional at the
-  // env-loader level so tests / non-prod environments leaving them
-  // empty silently skip the bot start and skip the push (consistent
-  // with the rssPath / publicHost pattern). src/index.ts gates
-  // bot.start() on both being non-empty.
   telegramBotToken: () => optional('TELEGRAM_BOT_TOKEN', ''),
   telegramChatId: () => optional('TELEGRAM_CHAT_ID', ''),
+  // MCP server bearer token (SPEC §11.4). Optional — empty disables
+  // the MCP route mount in src/app.ts (same gating pattern as the
+  // telegram bot lifecycle and the RSS regen hook).
+  socialisn2McpToken: () => optional('SOCIALISN2_MCP_TOKEN', ''),
 };

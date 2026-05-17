@@ -5,7 +5,9 @@
 //   - inbox          one row per matched email (slug + message_id PK,
 //                    plus subject, body_text snippet, body_html)
 //   - inbox_links    one row per distinct link extracted from the body,
-//                    ordinal-positional for retrieval ordering
+//                    ordinal-positional for retrieval ordering, plus a
+//                    link_kind classification (article|masthead|social|
+//                    tracking|other) used by feed-worker
 //
 // Unmatched mail falls through to the unmatched table for the operator-
 // triage / LLM-classifier loop. We don't run postal-mime on unmatched —
@@ -21,6 +23,10 @@ import type { Env } from './index';
 
 const SNIPPET_MAX_CHARS = 8_000;
 const BODY_HTML_MAX_CHARS = 200_000;
+// Cap on body bytes fed into the synthetic-id hash. Bounds hash cost on
+// multi-MB marketing HTML; well above the per-issue variance we need to
+// detect (a paragraph or two of content is enough to distinguish issues).
+const SYNTH_ID_BODY_SLICE = 4_096;
 
 const CONTEXT_HEADERS = [
   'list-post',
@@ -42,18 +48,35 @@ function collectRawHeaders(message: ForwardableEmailMessage): string {
   return JSON.stringify(out);
 }
 
-async function synthesiseMessageId(
-  subject: string | null,
-  fromAddr: string | null,
-  rawHeaders: string,
-): Promise<string> {
-  // Fallback when the inbound mail lacks a Message-Id header. Stable hash
-  // of (subject, sender, collected headers) so a redelivery of the same
-  // headers-less email collides on the (slug, message_id) PK and ON
-  // CONFLICT DO NOTHING — the previous crypto.randomUUID() form wrote a
-  // duplicate row on every redelivery. received_at is deliberately
-  // excluded since it varies per delivery and would defeat the dedup.
-  const input = `${subject ?? ''}\n${fromAddr ?? ''}\n${rawHeaders}`;
+async function synthesiseMessageId(parts: {
+  subject: string | null;
+  fromAddr: string | null;
+  dateHeader: string | null;
+  bodyText: string | null;
+  bodyHtml: string | null;
+}): Promise<string> {
+  // Fallback when the inbound mail lacks a Message-Id header. The hash
+  // mixes parsed body CONTENT in alongside subject/from/Date — content
+  // is the strong distinguishing signal for "is this the same logical
+  // message?". Recurring newsletters like "Daily Briefing" can reuse
+  // the same subject + the same stable list/sender headers across
+  // distinct issues; an earlier headers-only synthesis collided on
+  // (slug, message_id) and silently dropped the second issue via
+  // ON CONFLICT DO NOTHING. Including the body (or HTML fallback)
+  // makes redeliveries collide (same content → same id, idempotent)
+  // while distinct issues stay distinct (different content → different
+  // id). Date is a tiebreaker for the rare case where parsed bodies
+  // are near-empty.
+  const body = (parts.bodyText && parts.bodyText.length > 0
+    ? parts.bodyText
+    : (parts.bodyHtml ?? '')
+  ).slice(0, SYNTH_ID_BODY_SLICE);
+  const input = [
+    parts.subject ?? '',
+    parts.fromAddr ?? '',
+    parts.dateHeader ?? '',
+    body,
+  ].join('\n');
   const buf = new TextEncoder().encode(input);
   const hash = await crypto.subtle.digest('SHA-256', buf);
   const hex = Array.from(new Uint8Array(hash))
@@ -62,11 +85,20 @@ async function synthesiseMessageId(
   return `<synth-${hex.slice(0, 32)}@inbox.socialisn.com>`;
 }
 
+interface IngestMeta {
+  messageIdHeader: string | null;
+  receivedAt: number;
+  subject: string | null;
+  rawHeaders: string;
+  dateHeader: string | null;
+  fromAddr: string | null;
+}
+
 async function ingestToD1(
   env: Env,
   message: ForwardableEmailMessage,
   headers: { listId: string | null; fromAddr: string | null; fromDomain: string | null },
-  meta: { messageId: string; receivedAt: number; subject: string | null; rawHeaders: string },
+  meta: IngestMeta,
 ): Promise<void> {
   const slug = await findSlugByHeaders(env.INBOX_DB, headers);
 
@@ -93,6 +125,19 @@ async function ingestToD1(
   const fullHtml = parsed.html ?? null;
   const links = extractLinks({ html: fullHtml, text: fullText });
 
+  // Resolve message_id AFTER parse so the synthetic fallback can mix in
+  // content (see synthesiseMessageId). Spec-compliant senders supply
+  // Message-Id directly and we never hit the synthetic path.
+  const messageId =
+    meta.messageIdHeader ??
+    (await synthesiseMessageId({
+      subject: meta.subject,
+      fromAddr: meta.fromAddr,
+      dateHeader: meta.dateHeader,
+      bodyText: fullText,
+      bodyHtml: fullHtml,
+    }));
+
   const bodyText = fullText ? stripBoilerplate(fullText).slice(0, SNIPPET_MAX_CHARS) : null;
   // Cap body_html too — a 30 MB marketing email otherwise blows D1 row size.
   const bodyHtml = fullHtml ? fullHtml.slice(0, BODY_HTML_MAX_CHARS) : null;
@@ -100,7 +145,7 @@ async function ingestToD1(
   await env.INBOX_DB.prepare(
     'INSERT INTO inbox (slug, message_id, received_at, subject, body_text, body_html) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
   )
-    .bind(slug, meta.messageId, meta.receivedAt, meta.subject, bodyText, bodyHtml)
+    .bind(slug, messageId, meta.receivedAt, meta.subject, bodyText, bodyHtml)
     .run();
 
   if (links.length > 0) {
@@ -109,14 +154,14 @@ async function ingestToD1(
     // FKs aren't enforced by D1 unless PRAGMA foreign_keys=ON.
     const stmts = links.map((link) =>
       env.INBOX_DB.prepare(
-        'INSERT INTO inbox_links (slug, message_id, link_pos, link_url) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
-      ).bind(slug, meta.messageId, link.pos, link.url),
+        'INSERT INTO inbox_links (slug, message_id, link_pos, link_url, link_kind) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
+      ).bind(slug, messageId, link.pos, link.url, link.kind),
     );
     await env.INBOX_DB.batch(stmts);
   }
 
   console.log(
-    `[email-worker] matched slug=${slug} message_id=${meta.messageId} body_text=${bodyText?.length ?? 0}c links=${links.length}`,
+    `[email-worker] matched slug=${slug} message_id=${messageId} body_text=${bodyText?.length ?? 0}c links=${links.length}`,
   );
 }
 
@@ -129,10 +174,9 @@ export async function handleEmail(
   const fromAddr = message.from ?? null;
   const fromDomain = domainOf(fromAddr);
   const subject = message.headers.get('subject');
+  const dateHeader = message.headers.get('date');
   const rawHeaders = collectRawHeaders(message);
-  const messageId =
-    message.headers.get('message-id') ??
-    (await synthesiseMessageId(subject, fromAddr, rawHeaders));
+  const messageIdHeader = message.headers.get('message-id');
   const receivedAt = Date.now();
 
   // D1 ingestion is best-effort. A transient D1 outage, schema drift, or
@@ -144,7 +188,7 @@ export async function handleEmail(
       env,
       message,
       { listId, fromAddr, fromDomain },
-      { messageId, receivedAt, subject, rawHeaders },
+      { messageIdHeader, receivedAt, subject, rawHeaders, dateHeader, fromAddr },
     );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

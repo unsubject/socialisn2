@@ -2,12 +2,17 @@
 // inbox into an Atom feed per slug at
 // `https://inbox.socialisn.com/feeds/<slug>.xml`.
 //
-// Each entry's <link> uses the first URL extracted into inbox_links
-// during email ingestion — typically the canonical article URL — so the
-// ingestion-worker's url_hash dedup catches the same story arriving via
-// a primary RSS feed. When no link was extracted (rare; usually means a
-// plain-text email with no URLs), we fall back to the synthetic per-
-// message URL so rss-parser still has a <link> to populate from.
+// Each entry's <link> prefers the first link classified as 'article'
+// during email ingestion (see email-worker/src/parse.ts). Falling back
+// to any link is intentional — bridge rows written before migration
+// 0005 carry the default link_kind='other', and we still want them to
+// render with their existing first-extracted URL. Final fallback is
+// the synthetic per-message URL for plain-text emails with no URLs.
+//
+// The article-preferred selection is what makes cross-source url_hash
+// dedup actually work: a primary RSS feed and an inbox-bridge entry
+// for the same article now share the canonical URL, instead of the
+// bridge entry exposing the masthead / view-in-browser link.
 
 import type { Env } from './index';
 
@@ -18,7 +23,7 @@ interface InboxRow {
   received_at: number;
   subject: string | null;
   body_text: string | null;
-  first_link: string | null;
+  chosen_link: string | null;
 }
 
 export async function handleFetch(
@@ -33,19 +38,24 @@ export async function handleFetch(
   }
   const slug = match[1] ?? 'unknown';
 
-  // Pull the lowest-positioned (i.e. first-in-body) extracted link via a
-  // correlated subquery so we avoid a second round-trip per entry. D1
-  // supports subselects; LEFT-JOIN + ORDER BY/LIMIT IN ... would also
-  // work but is harder to read.
+  // COALESCE picks the first 'article' link, falling back to any link
+  // (so legacy rows written before migration 0005 still render). Both
+  // subqueries are served by idx_inbox_links_message_kind without
+  // touching the base table.
   const rows = await env.INBOX_DB.prepare(
     `SELECT
        i.message_id,
        i.received_at,
        i.subject,
        i.body_text,
-       (SELECT link_url FROM inbox_links
-        WHERE slug = i.slug AND message_id = i.message_id
-        ORDER BY link_pos ASC LIMIT 1) AS first_link
+       COALESCE(
+         (SELECT link_url FROM inbox_links
+          WHERE slug = i.slug AND message_id = i.message_id AND link_kind = 'article'
+          ORDER BY link_pos ASC LIMIT 1),
+         (SELECT link_url FROM inbox_links
+          WHERE slug = i.slug AND message_id = i.message_id
+          ORDER BY link_pos ASC LIMIT 1)
+       ) AS chosen_link
      FROM inbox AS i
      WHERE i.slug = ?
      ORDER BY i.received_at DESC
@@ -85,11 +95,7 @@ function buildSyntheticItemLink(slug: string, messageId: string): string {
 }
 
 function renderEntry(slug: string, r: InboxRow): string {
-  // Prefer the real article URL extracted into inbox_links so cross-source
-  // url_hash dedup catches the same story arriving via a primary RSS
-  // source. Fall back to the synthetic link only when no link was
-  // extracted (e.g. a plain-text email with no URLs in the body).
-  const linkHref = r.first_link ?? buildSyntheticItemLink(slug, r.message_id);
+  const linkHref = r.chosen_link ?? buildSyntheticItemLink(slug, r.message_id);
   // Atom <content type="text"> rather than <summary>: rss-parser only
   // populates item.content from <content> elements by default. Using
   // <content> means the ingestion-worker sees the snippet without needing

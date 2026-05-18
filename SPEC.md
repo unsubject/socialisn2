@@ -1,4 +1,5 @@
-# Socialisn2 — Personal Editorial Intelligence System
+successfully downloaded text file (SHA: 830fc7fb71788060ad8e08a4ede69713dad2b5d7)
+[Resource from github at repo://unsubject/socialisn2/sha/f5c7a8dd4e024d41f399d3c5264c48cd11d05958/contents/SPEC.md] # Socialisn2 — Personal Editorial Intelligence System
 
 **Version:** 1.0
 **Owner:** Simon Lee (利世民)
@@ -1039,19 +1040,27 @@ Headroom of $0.77/day for the inevitable noisy days.
 
 Run once on first deploy, before the first scheduled scoring run.
 
+> **Scope per [ADR-012](docs/adr/012-backfill-skip-all-historical-sources.md) (supersedes earlier wording).**
+> The v1 backfill is a provenance + corpus-availability check — not the
+> historical signal-window labeling implied by earlier drafts of this
+> section. There is no RSS history (no queryable backlog), no
+> GDELT-as-discovery (`src/ingestion/gdelt.ts` is per-cluster
+> enrichment, not a discovery firehose), no historical clustering, and
+> no authority recalibration at backfill time. ADR-011 retains the
+> prior framing for audit.
+
 **Source corpus for cold start:**
-- Simon's YouTube channel (`@leesimon`) — last 12 months of videos, fetched via YouTube Data API. Title + description + (where available) the cleaned subtitle file from Simon's `srt-processor` pipeline.
-- 2nd-brain essay corpus — already vectorized, accessed via 2nd-brain MCP.
+- Simon's YouTube channel (`@leesimon`) — last 12 months of videos, fetched via YouTube Data API (`src/ingestion/youtube_data.ts`). Title + description + (where available) the cleaned subtitle file from Simon's `srt-processor` pipeline.
+- 2nd-brain essay corpus — already vectorized, accessed via 2nd-brain MCP. Backfill records reachability via `archive_search` and does not pre-fetch.
 
-**Process:**
-1. Pull a 30-day historical signal window from RSS archives and GDELT GKG.
-2. Run the full ingestion pipeline against this historical window (no LLM curation yet — just clustering and summarisation).
-3. For each historical cluster, compare its embedding against (a) the YouTube channel's last 12 months and (b) the 2nd-brain essay corpus.
-4. A historical cluster with high similarity to a published episode/essay is a **positive label** (Simon would have picked this).
-5. A historical cluster with low similarity to anything in the archive is a **negative or neutral label** (Simon passed or never saw it).
-6. Use these labels to compute initial domain authority calibration: source authorities (§6.1-6.6) are adjusted up/down based on how often their items appeared in positive-label clusters.
+**Process (v1, per ADR-012):**
+1. Resolve Simon's YouTube channel handle to a `UC...` id, fetch the uploads playlist for the last 12 months, count videos.
+2. Probe `2nd-brain` `archive_search` for reachability.
+3. Write one `backfill_run` row with full provenance: `rss_history_status='skipped'`, `gdelt_history_status='skipped'`, `youtube_corpus_size`, `brain_corpus_status` ∈ {`available`, `unreachable`, `not_configured`}.
 
-This is a one-time job, expected to consume ~$5-10 of inference budget. Output is written to `backfill_run` table with full provenance for review.
+Source authority calibration (originally a backfill-time step in this section) is a no-op at backfill. Per ADR-012 it accrues from forward observation via a recurring cron owned by Phase 5 PR 3 (observability), driven by accumulated `feedback` rows. Day-0 weights are the seed values from `migrations/002_seed_sources.sql`.
+
+This is a one-time job. v1 cost is negligible — ~1 YouTube Data API page + 1 MCP probe per run. Output is written to `backfill_run` with full provenance. See `migrations/013_backfill_run_status_columns.sql` for the v1 column set.
 
 ---
 
@@ -1237,7 +1246,7 @@ Socialisn2 v1 is shipped when:
    - Telegram bot accepts all commands in §11.3 and writes feedback rows correctly.
    - MCP server responds to all tools in §11.4 from a Claude Code session.
 5. **2nd-brain integration** `archive_search` returns valid matches; `record_pick` writes to 2nd-brain and is verifiable from the 2nd-brain side.
-6. **Backfill** Backfill has been run once, source authority adjustments are persisted.
+6. **Backfill** Backfill has been run once per ADR-012; the `backfill_run` row records `status='completed'`, `youtube_corpus_size > 0`, and `brain_corpus_status` ∈ {`available`, `not_configured`}. Source authority recalibration is owned by Phase 5 PR 3 (forward-observation cron), not by backfill.
 7. **Observability** A `/status` endpoint and Telegram `/status` command surface: last run time, candidate pool counts by domain, cost-today, queue depths, error count last 24h.
 8. **No-regression** A test suite covering dedup, clustering, temperature, trajectory, decay, and exclusive detection passes.
 9. **Simon's smoke test** Over a 5-day pilot, Simon picks at least one candidate per day that he confirms (qualitatively) he would not have found via Perplexity, Google, or YouTube browsing.
@@ -1271,4 +1280,5 @@ Items where Claude Code may need to make a call during build — flag and ask Si
 ---
 
 **End of specification.**
+
 

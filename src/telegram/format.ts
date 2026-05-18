@@ -124,8 +124,13 @@ export function formatTodayList(candidates: RenderCandidate[]): string {
   }
   const sections: string[] = [];
   for (const [domain, items] of byDomain) {
+    // MarkdownV2 reserves `(` and `)` outside link/code contexts —
+    // Telegram 400s the whole send if a section header contains a
+    // bare paren. Inline-escape since the count is dynamic
+    // (escapeMarkdownV2() on the literal would also escape the
+    // digits' template, which is fine but more verbose).
     sections.push(
-      `*${escapeMarkdownV2(domain)}* (${items.length})\n${items.map(formatCandidateLine).join('\n\n')}`,
+      `*${escapeMarkdownV2(domain)}* \\(${items.length}\\)\n${items.map(formatCandidateLine).join('\n\n')}`,
     );
   }
   return sections.join('\n\n');

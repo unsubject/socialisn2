@@ -106,14 +106,20 @@ describe('formatTodayList', () => {
     expect(formatTodayList([])).toContain('No active candidates');
   });
 
-  it('groups by primaryDomain with per-domain counts', () => {
+  it('groups by primaryDomain with per-domain counts (MarkdownV2-escaped parens)', () => {
     const out = formatTodayList([
       mkCandidate({ id: 'a'.repeat(8) + '-1234-5678-9012-345678901234', primaryDomain: 'economy' }),
       mkCandidate({ id: 'b'.repeat(8) + '-1234-5678-9012-345678901234', primaryDomain: 'economy' }),
       mkCandidate({ id: 'c'.repeat(8) + '-1234-5678-9012-345678901234', primaryDomain: 'scitech' }),
     ]);
-    expect(out).toMatch(/\*economy\*\s*\(2\)/);
-    expect(out).toMatch(/\*scitech\*\s*\(1\)/);
+    // MarkdownV2 reserves `(` and `)`. Section headers must emit
+    // `\\(2\\)` — without the escape, Telegram 400s the entire
+    // reply and the user sees nothing. Assert the escape AND that
+    // no bare paren follows the bold domain.
+    expect(out).toContain('*economy* \\(2\\)');
+    expect(out).toContain('*scitech* \\(1\\)');
+    expect(out).not.toMatch(/\*economy\*\s+\(\d/);
+    expect(out).not.toMatch(/\*scitech\*\s+\(\d/);
   });
 });
 

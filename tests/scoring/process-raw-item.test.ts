@@ -433,6 +433,72 @@ describe.skipIf(!DATABASE_URL)('processRawItem (Phase 2 per-item orchestrator)',
   // sanity: two non-dup raw items create two items rows in two clusters
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // idempotency — existing items row short-circuits
+  // -------------------------------------------------------------------------
+
+  it('idempotency: existing items row short-circuits without calling normalize/embed/assignCluster', async () => {
+    // Pre-seed: cluster + items row for a specific raw_item, then
+    // call processRawItem on the same raw_item. Contract: no LLM /
+    // embed / assignCluster invocation, raw_items gets processed_at
+    // marked, cluster bookkeeping unchanged.
+    const seed = await seedItemAndCluster({
+      embedding: vA,
+      primaryDomain: 'economy',
+      publishedAt: recentTs(),
+    });
+    const seedRows = await client<{ raw_item_id: string }[]>`
+      SELECT raw_item_id FROM items WHERE id = ${seed.itemId}
+    `;
+    const seedRawId = seedRows[0]!.raw_item_id;
+
+    let normalizeCalls = 0;
+    let embedCalls = 0;
+    let assignCalls = 0;
+    const outcome = await processRawItem(
+      db,
+      {
+        id: seedRawId,
+        title: 'replayed',
+        content: 'body',
+        language: 'en',
+        publishedAt: recentTs(),
+      },
+      {
+        normalize: async () => {
+          normalizeCalls += 1;
+          return stubNormalizeResult('economy');
+        },
+        embed: async () => {
+          embedCalls += 1;
+          return stubEmbedResult(vA);
+        },
+        assignCluster: async () => {
+          assignCalls += 1;
+          return { clusterId: seed.clusterId, isNew: false, distance: 0 };
+        },
+      },
+    );
+
+    expect(outcome.kind).toBe('normal');
+    if (outcome.kind !== 'normal') throw new Error('type-narrow');
+    expect(outcome.itemId).toBe(seed.itemId);
+    expect(outcome.isNewCluster).toBe(false);
+    expect(outcome.costUsd).toBe(0);
+
+    expect(normalizeCalls).toBe(0);
+    expect(embedCalls).toBe(0);
+    expect(assignCalls).toBe(0);
+
+    const raw = await getRawItem(seedRawId);
+    expect(raw.processed_at).toBeInstanceOf(Date);
+
+    const cluster = await client<{ item_count: number }[]>`
+      SELECT item_count FROM clusters WHERE id = ${seed.clusterId}
+    `;
+    expect(cluster[0]?.item_count).toBe(1);
+  });
+
   it('two non-dup raw_items produce two items and two clusters', async () => {
     const r1 = await insertRawItem();
     const r2 = await insertRawItem();

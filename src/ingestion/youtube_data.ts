@@ -12,7 +12,8 @@
 // that requires the paid Data API.
 //
 // Quota: 10K units/day free. resolveChannelId = 1 unit; each
-// playlistItems page = 1 unit returning up to 50 items. A typical
+// playlistItems page = 1 unit returning up to 50 items (cost is
+// per call, independent of how many parts are requested). A typical
 // 12-month pull for Simon's channel (~52 videos) is 2-3 calls total.
 // Well inside the free quota even with backfill re-runs.
 
@@ -88,8 +89,14 @@ export async function resolveChannelId(
 }
 
 export interface FetchPlaylistOptions extends YouTubeDataOptions {
-  /** Stop paginating once we've seen a video with publishedAt < since.
-   *  Default: no cutoff. */
+  /** Skip videos with `videoPublishedAt < since`. Filter only — NOT
+   *  an early-stop signal. Playlist order is by playlist-add time
+   *  (`snippet.publishedAt`), which can diverge from
+   *  `contentDetails.videoPublishedAt` for scheduled / private→public
+   *  uploads, so a later page can still contain in-window items.
+   *  Pagination always continues to the end of the playlist;
+   *  bound it with `maxItems` if a channel might have thousands of
+   *  videos. Default: no filter. */
   since?: Date;
   /** Items per page. Default 50 (the API max). */
   pageSize?: number;
@@ -101,8 +108,20 @@ export interface FetchPlaylistOptions extends YouTubeDataOptions {
 
 /**
  * Fetch all videos in a playlist (typically the channel's uploads
- * playlist) newest-first, paginating until the next page is empty,
- * `since` is crossed, or `maxItems` is hit.
+ * playlist), paginating until the playlist is exhausted or
+ * `maxItems` is hit.
+ *
+ * Date semantics: `YouTubeVideo.publishedAt` is the video's public
+ * publish time (`contentDetails.videoPublishedAt`), not the time it
+ * was added to the playlist (`snippet.publishedAt`). For uploads
+ * playlists they usually match, but scheduled / private→public
+ * uploads diverge and we want the reader-visible date for cutoff
+ * + storage. Falls back to `snippet.publishedAt` when
+ * `contentDetails` is absent (e.g. videos that have never been
+ * public, partial responses).
+ *
+ * `since` is a filter only, not an early-stop signal: see the
+ * `since` field doc on `FetchPlaylistOptions` for why.
  *
  * Quota: 1 unit per page (up to 50 items).
  */
@@ -123,7 +142,7 @@ export async function fetchPlaylistVideos(
 
   while (true) {
     const params = new URLSearchParams({
-      part: 'snippet',
+      part: 'snippet,contentDetails',
       playlistId,
       maxResults: String(pageSize),
       key: apiKey,
@@ -134,23 +153,22 @@ export async function fetchPlaylistVideos(
       opts,
     );
 
-    let crossedSince = false;
     for (const item of json.items ?? []) {
       const snippet = item.snippet;
       if (!snippet) continue;
       const videoId = snippet.resourceId?.videoId;
       const channelId = snippet.videoOwnerChannelId ?? snippet.channelId;
       if (!videoId || !channelId) continue;
-      const publishedAt = new Date(snippet.publishedAt);
+      // Prefer the actual publish time; fall back to playlist-add time
+      // when the API omits contentDetails (e.g. never-public videos).
+      const publishedAtRaw =
+        item.contentDetails?.videoPublishedAt ?? snippet.publishedAt;
+      const publishedAt = new Date(publishedAtRaw);
       if (Number.isNaN(publishedAt.getTime())) continue;
-      if (since && publishedAt < since) {
-        // Uploads playlist is newest-first by position so once we
-        // hit a too-old item, every subsequent item is also too old.
-        // Mark for early-stop after this page completes (don't push
-        // the too-old item).
-        crossedSince = true;
-        continue;
-      }
+      // Filter only. We can't early-stop on this check: a later page
+      // can hold a video whose playlist-add time is older but whose
+      // public publish time is inside `since` (scheduled→public).
+      if (since && publishedAt < since) continue;
       out.push({
         videoId,
         url: `https://www.youtube.com/watch?v=${videoId}`,
@@ -162,7 +180,6 @@ export async function fetchPlaylistVideos(
       if (opts.maxItems !== undefined && out.length >= opts.maxItems) return out;
     }
 
-    if (crossedSince) return out;
     if (!json.nextPageToken) return out;
     pageToken = json.nextPageToken;
   }
@@ -170,9 +187,12 @@ export async function fetchPlaylistVideos(
 
 /**
  * Composite: resolve a `@handle` to its channel, derive the uploads
- * playlist id, and fetch every video since `since` newest-first.
+ * playlist id, and fetch every video newest-first, keeping those
+ * whose `videoPublishedAt >= since`.
  *
- * Quota: 1 (channels) + ceil(N/50) (playlistItems pages) units.
+ * Quota: 1 (channels) + ceil(N/50) (playlistItems pages) units,
+ * where N is the playlist size (NOT the `since`-filtered count —
+ * see `FetchPlaylistOptions.since`).
  */
 export async function fetchChannelVideosSince(
   handle: string,
@@ -201,6 +221,9 @@ interface PlaylistItemsResponse {
       channelId?: string;
       videoOwnerChannelId?: string;
       resourceId?: { videoId?: string };
+    };
+    contentDetails?: {
+      videoPublishedAt?: string;
     };
   }>;
   nextPageToken?: string;

@@ -178,6 +178,23 @@ export function parseRetryAfter(value: string | null): number | null {
 }
 
 /**
+ * Drain a Response we're about to discard. In Node's undici-backed
+ * fetch, an unread body holds the underlying socket open until GC.
+ * A run burning through many senders + retries could exhaust the
+ * connection pool before the GC catches up.
+ *
+ * Swallows any cancel error — a misbehaving stream must never block
+ * the retry path.
+ */
+async function drainResponse(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel();
+  } catch {
+    // ignore
+  }
+}
+
+/**
  * fetch with retry on transient HTTP 429 (Cloudflare API error 971 +
  * Anthropic per-key rate limit), any 5xx (Anthropic 529 overloaded,
  * CF 502/503), and network-level rejections (DNS / ECONNRESET / TLS /
@@ -196,6 +213,9 @@ export function parseRetryAfter(value: string | null): number | null {
  * that can't recover within 14s should fail cleanly and let the next
  * tick retry from scratch rather than block the runner. Retry-After
  * can push individual waits beyond that.
+ *
+ * Intermediate (discarded) response bodies are cancelled before
+ * sleeping so the underlying socket can return to the pool.
  *
  * `sleep`, `jitter`, and `fetchImpl` are injectable for unit tests.
  */
@@ -242,6 +262,7 @@ export async function fetchWithRetry(
     console.warn(
       `[${label}] HTTP ${res.status} on attempt ${attempt}/${maxAttempts}, retrying in ${delay}ms`,
     );
+    await drainResponse(res);
     await sleep(delay);
   }
   // Unreachable — the loop always returns or throws on the final attempt.

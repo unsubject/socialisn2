@@ -363,3 +363,66 @@ export async function recordPick(
     return { ok: false };
   }
 }
+
+export type ArchiveProbeStatus = 'available' | 'unreachable' | 'not_configured';
+
+export interface ArchiveProbeResult {
+  status: ArchiveProbeStatus;
+  /** Hit count returned by the probe (top_k=1). 0 when status !== 'available'
+   *  or when the corpus is empty. */
+  hitCount: number;
+  /** Human-readable reason when status !== 'available'. Used for logging
+   *  and for the backfill_run.error field; not parsed downstream. */
+  reason?: string;
+}
+
+/**
+ * Backfill-only reachability probe for `archive_search`. Single attempt
+ * — does NOT go through the retry loop or the graceful-fallback wrapper
+ * (both would obscure the very signal the backfill needs: "is the MCP
+ * reachable right now, or do I record 'unreachable' in backfill_run?").
+ *
+ * Uses a deterministic 1536-dim probe vector (`v[0]=1, rest=0`). The
+ * similarity scores in the response are meaningless — we use the call
+ * itself as the reachability test, and the hit count as a tiny corpus
+ * presence signal (>0 = something is vectorised in 2nd-brain).
+ *
+ * Returns three distinct states so the backfill row can record which
+ * failure mode happened, without throwing:
+ *   - 'available'      — MCP responded, hits[] returned (possibly empty)
+ *   - 'unreachable'    — env configured but call failed (network, auth,
+ *                        missing tool on server, malformed response)
+ *   - 'not_configured' — TWO_BRAIN_MCP_URL/TOKEN env vars unset
+ */
+export async function probeArchiveSearch(
+  opts: TwoBrainCallOptions = {},
+): Promise<ArchiveProbeResult> {
+  if (!env.twoBrainMcpUrl() || !env.twoBrainMcpToken()) {
+    return {
+      status: 'not_configured',
+      hitCount: 0,
+      reason: 'TWO_BRAIN_MCP_URL or TWO_BRAIN_MCP_TOKEN unset',
+    };
+  }
+  const probeVector = new Array(EXPECTED_QUERY_EMBEDDING_DIM).fill(0);
+  probeVector[0] = 1;
+  try {
+    // Direct single-attempt call. `attemptMcpCall` is the internal
+    // primitive that callMcpTool wraps with retries; using it here
+    // gives the backfill a quick yes/no answer instead of paying the
+    // full 3-attempt + backoff budget on a misconfigured deploy.
+    const url = env.twoBrainMcpUrl();
+    const token = env.twoBrainMcpToken();
+    const hits = await attemptMcpCall<ArchiveMatch[]>(
+      'archive_search',
+      { query_embedding: probeVector, top_k: 1 },
+      url,
+      token,
+      opts,
+    );
+    return { status: 'available', hitCount: hits.length };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { status: 'unreachable', hitCount: 0, reason: msg };
+  }
+}

@@ -154,6 +154,15 @@ interface CfCfg {
 }
 
 /**
+ * Upper bound for honoring a server's Retry-After. Longer hints are
+ * clamped to this value — preserves the helper's overall
+ * "fail fast and let the next cron tick retry" contract against a
+ * pathological `Retry-After: 3600` from a CF abuse-system action or
+ * a sustained-load Anthropic 60s × 4 attempts.
+ */
+const RETRY_AFTER_CAP_MS = 60_000;
+
+/**
  * Parse an HTTP Retry-After header into milliseconds. Accepts numeric
  * seconds ("30") and HTTP-date ("Wed, 21 Oct 2026 07:28:00 GMT").
  * Returns null on malformed input. A past date returns 0. Exported
@@ -205,14 +214,18 @@ async function drainResponse(res: Response): Promise<void> {
  * (network error), the rejection is re-thrown.
  *
  * If the server sends a Retry-After header, the wait is
- * max(Retry-After, computed backoff) — we never retry sooner than
- * the server asked, but we do honor our own minimum to avoid a hot
- * loop on a buggy `Retry-After: 0`.
+ * max(min(Retry-After, RETRY_AFTER_CAP_MS), computed backoff) — we
+ * honor short server hints verbatim, clamp longer ones to 60s, and
+ * never retry sooner than our own backoff floor. The cap preserves
+ * the overall "fail fast, let next cron tick retry" contract: a
+ * 1-hour Retry-After would otherwise park the runner past the next
+ * 30-min tick.
  *
- * 14s is a deliberate ceiling: the cron tick is 30 min, so a workflow
- * that can't recover within 14s should fail cleanly and let the next
- * tick retry from scratch rather than block the runner. Retry-After
- * can push individual waits beyond that.
+ * 14s is a deliberate baseline ceiling: the cron tick is 30 min, so a
+ * workflow that can't recover within ~14s on backoff alone should
+ * fail cleanly. With a server-supplied Retry-After at the 60s cap on
+ * every attempt, worst case is ~4min — still well under the cron
+ * cadence.
  *
  * Intermediate (discarded) response bodies are cancelled before
  * sleeping so the underlying socket can return to the pool.
@@ -257,7 +270,9 @@ export async function fetchWithRetry(
     if (res.status !== 429 && res.status < 500) return res;
     if (attempt === maxAttempts) return res;
     const backoff = baseDelayMs * 2 ** (attempt - 1) + jitter();
-    const retryAfter = parseRetryAfter(res.headers.get('retry-after'));
+    const retryAfterRaw = parseRetryAfter(res.headers.get('retry-after'));
+    const retryAfter =
+      retryAfterRaw !== null ? Math.min(retryAfterRaw, RETRY_AFTER_CAP_MS) : null;
     const delay = retryAfter !== null ? Math.max(retryAfter, backoff) : backoff;
     console.warn(
       `[${label}] HTTP ${res.status} on attempt ${attempt}/${maxAttempts}, retrying in ${delay}ms`,
@@ -571,6 +586,13 @@ async function main(): Promise<void> {
     // next inbound, so failing here just defers this sender to the
     // next cron tick. Catch + continue so a single D1 hiccup doesn't
     // abandon the rest of the batch.
+    //
+    // Partial-write edge case: if the discovered_publishers INSERT
+    // succeeds but the sender_map INSERT fails, the next tick may
+    // re-classify under a different (non-deterministic LLM) slug. The
+    // earlier publisher row stays in place as an orphan — harmless
+    // because ON CONFLICT keeps it out of the hot path; just metadata
+    // bloat that a future table scan should expect.
     try {
       // Write discovered_publishers — first classification of this slug
       // wins; later re-classifications stay no-op.

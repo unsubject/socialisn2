@@ -10,6 +10,8 @@ import process from 'node:process';
 
 import type { Bot } from 'grammy';
 
+import { sql } from 'drizzle-orm';
+
 import { buildApp } from './app.js';
 import { env } from './config/env.js';
 import { createDb } from './db/client.js';
@@ -17,6 +19,20 @@ import { buildBot } from './telegram/bot.js';
 
 async function main(): Promise<void> {
   const { db, close } = createDb();
+
+  // Orphaned-runs cleanup. A SIGKILL / OOM / container restart while a
+  // scoring run was mid-flight (an MCP run_now that didn't complete,
+  // or a cron-triggered run hit by deploy) leaves runs.status='running'
+  // forever — /status would show the stale row indefinitely. One
+  // UPDATE before app.listen() reconciles the state.
+  await db.execute(sql`
+    UPDATE runs
+    SET status = 'failed',
+        error = COALESCE(error || '; ', '') || 'process_restart',
+        completed_at = NOW()
+    WHERE status = 'running'
+  `);
+
   const app = buildApp(db);
 
   const port = Number(process.env.PORT ?? '3000');

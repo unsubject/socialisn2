@@ -87,6 +87,11 @@ export type RunKind = 'morning' | 'afternoon' | 'manual';
 export interface RunOptions {
   kind: RunKind;
   topN?: number;
+  /** Caller-supplied run id. When provided, runScoring SKIPS its own
+   *  initial INSERT into runs — the caller is responsible for the row
+   *  existing. Used by MCP run_now to return the runId synchronously
+   *  before the (long) scoring run kicks off. */
+  runId?: string;
 }
 
 /** Minimal shape passed to notifyExclusive — keeps the dep contract
@@ -166,11 +171,17 @@ export async function runScoring(
   const notifyExclusive = deps.notifyExclusive ?? defaultNotifyExclusive;
   const topN = opts.topN ?? 200;
 
-  const runId = uuidv7();
-  await db.execute(sql`
-    INSERT INTO runs (id, kind, status)
-    VALUES (${runId}, ${opts.kind}, 'running')
-  `);
+  const runId = opts.runId ?? uuidv7();
+  if (!opts.runId) {
+    // No caller-supplied id — runScoring owns the runs row lifecycle
+    // and does the INSERT here. When opts.runId IS provided, the
+    // caller (MCP run_now) has already inserted the row so the id is
+    // reachable for synchronous return.
+    await db.execute(sql`
+      INSERT INTO runs (id, kind, status)
+      VALUES (${runId}, ${opts.kind}, 'running')
+    `);
+  }
 
   const stats = {
     clustersConsidered: 0,

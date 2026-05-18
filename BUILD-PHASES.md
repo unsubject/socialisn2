@@ -142,10 +142,24 @@ Working sequence for building Socialisn2 against `SPEC.md`. Five phases, multi-P
 
 *Goal: shipped to Hostinger VPS, through SPEC §18 acceptance gates.*
 
-- **PR 1** — Backfill
-  - `src/backfill/run.ts` per SPEC §13
-  - `backfill_run` table populated, authority recalibration logic landed
-  - Note: backfill uses §6.1–§6.6 RSS only — email-bridge sources have no historical backlog
+- **PR 1** — Backfill (ADR-012 scope — see `docs/adr/012-backfill-skip-all-historical-sources.md`)
+  - `src/backfill/run.ts` — provenance + corpus-availability check.
+    Writes one `backfill_run` row recording: YouTube channel
+    last-12mo size (via `src/ingestion/youtube_data.ts`), 2nd-brain
+    `archive_search` reachability (via `probeArchiveSearch`), both
+    `*_history_status='skipped'` per ADR-012.
+  - `migrations/013_backfill_run_status_columns.sql` — adds
+    `rss_history_status`, `gdelt_history_status`,
+    `youtube_corpus_size`, `brain_corpus_status` to `backfill_run`
+    with closed-set CHECK constraints (room reserved for future
+    non-`'skipped'` values).
+  - NOT in this PR: historical clustering, GDELT topic-seed
+    discovery, RSS Wayback fetch, source-authority recalibration —
+    all deferred per ADR-012 (recalibration owned by Phase 5 PR 3).
+  - Email-bridge sources have no historical backlog (independent
+    constraint; pre-dates ADR-012).
+  - SPEC §13 update to reference ADR-012 deferred to a follow-up
+    commit to keep this PR's diff small.
 
 - **PR 2** — Deployment
   - VPS deploy script — join existing Traefik network (`n8n-traefik-1`, resolver `mytlschallenge`) for the MCP HTTPS endpoint
@@ -156,6 +170,9 @@ Working sequence for building Socialisn2 against `SPEC.md`. Five phases, multi-P
   - `/status` HTTP + Telegram `/status`
   - Cost alert at 80% ceiling
   - Structured logs
+  - **Source-authority recalibration cron** — recurring job that adjusts
+    `sources.authority_score` from accumulated forward feedback
+    (deferred here from Phase 5 PR 1 per ADR-012).
 
 - **PR 4** — Phase report + 5-day pilot
   - Result against SPEC §18 acceptance criteria

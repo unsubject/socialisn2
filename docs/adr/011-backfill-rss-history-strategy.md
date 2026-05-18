@@ -1,8 +1,18 @@
 # ADR-011: Backfill RSS history strategy — skip historical, observe forward
 
-- **Status:** accepted
+- **Status:** superseded by [ADR-012](012-backfill-skip-all-historical-sources.md)
 - **Date:** 2026-05-17
 - **Resolves:** none (Phase 5 PR 1 prerequisite — SPEC §13 ambiguity)
+
+> **Superseded.** This ADR kept the GDELT half of SPEC §13 step 1 on
+> the reasoning that GDELT has a queryable historical backlog. That
+> reasoning was incomplete: `src/ingestion/gdelt.ts` is a per-cluster
+> enrichment adapter, not a discovery firehose, so there is no v1 path
+> for GDELT to drive a 30-day historical signal window without a new
+> topic-seed query layer that doesn't exist. ADR-012 corrects the
+> scope by skipping BOTH RSS and GDELT-as-discovery and restoring the
+> original "skip historical, observe forward" framing. Body below kept
+> intact for audit.
 
 ## Context
 

@@ -582,7 +582,37 @@ describe('fetchWithRetry', () => {
     expect(sleeps).toEqual([5_000]);
   });
 
+  it('caps a pathologically large Retry-After at 60s', async () => {
+    const statuses: Array<[number, Record<string, string>]> = [
+      [429, { 'retry-after': '3600' }], // 1 hour
+      [200, {}],
+    ];
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => {
+      const [status, headers] = statuses[i++]!;
+      return mkRes(status, headers);
+    }) as unknown as typeof fetch;
+    await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 10,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    // Retry-After 3600s = 3_600_000ms; clamped to RETRY_AFTER_CAP_MS = 60_000.
+    expect(sleeps).toEqual([60_000]);
+  });
+
   it('cancels intermediate response bodies before retrying', async () => {
+    // Tracking flags via Object.defineProperty(array, index, …) — the
+    // descriptors are non-configurable by default, so don't try to
+    // re-assign these indices in a future refactor.
     const cancelled: boolean[] = [];
     function mkResWithSpy(status: number): Response {
       let isCancelled = false;

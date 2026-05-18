@@ -170,6 +170,34 @@ export async function processRawItem(
     throw err;
   }
 
+  // Idempotency pre-check. If an items row already exists for this
+  // raw_item (from a successful prior pass that crashed before
+  // marking processed_at, or from a multi-worker race that lost on
+  // UNIQUE(items.raw_item_id)), short-circuit: mark processed and
+  // return. Without this guard, assignCluster runs on every retry
+  // and bumps cluster.item_count + recentroids each time, while the
+  // items INSERT fails the UNIQUE constraint and the row burns
+  // through to poison — cluster bookkeeping inflates by N for an
+  // N-retry loop.
+  const existingItem = await db.execute<{ id: string; cluster_id: string | null }>(
+    sql`SELECT id, cluster_id FROM items WHERE raw_item_id = ${row.id} LIMIT 1`,
+  );
+  const existing = existingItem[0];
+  if (existing) {
+    await db.execute(sql`
+      UPDATE raw_items SET processed_at = NOW() WHERE id = ${row.id}
+    `);
+    return {
+      kind: 'normal',
+      itemId: existing.id,
+      // cluster_id is nullable on items; empty string is the safe
+      // signal "no cluster known here" without inventing a fake id.
+      clusterId: existing.cluster_id ?? '',
+      isNewCluster: false,
+      costUsd: 0,
+    };
+  }
+
   let totalCost = 0;
   try {
     const norm = await normalize({

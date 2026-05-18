@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classificationFromSeed,
   extractClassification,
+  fetchWithRetry,
   isTransportProviderDomain,
   loadSeededBridges,
   matchSeededBridge,
@@ -291,5 +292,105 @@ describe('isTransportProviderDomain', () => {
 
   it('handles null gracefully', () => {
     expect(isTransportProviderDomain(null)).toBe(false);
+  });
+});
+
+describe('fetchWithRetry', () => {
+  function mkRes(status: number): Response {
+    return new Response(status === 204 ? null : `body-${status}`, { status });
+  }
+
+  it('returns immediately on 2xx (no retries, no sleep)', async () => {
+    const calls: string[] = [];
+    const sleeps: number[] = [];
+    const fetchImpl = (async () => {
+      calls.push('fetch');
+      return mkRes(200);
+    }) as unknown as typeof fetch;
+    const res = await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(calls.length).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('retries through 429s and returns the first non-429 response', async () => {
+    const statuses = [429, 429, 200];
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => mkRes(statuses[i++]!)) as unknown as typeof fetch;
+    const res = await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 10,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(i).toBe(3);
+    // Two backoffs between the three attempts: 10ms, 20ms (baseDelay * 2^n).
+    expect(sleeps).toEqual([10, 20]);
+  });
+
+  it('retries 5xx the same way (e.g. Anthropic 529 overloaded)', async () => {
+    const statuses = [529, 200];
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => mkRes(statuses[i++]!)) as unknown as typeof fetch;
+    const res = await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 10,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(i).toBe(2);
+    expect(sleeps).toEqual([10]);
+  });
+
+  it('returns the final 429 response when attempts are exhausted', async () => {
+    const sleeps: number[] = [];
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return mkRes(429);
+    }) as unknown as typeof fetch;
+    const res = await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        maxAttempts: 3,
+        baseDelayMs: 10,
+        fetchImpl,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    expect(res.status).toBe(429);
+    expect(calls).toBe(3);
+    // No sleep after the last attempt.
+    expect(sleeps).toEqual([10, 20]);
   });
 });

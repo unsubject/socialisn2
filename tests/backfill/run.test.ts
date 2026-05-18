@@ -116,6 +116,7 @@ describe.skipIf(!DATABASE_URL)('runBackfill (SPEC §13 + ADR-012)', () => {
         brain_corpus_status: string;
         error: string | null;
         metadata: Record<string, unknown>;
+        started_at: Date;
         completed_at: Date;
       }>
     >`SELECT * FROM backfill_run`;
@@ -129,6 +130,13 @@ describe.skipIf(!DATABASE_URL)('runBackfill (SPEC §13 + ADR-012)', () => {
     expect(row.brain_corpus_status).toBe('available');
     expect(row.error).toBeNull();
     expect(row.completed_at).not.toBeNull();
+    // Pins the INSERT→UPDATE state transition: started_at is set by the
+    // initial 'running' insert, completed_at by the final 'completed'
+    // update. Both must be set, and completion must follow start.
+    expect(row.started_at).not.toBeNull();
+    expect(row.completed_at.getTime()).toBeGreaterThanOrEqual(
+      new Date(row.started_at).getTime(),
+    );
     expect(row.metadata).toMatchObject({
       adr: 'ADR-012',
       youtube_channel_handle: '@test-channel',

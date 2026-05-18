@@ -109,7 +109,10 @@ export async function runBackfill(
   db: Db,
   deps: BackfillDependencies = {},
 ): Promise<BackfillResult> {
-  const fetchVideos = deps.fetchChannelVideos ?? defaultFetchChannelVideos;
+  // Defaults: real Data API + real MCP probe. fetchChannelVideosSince's
+  // signature is (handle, since, opts?) so it's assignable directly to
+  // BackfillDependencies['fetchChannelVideos'] without a wrapper.
+  const fetchVideos = deps.fetchChannelVideos ?? fetchChannelVideosSince;
   const probeBrain = deps.probeBrainCorpus ?? defaultProbeArchiveSearch;
 
   const backfillRunId = uuidv7();
@@ -196,18 +199,4 @@ export async function runBackfill(
     windowEnd,
     error: error ?? undefined,
   };
-}
-
-// ---------------------------------------------------------------------------
-// defaults
-// ---------------------------------------------------------------------------
-
-/** Real YouTube fetcher used when no stub is injected. Wraps
- *  fetchChannelVideosSince so the signature matches the dependency
- *  contract (handle, since) → videos[]. */
-async function defaultFetchChannelVideos(
-  handle: string,
-  since: Date,
-): Promise<YouTubeVideo[]> {
-  return fetchChannelVideosSince(handle, since);
 }

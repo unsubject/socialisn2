@@ -390,8 +390,14 @@ export interface ArchiveProbeResult {
  * Returns three distinct states so the backfill row can record which
  * failure mode happened, without throwing:
  *   - 'available'      — MCP responded, hits[] returned (possibly empty)
- *   - 'unreachable'    — env configured but call failed (network, auth,
- *                        missing tool on server, malformed response)
+ *   - 'unreachable'    — env configured but call failed. Five concrete
+ *                        failure modes feed this state:
+ *                        network error, auth/4xx/permanent HTTP, missing
+ *                        tool on server, malformed response, and the
+ *                        per-attempt timeout (15s default). In practice
+ *                        a flaky link to the 2nd-brain Worker hits the
+ *                        timeout path most often — don't assume the MCP
+ *                        is hard-down on a single 'unreachable'.
  *   - 'not_configured' — TWO_BRAIN_MCP_URL/TOKEN env vars unset
  */
 export async function probeArchiveSearch(

@@ -105,7 +105,11 @@ describe.skipIf(!DATABASE_URL)('runBackfill (SPEC §13 + ADR-012)', () => {
     expect(handleSeen).toEqual(['@test-channel']);
     expect(sinceSeen[0]!.getTime()).toBe(result.windowStart.getTime());
 
-    // Row reflects everything.
+    // Row reflects everything. postgres-js's tagged-template client
+    // returns timestamp columns as strings (no pg type parsers run
+    // on the raw-SQL path), so timestamp reads are typed as `string`
+    // and wrapped with `new Date(...)` at the assertion site — same
+    // pattern as `started_at` below.
     const rows = await client<
       Array<{
         id: string;
@@ -116,8 +120,8 @@ describe.skipIf(!DATABASE_URL)('runBackfill (SPEC §13 + ADR-012)', () => {
         brain_corpus_status: string;
         error: string | null;
         metadata: Record<string, unknown>;
-        started_at: Date;
-        completed_at: Date;
+        started_at: string;
+        completed_at: string;
       }>
     >`SELECT * FROM backfill_run`;
     expect(rows).toHaveLength(1);
@@ -134,7 +138,7 @@ describe.skipIf(!DATABASE_URL)('runBackfill (SPEC §13 + ADR-012)', () => {
     // initial 'running' insert, completed_at by the final 'completed'
     // update. Both must be set, and completion must follow start.
     expect(row.started_at).not.toBeNull();
-    expect(row.completed_at.getTime()).toBeGreaterThanOrEqual(
+    expect(new Date(row.completed_at).getTime()).toBeGreaterThanOrEqual(
       new Date(row.started_at).getTime(),
     );
     expect(row.metadata).toMatchObject({

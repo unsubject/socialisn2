@@ -305,6 +305,11 @@ export const costLedger = pgTable(
 );
 
 // Per SPEC §13 — one row per cold-start backfill run, with full provenance.
+// Migration 013 added the *_status + youtube_corpus_size columns to record
+// the ADR-012 backfill shape (skip historical, observe forward — see
+// docs/adr/012-backfill-skip-all-historical-sources.md). All NULLable so a
+// future ADR can re-enable historical-discovery paths without a schema
+// migration.
 export const backfillRun = pgTable('backfill_run', {
   id: uuid('id').primaryKey(),
   startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
@@ -312,6 +317,9 @@ export const backfillRun = pgTable('backfill_run', {
   status: text('status').notNull(), // CHECK: 'running'|'completed'|'failed'
   windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
   windowEnd: timestamp('window_end', { withTimezone: true }).notNull(),
+  // v1 (ADR-012): historical_clusters / positive_labels / negative_labels /
+  // authority_adjustments stay NULL. They become populated only if a future
+  // ADR re-opens RSS or GDELT-discovery as a backfill input.
   historicalClusters: integer('historical_clusters'),
   positiveLabels: integer('positive_labels'),
   negativeLabels: integer('negative_labels'),
@@ -319,4 +327,11 @@ export const backfillRun = pgTable('backfill_run', {
   totalCostUsd: numeric('total_cost_usd', { precision: 10, scale: 4 }),
   error: text('error'),
   metadata: jsonb('metadata').default(sql`'{}'::jsonb`),
+  // ADR-012 provenance columns — values constrained to a closed set in
+  // migration 013's CHECK constraints. The TS type stays `text` because
+  // drizzle's enum() would force a duplicate definition we don't need.
+  rssHistoryStatus: text('rss_history_status'),     // 'skipped'|'wayback'|'newsapi'
+  gdeltHistoryStatus: text('gdelt_history_status'), // 'skipped'|'topic_seeds'|'bigquery'
+  youtubeCorpusSize: integer('youtube_corpus_size'),
+  brainCorpusStatus: text('brain_corpus_status'),   // 'available'|'unreachable'|'not_configured'
 });

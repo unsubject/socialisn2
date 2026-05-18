@@ -2,140 +2,190 @@
 
 **Status:** complete — three feature PRs + one post-review bugfix.
 **Date:** 2026-05-17.
-**Scope:** SPEC §11 (the three delivery surfaces — RSS, Telegram,
-MCP) + the Fastify HTTP entry that hosts two of them.
+**Scope:** SPEC §11 (delivery surfaces — RSS, Telegram, MCP) + the
+Fastify HTTP entry that hosts two of them.
 
 ## What shipped
 
-| PR | SHA | What |
-|---|---|---|
-| #56 | `b44182b` | Phase 4 PR 1 — RSS feed generation + `/c/:id` detail route. 6 static XML files (`all.xml` + 5 per-domain) via `src/rss/generate.ts` with the custom `<socialisn2:*>` namespace (temperature/trajectory/exclusive/archive_overlap). Atomic write via tmp+rename. First Fastify entry in the repo: `src/app.ts` exposes `GET /healthz` + `GET /c/:id`; `src/index.ts` boots the lifecycle. Orchestrator gained a tail `regenerateFeeds` dep slot — RSS regen errors join `runs.error` via `combineErrors` without rolling back persisted candidates. |
-| #57 | `e95fdeb` | Phase 4 PR 2 — Telegram bot via grammy. 8 commands (`/today`, `/domain`, `/cand`, `/pick`, `/pass`, `/defer`, `/status`, `/help`) plus inline Pick/Pass/Defer keyboard callbacks. Outbound digest + instant-exclusive push via a grammy-free `src/telegram/push.ts` so the orchestrator's cron path doesn't load the bot framework. ADR-010 codifies the four design choices (long-polling vs webhook, bot-in-app vs separate worker, instant-vs-tail exclusive push, ordered shutdown invariant). `src/telegram/decisions.ts` exposes `decide()` — race-safe via `UPDATE..WHERE status='new' RETURNING *` — reused by both the bot and Phase 4 PR 3's MCP. |
-| #58 | `0362641` | Phase 4 PR 3 — MCP server (`@modelcontextprotocol/sdk@1.29.0` pinned, no caret). 11 SPEC §11.4 tools wired: list/get/search candidates, pick/pass/defer (reusing `decide()` with `interfaceLabel='mcp'`), expand_competitor_list, add_influencer, compare_against_archive, run_now (fire-and-forget with caller-supplied runId), system_status. Bearer auth via Fastify preHandler scoped to `/mcp` prefix; `StreamableHTTPServerTransport` in stateless mode, **fresh Server AND transport per request** to avoid the shared-writer concurrency race. Orchestrator gained `RunOptions.runId?: string` so the tool can pre-insert the row and return its id synchronously while `runScoring` runs in the background. `src/index.ts` got an orphaned-runs cleanup at boot. |
-| #59 | `b508184` | Post-review bugfix bundle. Three real bugs surfaced by external review on already-merged code: (1) `(${items.length})` in `formatTodayList` emitted bare MarkdownV2 parens — Telegram 400s every non-empty `/today` / `/domain` reply (silently broken since #57 merged). (2) `processRawItem` had no idempotency pre-check, so a crash post-success-pre-mark or a multi-worker UNIQUE race inflated cluster `item_count` per retry. (3) Migration 011 left every existing `raw_items` row with `processed_at=NULL`, which would have made the scoring worker re-process the entire dev DB on first boot. Migration 012 backfills, and the in-app idempotency check kills the inflation loop at the source. |
+| PR | SHA | Commits | What |
+|---|---|---|---|
+| #56 | `b44182b` | 17 | Phase 4 PR 1 — RSS feed generation + `/c/:id` detail route. 6 static XML files (`all.xml` + 5 per-domain) via `src/rss/generate.ts` with the custom `<socialisn2:*>` namespace. Atomic write via tmp+rename. First Fastify entry in the repo: `src/app.ts` exposes `GET /healthz` + `GET /c/:id`; `src/index.ts` boots the lifecycle. Orchestrator gained a tail `regenerateFeeds` dep slot — RSS regen errors join `runs.error` via `combineErrors` without rolling back persisted candidates. |
+| #57 | `e95fdeb` | 34 | Phase 4 PR 2 — Telegram bot via grammy. **Ships 8 of the 11 SPEC §11.3 commands**: `/today`, `/domain`, `/cand`, `/pick`, `/pass`, `/defer`, `/status`, `/help` plus inline Pick/Pass/Defer keyboard callbacks. The three SPEC commands explicitly NOT shipped — `/search`, `/add_competitor`, `/add_influencer` — are deferred (see "Open questions"). Outbound digest + instant-exclusive push via a grammy-free `src/telegram/push.ts` so the orchestrator's cron path doesn't load the bot framework. ADR-010 codifies the four design choices. `src/telegram/decisions.ts:decide()` is race-safe via `UPDATE..WHERE status='new' RETURNING *` and reused by Phase 4 PR 3's MCP. |
+| #58 | `0362641` | 31 | Phase 4 PR 3 — MCP server (`@modelcontextprotocol/sdk@1.29.0` pinned, no caret). All 11 SPEC §11.4 tools wired. Bearer auth via Fastify preHandler scoped to `/mcp` prefix; `StreamableHTTPServerTransport` in stateless mode, fresh Server + transport per request to avoid a concurrency race (see "Bugs caught and fixed mid-PR" below). Orchestrator gained `RunOptions.runId?: string` so `runNow` can pre-insert the row internally and return its id synchronously while `runScoring` runs in the background. `src/index.ts` got an orphaned-runs cleanup at boot. |
+| #59 | `b508184` | 6 | Post-review bugfix bundle. Three real bugs caught by external review on already-merged code: (1) `formatTodayList` emitted bare MarkdownV2 parens — Telegram 400s every non-empty `/today` / `/domain` reply (silently broken since #57 merged, see "Test coverage notes"). (2) `processRawItem` had no idempotency pre-check, so a crash post-success-pre-mark or a multi-worker UNIQUE race inflated cluster `item_count` per retry. (3) Migration 011 left every existing `raw_items` row with `processed_at=NULL`, which would have made the scoring worker re-process the entire dev DB on first boot. Migration 012 backfills; the in-app idempotency check kills the inflation loop at the source. |
 
-## Key decisions made and why
+**Iteration density.** 88 commits across 4 PRs. PRs #57 and #58 took
+the most CI iterations (5 and 6 to land green respectively), driven
+by: lockfile-regeneration churn for two new top-level deps (`grammy`,
+`@modelcontextprotocol/sdk`); SDK-API-discovery (MarkdownV2 escape
+discipline, grammy's `bot.api.config.use` transformer shape, MCP
+SDK's per-request transport requirement); and the concurrency test
+in #58 that caught my own partial fix. Phase 5 should budget for
+similar density on any PR that adds a new HTTP/protocol surface.
 
-1. **Single-process app container hosts everything that's not a worker.**
-   Fastify + telegram bot lifecycle + MCP route all live in the
-   `app` Docker container. Phase 5 deploy script doesn't grow; one
-   process to monitor; one shared DB pool. The bot, MCP, and HTTP
-   surfaces are all built as independent units (`buildBot(db)`,
-   `buildMcpServer(db)`, `buildApp(db)`) so a future split into
-   multi-container is a wiring change, not a refactor. Codified in
-   ADR-010.
+## Architectural decisions
 
-2. **Long-polling over webhooks for Telegram (ADR-010).** No public
+Five genuinely independent decisions. Two adjacent ones (`decide()`
+dep-shape and dep-injection of `recordPick`) are folded under #3
+because they're the same idea viewed twice.
+
+1. **Single-process app container hosts everything that's not a
+   worker.** Fastify + Telegram bot lifecycle + MCP route all live in
+   the `app` Docker container. Shared DB pool, one process to
+   monitor, splittable later via the existing per-surface builders
+   (`buildBot(db)`, `buildMcpServer(db)`, `buildApp(db)`). Codified
+   in ADR-010.
+   *What would change my mind:* container memory pressure from
+   grammy + Fastify + MCP transports above a measured threshold, OR
+   multi-replica scaling needs (in which case telegram-worker and/or
+   mcp-worker split out, sharing the DB pool via separate `app.ts`
+   entries).
+
+2. **Long-polling over webhook for Telegram (ADR-010).** No public
    ingress required, survives nginx config drift, no `setWebhook`
-   call at deploy time. Webhook latency would be ~100ms tighter for
-   instant pushes but at single-user scale and the bot client's own
-   notification batching, imperceptible.
+   call at deploy time.
+   *What would change my mind:* multi-user expansion of the bot
+   (would need per-user webhook secrets anyway), OR latency
+   complaints on instant exclusive pushes.
 
-3. **`decide()` is the single source of truth for pick/pass/defer
-   across both interfaces.** Both Telegram and MCP call the same
-   function with `interfaceLabel='telegram'` or `'mcp'` so feedback
-   rows segregate by surface. The race-safety contract
-   (`UPDATE..WHERE status='new' RETURNING *`) is owned in one place;
+3. **`decide()` as single source of truth for pick/pass/defer.**
+   Both Telegram and MCP call the same function with
+   `interfaceLabel='telegram'|'mcp'`. Race-safety contract
+   (`UPDATE..WHERE status='new' RETURNING *`) lives in one place;
    adding the MCP surface in #58 required zero changes to `decide()`
-   because `feedback.interface` CHECK already allowed `'mcp'`.
+   because `feedback.interface` CHECK already allowed `'mcp'`. The
+   `recordPick` dep is injectable so tests don't need a 2nd-brain
+   MCP — default uses the real client which is already graceful.
+   *What would change my mind:* if `recordPick` ever grows DB writes
+   that need to land in the same transaction as the `feedback`
+   INSERT, the dep-injection contract has to change.
 
-4. **Outbound push is grammy-free.** `src/telegram/push.ts` uses
-   plain `fetch` to api.telegram.org. The orchestrator imports it for
-   the tail digest + per-insert exclusive push and never loads grammy
-   on the cron path. Bot-side outages (polling 502s) cannot slow down
-   scoring runs.
+4. **MCP fresh Server + Transport per request (caught mid-PR).** SDK
+   stateless mode mutates `Server._transport` on each `connect()`;
+   two parallel `connect()` calls race and one client's writer
+   reference is clobbered. `buildMcpServer(db)` is cheap so
+   per-request rebuild is fine.
+   *What would change my mind:* profiling shows handler wiring is
+   hot (it isn't — the actual work is the per-tool DB or LLM call).
 
-5. **MCP fresh Server+Transport per request (post-CI fix).** The
-   first cut shared one Server + one Transport across requests;
-   `Server.connect(transport)` mutates `Server._transport`, so two
-   parallel `connect()` calls race and one client's writer reference
-   is clobbered (loser returns 500). The SDK's own
-   `simpleStreamableHttp` example builds both per request.
-   `buildMcpServer(db)` is cheap (handler wiring only, no DB/network)
-   so per-request rebuild is fine; if profiling ever shows it's hot,
-   memoize the handler functions outside.
+5. **MCP SDK pinned to `1.29.0` (no caret).** The
+   `@modelcontextprotocol/sdk` package had a SSE→StreamableHTTP API
+   break in late 2024 across what should have been backward-
+   compatible minors. Pinning trades convenience for reproducibility.
+   *What would change my mind:* an SDK release that fixes a tool we
+   need and the changelog shows the migration is bounded.
 
-6. **MCP SDK pinned to `1.29.0` (no caret).** The
-   `@modelcontextprotocol/sdk` package had a SSE→StreamableHTTP
-   migration in late 2024 that broke APIs across what should have
-   been backward-compatible minors. Pinning trades convenience for
-   reproducibility; bumps require an explicit reviewed change.
+## Bugs caught and fixed mid-PR
 
-7. **`run_now` returns the runId synchronously.** Orchestrator's
-   `RunOptions.runId?: string` lets the tool pre-insert the runs row
-   and return the id immediately while `runScoring` executes in the
-   background. The "MCP caller asks for a run, gets a poll-able id
-   in milliseconds" contract holds; the "scoring run is long and
-   shouldn't block the API" contract holds too. The orphaned-runs
-   cleanup in `src/index.ts` reconciles `status='running'` rows on
-   every app boot so a SIGKILL mid-run doesn't leave a stale id.
+Documented here as the honest record of what shipped through CI vs.
+what was caught later. Reframe of the earlier draft's "Tried and
+abandoned" — these weren't deliberate explorations.
 
-8. **`decide()` test pattern: dep-injected `recordPick`.** Tests
-   pass `{recordPick: async () => ({ok:true})}` so the 2nd-brain MCP
-   isn't required. The default uses the real client which is already
-   graceful (`{ok:false}` on any failure). Identical pattern carried
-   into the MCP `decisions.ts` test set.
+- **Shared MCP transport across requests (#58).** First cut held one
+  `StreamableHTTPServerTransport` for the lifetime of the plugin; the
+  concurrency test I added in the same PR caught the resulting 500
+  on the second of two parallel `tools/call` requests. Fix is the
+  per-request transport in decision #4 above. The earlier partial
+  fix (per-request transport, shared Server) was itself broken —
+  `Server.connect()` mutates Server-side state too. Took two commits
+  to land the right shape.
 
-## Tried and abandoned
+- **`run_now` orchestrator wiring silently no-op'd by a patch script
+  (#58).** A pre-commit patch helper's anchor string didn't match the
+  current `RunOptions` block on the branch; the patch script printed
+  success but applied nothing, so `RunOptions.runId?: string` never
+  landed in run.ts in the original push. Re-fix landed in commit
+  `acaf3fe`. Caught by external review before merge.
 
-- **Hand-rolled JSON-RPC for the MCP server.** Considered the
-  same raw-fetch approach `src/lib/two_brain_client.ts` (the CLIENT)
-  uses, since the MCP protocol shape is simple. Rejected: the SERVER
-  side has tool registry + schema advertisement + protocol-level
-  error codes worth getting right via the SDK. SPEC §4.2 mandates
-  `@modelcontextprotocol/sdk` and the SDK's StreamableHTTP transport
-  is the right shape for a Fastify-mounted route.
-
-- **Shared MCP transport across requests** (mentioned in decision 5
-  above). Caught by the concurrency test I deliberately added in
-  PR #58 to lock the fix in. Took two CI iterations to land the
-  per-request pattern correctly.
-
-- **Webhook mode for Telegram.** Considered for the latency win on
-  instant exclusive pushes. Rejected — three new moving parts
-  (`setWebhook` call, nginx path, webhook-secret env) at v1
-  single-user scale. ADR-010 documents the re-evaluation trigger
-  (multi-user, multi-replica deploy).
-
-- **MCP `pick` reporting granular `archive_recorded` boolean from
-  the 2nd-brain side.** SPEC §11.4 says `pick -> {ok, archive_recorded}`,
-  but `decide()` doesn't thread `recordPick`'s response back —
-  recordPick degrades to `{ok:false}` on failure and that's swallowed.
-  v1 reports `archive_recorded = ok && !alreadyDecided` (true on a
-  successful new decision, regardless of whether the MCP call landed).
-  Build-list item to plumb the granular signal through; not blocking
-  for v1.
+- **Hand-rolled JSON-RPC as MCP alternative was NOT a real decision
+  point** — SPEC §4.2 mandates the SDK. The earlier draft listed it;
+  cutting now.
 
 ## Test coverage notes
 
-- **528 tests pass on main as of #59 close.** Each Phase 4 PR added
-  its own test surface: RSS generator (9 cases incl. multi-label
-  contract, expires_at filter, custom-namespace round-trip), Fastify
-  app (11 cases incl. XSS escape + 4 distinct 404 paths), Telegram
-  bot (9 cases via `bot.handleUpdate()` + API spy), MCP server (auth
-  unit + 12 candidates + 8 sources + 3 runs + 6 integration).
-- **Two coverage holes documented and tracked**:
-  1. Positive `notifyExclusive` test in the orchestrator suite. The
-     current "is_exclusive=false multi-source" fixture happens to be
-     interpreted as exclusive by `computeExclusive` (caught and
-     flipped to a positive assertion in #57); a true negative case
-     would need a single-source-with-only-late-items fixture that
-     doesn't exist yet.
-  2. No test against real Telegram. The bot test's API stub returns
-     `{ok:true}` regardless of MarkdownV2 validity, which is exactly
-     what let the `(2)` paren bug ship in #57.
+The suite passes on `main` (latest CI on PR #59: `527 passed, 1
+fixed → 528 passed`; the exact count after PR #60 will need a fresh
+`npm test` run since this PR adds no test files).
+
+Per-surface coverage:
+- **RSS generator** — 9 cases incl. multi-label contract, expires_at
+  filter, custom-namespace round-trip via rss-parser.
+- **Fastify app** — 11 cases incl. XSS escape + 4 distinct 404
+  paths.
+- **Telegram bot** — 9 cases via `bot.handleUpdate()` + `bot.api.config.use`
+  transformer spy.
+- **MCP server** — auth (8) + candidates (12) + sources (8) + runs
+  (3) + integration via `app.inject()` (6).
+
+**Documented coverage gaps (Phase 5 should close at least the first):**
+
+1. **No end-to-end smoke against the live Telegram API.** The
+   `bot.api.config.use` transformer stub returns `{ok:true}` for any
+   payload, which is exactly how the `formatTodayList` paren bug
+   shipped silently in #57. The class of bug — MarkdownV2 / Bot API
+   payload validation — cannot be caught by the current test infra.
+   Phase 5 PR 3 (observability) should add a real-API smoke that
+   exercises the daily-use commands against a throwaway bot, OR
+   accept the class and write a payload-validation linter.
+2. **No positive `notifyExclusive` test in the orchestrator suite.**
+   The current 2-source fixture happens to qualify as exclusive
+   (caught and flipped to a positive assertion in #57); a true
+   negative case would need a single-source-with-only-late-items
+   fixture that doesn't exist.
+3. **No MCP-client integration test.** `app.inject()` exercises the
+   Fastify → transport → tool path but never speaks the wire
+   protocol from an actual MCP client (mcp-remote, Claude Desktop,
+   or another `@modelcontextprotocol/sdk` client). Misconfiguration
+   in transport headers or session handling would not be caught.
+
+**Misleading source comment to fix on Phase 5 contact:**
+`src/telegram/format.ts:formatTodayList` justifies the paren escape
+as "MarkdownV2 reserves `(` and `)` outside link/code contexts" —
+that's not actually accurate per the Bot API docs; the parens need
+escape in body text in all contexts. Functional fix is correct;
+explanation is wrong. Fix when next touched.
+
+## Env-vars added by Phase 4
+
+For Phase 5 deploy. All gate behavior; empty values disable the
+corresponding surface so non-prod can opt out.
+
+| Var | Required for | Notes |
+|---|---|---|
+| `PUBLIC_HOST` | RSS generation + `/c/:id` links | E.g. `socialisn2.<host>` per SPEC §17. Required when `RSS_PATH` set. |
+| `RSS_PATH` | Static feed write target | E.g. `/var/www/socialisn2/feeds`. Empty disables the orchestrator's regenerate-feeds tail hook. |
+| `TELEGRAM_BOT_TOKEN` | Bot lifecycle | Empty skips `bot.start()` in `src/index.ts`. Pair with `TELEGRAM_CHAT_ID`. |
+| `TELEGRAM_CHAT_ID` | Bot whitelist | Whitelist gate. Note: group chat IDs are negative (`-100xxx`) — missing leading `-` silently drops every message. |
+| `SOCIALISN2_MCP_TOKEN` | MCP route mount | Empty disables the `/mcp` route entirely (Fastify plugin not registered). |
 
 ## Open questions for Phase 5
 
-- **`/search`, `/add_competitor`, `/add_influencer` Telegram
-  commands** — deferred from #57. The semantic-search embedding
-  plumbing now exists in MCP `searchCandidates`; the Telegram
-  command can thin-wrap it (~30 lines). Same for the two add_*
-  commands once the MCP equivalents are exercised by real use.
+- **Reverse proxy choice contradicts itself.** SPEC §11.4 says MCP
+  endpoint behind Caddy/nginx. BUILD-PHASES Phase 5 PR 2 says "join
+  existing Traefik network (`n8n-traefik-1`, resolver
+  `mytlschallenge`) for the MCP HTTPS endpoint". One of those has to
+  give. Traefik is already running on the target VPS; SPEC was
+  written before. Resolve before Phase 5 PR 2 lands the deploy script.
 
-- **`gdelt_coverage` row population is still empty in production.**
-  Orchestrator's `geographic_spread_bonus` is therefore 0 for every
-  cluster. Phase 5 PR 1 backfill territory.
+- **Telegram surface is a subset of SPEC §11.3.** Three SPEC commands
+  deferred: `/search` (needs query embedding plumbing — now exists in
+  MCP `searchCandidates`, can be thin-wrapped in ~30 lines), and
+  `/add_competitor` / `/add_influencer` (canonical impl is in MCP
+  `expand_competitor_list` / `add_influencer`; Telegram wrapper is
+  ~50 lines each). Track explicitly so a future maintainer doesn't
+  assume §11.3 is fully shipped.
+
+- **Claude Desktop / remote-MCP-client wiring is unverified.** The
+  `/mcp` endpoint exists, takes a bearer, and routes correctly
+  under app.inject(). No actual MCP client has connected to it. Known
+  wrinkle: bearer-authed remote MCPs need `mcp-remote` stdio proxy
+  with `--header` (per personal-memory note) — Claude Desktop's
+  native HTTP transport doesn't support custom auth headers cleanly.
+  Phase 5 PR 2 or 3 should verify the first real client connection.
+
+- **`gdelt_coverage` row population is still empty.** Orchestrator's
+  `geographic_spread_bonus` is therefore 0 for every cluster. Phase
+  5 PR 1 backfill territory.
 
 - **`expires_at` formula revisit.** Phase 4 PR 1 surfaces expiry to
   RSS consumers (drops candidates whose `expires_at < NOW()`). The
@@ -148,38 +198,18 @@ MCP) + the Fastify HTTP entry that hosts two of them.
   slowness. Cost ceiling would short-circuit before memory becomes
   an issue, so deferring.
 
-- **Granular `archive_recorded` in MCP `pick`** (see decisions
-  above) — thread `recordPick`'s ok/false back through `decide()`.
+- **Granular `archive_recorded` in MCP `pick`.** Currently reports
+  `ok && !alreadyDecided` regardless of whether the 2nd-brain
+  `recordPick` MCP call landed. Plumbing the granular signal through
+  `decide()` is the right long-term fix.
 
-## What unblocks Phase 5
-
-The full output layer is now operational. Phase 5 (backfill, deploy,
-observability) can proceed against:
-
-- Three delivery surfaces with real test coverage.
-- A single-process app container that exposes everything via
-  `node dist/index.js`.
-- An MCP endpoint reachable at `https://socialisn2.<host>/mcp` per
-  SPEC §11.4, ready to host a remote-MCP client connection from
-  Claude Desktop.
-- A Telegram bot that long-polls without needing public ingress.
-- A Fastify HTTP server serving `/c/:id` candidate detail pages and
-  ready to mount future health/status routes.
+- **Live-API Telegram smoke** (see test coverage notes above).
 
 ## ADRs landed in Phase 4
 
 - **ADR-010** (PR #57): Telegram bot — transport, process boundary,
-  push timing.
+  push timing. Four decisions in one ADR.
 
-(No new ADRs in PRs #56 or #58 — PR #56's design choices were small
-enough to live in the PR body; PR #58's choices were partially
-codified in ADR-010 already and partially in the SPEC §4.2 SDK
-mandate.)
-
-## Branch state at phase close
-
-- `main` at this PR's merge sha (post #59 + #60 sequence).
-- Feature branches `phase4-pr1-rss-feeds`, `phase4-pr2-telegram-bot`,
-  `phase4-pr3-mcp-server`, `post-pr58-review-bugfixes`,
-  `phase4-pr4-phase-report` deletable post-merge.
-- Next: Phase 5 PR 1 (backfill) per BUILD-PHASES.
+No new ADRs in PRs #56 or #58 — #56's choices were small enough to
+live in the PR body; #58's were partially covered by ADR-010
+already and partially in the SPEC §4.2 SDK mandate.

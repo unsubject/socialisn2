@@ -78,8 +78,10 @@ export const env = {
   publicHost: () => required('PUBLIC_HOST'),
   telegramBotToken: () => optional('TELEGRAM_BOT_TOKEN', ''),
   telegramChatId: () => optional('TELEGRAM_CHAT_ID', ''),
-  // MCP server bearer token (SPEC §11.4). Optional — empty disables
-  // the MCP route mount in src/app.ts (same gating pattern as the
-  // telegram bot lifecycle and the RSS regen hook).
   socialisn2McpToken: () => optional('SOCIALISN2_MCP_TOKEN', ''),
+  // YouTube Data API key (SPEC §13 + §17). Optional — empty disables
+  // the Phase 5 backfill's "fetch Simon's own channel videos" path.
+  // Competitor channel polling (src/ingestion/youtube.ts) uses the
+  // public Atom feed and does NOT need this key per ADR-004.
+  youtubeApiKey: () => optional('YOUTUBE_API_KEY', ''),
 };

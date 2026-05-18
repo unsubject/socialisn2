@@ -175,64 +175,78 @@ describe('fetchPlaylistVideos', () => {
     expect(videos[0]?.publishedAt.toISOString()).toBe('2026-04-15T00:00:00.000Z');
   });
 
-  it('applies since cutoff against videoPublishedAt, not snippet.publishedAt', async () => {
-    // The second item's snippet.publishedAt is INSIDE the window but its
-    // contentDetails.videoPublishedAt is OUTSIDE. It should be filtered
-    // out AND should trigger early stop (newest-first invariant).
+  it('skips videos with videoPublishedAt < since but continues paginating', async () => {
+    // `since` is a filter, NOT an early-stop. A first-page item with
+    // videoPublishedAt before the window is dropped, and we still fetch
+    // page 2 (which may hold scheduled→public items, see next test).
     let call = 0;
     const fakeFetch: typeof fetch = async () => {
       call += 1;
       if (call === 1) {
         return jsonResponse({
           items: [
-            mkItem('v1', 'a', '2026-05-10T00:00:00Z'),
             {
               snippet: {
-                title: 'b',
+                title: 'old',
                 description: 'd',
-                publishedAt: '2026-05-09T00:00:00Z',
+                publishedAt: '2025-12-01T00:00:00Z',
                 videoOwnerChannelId: 'UCowner',
-                resourceId: { videoId: 'v2' },
+                resourceId: { videoId: 'old1' },
               },
               contentDetails: { videoPublishedAt: '2025-12-01T00:00:00Z' },
             },
           ],
-          nextPageToken: 'PG2', // should not be requested
+          nextPageToken: 'PG2',
         });
       }
-      throw new Error('should not page past since-cutoff');
+      return jsonResponse({
+        items: [mkItem('v2', 'in-window', '2026-05-10T00:00:00Z')],
+      });
     };
     const videos = await fetchPlaylistVideos('UUabc', {
       fetchFn: fakeFetch,
       since: new Date('2026-05-01T00:00:00Z'),
     });
-    expect(call).toBe(1);
-    expect(videos.map((v) => v.videoId)).toEqual(['v1']);
+    expect(call).toBe(2);
+    expect(videos.map((v) => v.videoId)).toEqual(['v2']);
   });
 
-  it('stops paginating once a video older than since appears', async () => {
+  it('includes scheduled→public videos whose playlist-add time is outside since', async () => {
+    // Page 2 holds a video added 18 months ago as private, made public
+    // last week. snippet.publishedAt < since but
+    // contentDetails.videoPublishedAt > since. Backfill MUST include it;
+    // this is the exact scenario the early-stop bug used to drop.
     let call = 0;
     const fakeFetch: typeof fetch = async () => {
       call += 1;
       if (call === 1) {
         return jsonResponse({
-          items: [
-            mkItem('v1', 'a', '2026-05-10T00:00:00Z'),
-            mkItem('v2', 'b', '2026-05-09T00:00:00Z'),
-            // v3 is before `since` — should be filtered out + stop paging
-            mkItem('v3', 'c', '2025-12-01T00:00:00Z'),
-          ],
-          nextPageToken: 'PG2', // should not be requested
+          items: [mkItem('v1', 'recent', '2026-05-10T00:00:00Z')],
+          nextPageToken: 'PG2',
         });
       }
-      throw new Error('should not page past since-cutoff');
+      return jsonResponse({
+        items: [
+          {
+            snippet: {
+              title: 'long-private',
+              description: 'd',
+              publishedAt: '2024-11-01T00:00:00Z', // added 18mo ago
+              videoOwnerChannelId: 'UCowner',
+              resourceId: { videoId: 'scheduled1' },
+            },
+            contentDetails: { videoPublishedAt: '2026-05-09T00:00:00Z' }, // public last week
+          },
+        ],
+      });
     };
     const videos = await fetchPlaylistVideos('UUabc', {
       fetchFn: fakeFetch,
       since: new Date('2026-05-01T00:00:00Z'),
     });
-    expect(call).toBe(1);
-    expect(videos.map((v) => v.videoId)).toEqual(['v1', 'v2']);
+    expect(call).toBe(2);
+    expect(videos.map((v) => v.videoId)).toEqual(['v1', 'scheduled1']);
+    expect(videos[1]?.publishedAt.toISOString()).toBe('2026-05-09T00:00:00.000Z');
   });
 
   it('respects maxItems cap', async () => {

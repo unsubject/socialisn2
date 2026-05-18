@@ -153,20 +153,70 @@ interface CfCfg {
   dbId: string;
 }
 
+/**
+ * fetch with retry on transient HTTP 429 (Cloudflare API error 971 +
+ * Anthropic per-key rate limit) and any 5xx (Anthropic 529 overloaded,
+ * CF 502/503). Exponential backoff 2s / 4s / 8s plus 0-500ms jitter;
+ * total wait ~14s before final attempt. The final response is returned
+ * as-is so callers retain their own status-code handling.
+ *
+ * 14s is a deliberate ceiling: the cron tick is 30 min, so a workflow
+ * that can't recover within 14s should fail cleanly and let the next
+ * tick retry from scratch rather than block the runner.
+ *
+ * `sleep` is injectable for unit tests.
+ */
+export async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  opts: {
+    maxAttempts?: number;
+    baseDelayMs?: number;
+    label?: string;
+    sleep?: (ms: number) => Promise<void>;
+    jitter?: () => number;
+    fetchImpl?: typeof fetch;
+  } = {},
+): Promise<Response> {
+  const maxAttempts = opts.maxAttempts ?? 4;
+  const baseDelayMs = opts.baseDelayMs ?? 2000;
+  const label = opts.label ?? 'fetch';
+  const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const jitter = opts.jitter ?? (() => Math.floor(Math.random() * 500));
+  const fetchImpl = opts.fetchImpl ?? fetch;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await fetchImpl(url, init);
+    if (res.status !== 429 && res.status < 500) return res;
+    if (attempt === maxAttempts) return res;
+    const delay = baseDelayMs * 2 ** (attempt - 1) + jitter();
+    console.warn(
+      `[${label}] HTTP ${res.status} on attempt ${attempt}/${maxAttempts}, retrying in ${delay}ms`,
+    );
+    await sleep(delay);
+  }
+  // Unreachable — the loop always returns on the final attempt.
+  throw new Error('fetchWithRetry: exhausted attempts without returning');
+}
+
 async function d1Query<T>(
   cfg: CfCfg,
   sql: string,
   params: Array<string | number | null> = [],
 ): Promise<T[]> {
   const url = `https://api.cloudflare.com/client/v4/accounts/${cfg.accountId}/d1/database/${cfg.dbId}/query`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${cfg.token}`,
-      'Content-Type': 'application/json',
+  const res = await fetchWithRetry(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ sql, params }),
     },
-    body: JSON.stringify({ sql, params }),
-  });
+    { label: 'd1' },
+  );
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`D1 ${res.status}: ${text}`);
@@ -267,21 +317,25 @@ async function classifyWithLlm(
 ${headerLines.length > 0 ? '\nAdditional context headers (often the strongest identity signal when from_domain is a transport provider):\n' + headerLines.join('\n') + '\n' : ''}${transportNote}
 Use web_search if needed. Output JSON only.`;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': anthropicKey,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
+  const res = await fetchWithRetry(
+    'https://api.anthropic.com/v1/messages',
+    {
+      method: 'POST',
+      headers: {
+        'x-api-key': anthropicKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 1024,
+        system: buildSystemPrompt(seeds),
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+        messages: [{ role: 'user', content: userMsg }],
+      }),
     },
-    body: JSON.stringify({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 1024,
-      system: buildSystemPrompt(seeds),
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
-      messages: [{ role: 'user', content: userMsg }],
-    }),
-  });
+    { label: 'anthropic' },
+  );
   if (!res.ok) {
     console.warn(`[classify] anthropic ${res.status}: ${await res.text()}`);
     return null;

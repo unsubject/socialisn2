@@ -76,6 +76,19 @@ describe('resolveChannelId', () => {
 });
 
 describe('fetchPlaylistVideos', () => {
+  it('requests part=snippet,contentDetails', async () => {
+    let captured: string | undefined;
+    const fakeFetch: typeof fetch = async (url) => {
+      captured = String(url);
+      return jsonResponse({
+        items: [mkItem('v1', 'first', '2026-05-10T00:00:00Z')],
+      });
+    };
+    await fetchPlaylistVideos('UUabc', { fetchFn: fakeFetch });
+    // URLSearchParams percent-encodes the comma → snippet%2CcontentDetails.
+    expect(captured).toMatch(/part=snippet%2CcontentDetails/);
+  });
+
   it('returns all items in one page when no nextPageToken', async () => {
     const fakeFetch: typeof fetch = async () =>
       jsonResponse({
@@ -117,6 +130,84 @@ describe('fetchPlaylistVideos', () => {
     const videos = await fetchPlaylistVideos('UUabc', { fetchFn: fakeFetch });
     expect(call).toBe(3);
     expect(videos.map((v) => v.videoId)).toEqual(['v1', 'v2', 'v3']);
+  });
+
+  it('prefers contentDetails.videoPublishedAt over snippet.publishedAt', async () => {
+    // Real divergence: item added to the uploads playlist in March
+    // (scheduled/private), then made public in May. Readers see the May
+    // date; backfill must record the May date.
+    const fakeFetch: typeof fetch = async () =>
+      jsonResponse({
+        items: [
+          {
+            snippet: {
+              title: 'scheduled',
+              description: 'd',
+              publishedAt: '2026-03-01T00:00:00Z',
+              videoOwnerChannelId: 'UCowner',
+              resourceId: { videoId: 'v1' },
+            },
+            contentDetails: { videoPublishedAt: '2026-05-10T00:00:00Z' },
+          },
+        ],
+      });
+    const videos = await fetchPlaylistVideos('UUabc', { fetchFn: fakeFetch });
+    expect(videos[0]?.publishedAt.toISOString()).toBe('2026-05-10T00:00:00.000Z');
+  });
+
+  it('falls back to snippet.publishedAt when contentDetails is missing', async () => {
+    const fakeFetch: typeof fetch = async () =>
+      jsonResponse({
+        items: [
+          {
+            snippet: {
+              title: 't',
+              description: 'd',
+              publishedAt: '2026-04-15T00:00:00Z',
+              videoOwnerChannelId: 'UCowner',
+              resourceId: { videoId: 'v1' },
+            },
+            // no contentDetails — never-public videos or partial response
+          },
+        ],
+      });
+    const videos = await fetchPlaylistVideos('UUabc', { fetchFn: fakeFetch });
+    expect(videos[0]?.publishedAt.toISOString()).toBe('2026-04-15T00:00:00.000Z');
+  });
+
+  it('applies since cutoff against videoPublishedAt, not snippet.publishedAt', async () => {
+    // The second item's snippet.publishedAt is INSIDE the window but its
+    // contentDetails.videoPublishedAt is OUTSIDE. It should be filtered
+    // out AND should trigger early stop (newest-first invariant).
+    let call = 0;
+    const fakeFetch: typeof fetch = async () => {
+      call += 1;
+      if (call === 1) {
+        return jsonResponse({
+          items: [
+            mkItem('v1', 'a', '2026-05-10T00:00:00Z'),
+            {
+              snippet: {
+                title: 'b',
+                description: 'd',
+                publishedAt: '2026-05-09T00:00:00Z',
+                videoOwnerChannelId: 'UCowner',
+                resourceId: { videoId: 'v2' },
+              },
+              contentDetails: { videoPublishedAt: '2025-12-01T00:00:00Z' },
+            },
+          ],
+          nextPageToken: 'PG2', // should not be requested
+        });
+      }
+      throw new Error('should not page past since-cutoff');
+    };
+    const videos = await fetchPlaylistVideos('UUabc', {
+      fetchFn: fakeFetch,
+      since: new Date('2026-05-01T00:00:00Z'),
+    });
+    expect(call).toBe(1);
+    expect(videos.map((v) => v.videoId)).toEqual(['v1']);
   });
 
   it('stops paginating once a video older than since appears', async () => {
@@ -202,6 +293,9 @@ describe('fetchChannelVideosSince (composite)', () => {
 // ---------------------------------------------------------------------------
 
 function mkItem(videoId: string, title: string, publishedAt: string) {
+  // For typical uploads, contentDetails.videoPublishedAt matches
+  // snippet.publishedAt. Tests that exercise divergence pass an inline
+  // item literal instead of using this helper.
   return {
     snippet: {
       title,
@@ -210,5 +304,6 @@ function mkItem(videoId: string, title: string, publishedAt: string) {
       videoOwnerChannelId: 'UCowner',
       resourceId: { videoId },
     },
+    contentDetails: { videoPublishedAt: publishedAt },
   };
 }

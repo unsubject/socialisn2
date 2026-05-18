@@ -12,7 +12,8 @@
 // that requires the paid Data API.
 //
 // Quota: 10K units/day free. resolveChannelId = 1 unit; each
-// playlistItems page = 1 unit returning up to 50 items. A typical
+// playlistItems page = 1 unit returning up to 50 items (cost is
+// per call, independent of how many parts are requested). A typical
 // 12-month pull for Simon's channel (~52 videos) is 2-3 calls total.
 // Well inside the free quota even with backfill re-runs.
 
@@ -104,6 +105,14 @@ export interface FetchPlaylistOptions extends YouTubeDataOptions {
  * playlist) newest-first, paginating until the next page is empty,
  * `since` is crossed, or `maxItems` is hit.
  *
+ * Date semantics: `YouTubeVideo.publishedAt` is the video's public
+ * publish time (`contentDetails.videoPublishedAt`), not the time it
+ * was added to the playlist (`snippet.publishedAt`). For uploads
+ * playlists they usually match, but scheduled/private→public uploads
+ * diverge and we want the reader-visible date for cutoff + storage.
+ * Falls back to `snippet.publishedAt` when `contentDetails` is
+ * absent (e.g. videos that have never been public).
+ *
  * Quota: 1 unit per page (up to 50 items).
  */
 export async function fetchPlaylistVideos(
@@ -123,7 +132,7 @@ export async function fetchPlaylistVideos(
 
   while (true) {
     const params = new URLSearchParams({
-      part: 'snippet',
+      part: 'snippet,contentDetails',
       playlistId,
       maxResults: String(pageSize),
       key: apiKey,
@@ -141,7 +150,11 @@ export async function fetchPlaylistVideos(
       const videoId = snippet.resourceId?.videoId;
       const channelId = snippet.videoOwnerChannelId ?? snippet.channelId;
       if (!videoId || !channelId) continue;
-      const publishedAt = new Date(snippet.publishedAt);
+      // Prefer the actual publish time; fall back to playlist-add time
+      // when the API omits contentDetails (e.g. never-public videos).
+      const publishedAtRaw =
+        item.contentDetails?.videoPublishedAt ?? snippet.publishedAt;
+      const publishedAt = new Date(publishedAtRaw);
       if (Number.isNaN(publishedAt.getTime())) continue;
       if (since && publishedAt < since) {
         // Uploads playlist is newest-first by position so once we
@@ -201,6 +214,9 @@ interface PlaylistItemsResponse {
       channelId?: string;
       videoOwnerChannelId?: string;
       resourceId?: { videoId?: string };
+    };
+    contentDetails?: {
+      videoPublishedAt?: string;
     };
   }>;
   nextPageToken?: string;

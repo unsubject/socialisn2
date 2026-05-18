@@ -84,4 +84,8 @@ export const env = {
   // Competitor channel polling (src/ingestion/youtube.ts) uses the
   // public Atom feed and does NOT need this key per ADR-004.
   youtubeApiKey: () => optional('YOUTUBE_API_KEY', ''),
+  // Simon's YouTube channel handle for the backfill corpus load
+  // (SPEC §13, ADR-012). Default matches the canonical handle in
+  // SPEC §13. Override for test channels or if the handle changes.
+  youtubeChannelHandle: () => optional('YOUTUBE_CHANNEL_HANDLE', '@leesimon'),
 };

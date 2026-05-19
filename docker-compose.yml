@@ -74,7 +74,7 @@ services:
       redis:
         condition: service_healthy
     env_file: .env
-    command: ["node", "dist/index.js"]
+    command: ["node", "dist/src/index.js"]
     # No host port mapping — Traefik (host network mode) reaches the
     # container at its bridge IP on the project's default network.
     volumes:
@@ -153,7 +153,7 @@ services:
       redis:
         condition: service_healthy
     env_file: .env
-    command: ["node", "dist/workers/ingestion.js"]
+    command: ["node", "dist/src/workers/ingestion.js"]
 
   scoring-worker:
     build: .
@@ -169,7 +169,7 @@ services:
       litellm:
         condition: service_healthy
     env_file: .env
-    command: ["node", "dist/workers/scoring.js"]
+    command: ["node", "dist/src/workers/scoring.js"]
     volumes:
       # Scoring run's tail hook regenerates RSS feeds (orchestrator/run.ts
       # → defaultRegenerateFeeds → generateAllFeeds). Same mount as app

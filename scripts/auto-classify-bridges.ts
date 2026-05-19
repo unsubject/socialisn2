@@ -157,8 +157,9 @@ interface CfCfg {
  * Upper bound for honoring a server's Retry-After. Longer hints are
  * clamped to this value — preserves the helper's overall
  * "fail fast and let the next cron tick retry" contract against a
- * pathological `Retry-After: 3600` from a CF abuse-system action or
- * a sustained-load Anthropic 60s × 4 attempts.
+ * pathological `Retry-After: 3600` from a CF abuse-system action or a
+ * sustained-load Anthropic 60s value. See fetchWithRetry for the
+ * detailed budget math.
  */
 const RETRY_AFTER_CAP_MS = 60_000;
 
@@ -208,10 +209,11 @@ async function drainResponse(res: Response): Promise<void> {
  * Anthropic per-key rate limit), any 5xx (Anthropic 529 overloaded,
  * CF 502/503), and network-level rejections (DNS / ECONNRESET / TLS /
  * AbortError / undici socket timeouts). Exponential backoff
- * 2s / 4s / 8s plus 0-500ms jitter; total wait ~14s before the final
- * attempt. The final response is returned as-is so callers retain
- * their own status-code handling. If the final attempt itself rejects
- * (network error), the rejection is re-thrown.
+ * 2s / 4s / 8s plus 0-500ms jitter; with maxAttempts=4 that's three
+ * inter-attempt sleeps totalling ~14s before the final attempt. The
+ * final response is returned as-is so callers retain their own
+ * status-code handling. If the final attempt itself rejects (network
+ * error), the rejection is re-thrown.
  *
  * If the server sends a Retry-After header, the wait is
  * max(min(Retry-After, RETRY_AFTER_CAP_MS), computed backoff) — we
@@ -224,8 +226,8 @@ async function drainResponse(res: Response): Promise<void> {
  * 14s is a deliberate baseline ceiling: the cron tick is 30 min, so a
  * workflow that can't recover within ~14s on backoff alone should
  * fail cleanly. With a server-supplied Retry-After at the 60s cap on
- * every attempt, worst case is ~4min — still well under the cron
- * cadence.
+ * every retry, a single exhausted call peaks at ~3 min (3 sleeps ×
+ * 60s) — still well under the cron cadence.
  *
  * Intermediate (discarded) response bodies are cancelled before
  * sleeping so the underlying socket can return to the pool.

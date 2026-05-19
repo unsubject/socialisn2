@@ -58,7 +58,7 @@ These prereqs the deploy workflow can't do on its own. All commands as root unle
    ./svc.sh status   # should show: active (running)
    ```
 
-5. **Traefik + LE resolver.** The existing n8n stack on srv1565522 owns the `n8n-traefik-1` Docker network and `mytlschallenge` resolver. The workflow's sanity-check step verifies the network exists (`docker network inspect n8n-traefik-1`). Memory note `hostinger_traefik_cf_pattern` covers the pattern.
+5. **Traefik must be running.** The existing reverse proxy on srv1565522 is the `traefik-yffq-traefik-1` container (its own compose project `traefik-yffq`). It runs in **`network_mode: host`** and discovers containers via the Docker socket, routing to each container's bridge IP from the host's network namespace — so socialisn2's services don't need to join any shared external network. The cert resolver is named **`letsencrypt`**. The workflow's sanity-check step verifies the Traefik container exists (`docker inspect traefik-yffq-traefik-1`).
 
 6. **DNS for `mcp.socialisn.com`.** Cloudflare DNS record pointing at srv1565522's IP. **Proxy ON** (orange cloud). SSL mode must be **Full (strict)** at the zone level — `Flexible` causes a 301 loop with Traefik's HTTPS-only entry point. Memory note `railway_cloudflare_ssl` covers the same pattern from a different deploy.
 

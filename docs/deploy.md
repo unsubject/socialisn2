@@ -56,26 +56,31 @@ Or via the GitHub UI: Actions → deploy-vps → "Run workflow".
 
 Expected duration: ~2-3 min for an image-unchanged deploy, ~5-8 min if the `app` image rebuilds.
 
-The final step runs `dist/scripts/post-deploy-backfill.js` inside a one-shot `app` container. A green workflow guarantees:
+The final step runs `dist/scripts/post-deploy-backfill.js` inside a one-shot `app` container. A green workflow guarantees, at the moment the workflow finishes:
 
 - Latest `main` is checked out at `/opt/socialisn2`
 - Postgres schema is migrated forward to the latest file in `migrations/`
-- `app`, `ingestion-worker`, `scoring-worker`, `whisper-worker`, `nginx` are running
+- `app`, `ingestion-worker`, `scoring-worker`, `whisper-worker`, `nginx` containers have **started** (passed initial `docker compose up` — continuous-liveness verification is Phase 5 PR 3 scope)
 - A `backfill_run` row was inserted with `status='completed'`, `brain_corpus_status='available'`
 
 If the workflow goes red on the post-deploy step, the stack is still running — the assertion failure means scoring Stage 5 will degrade to `archive_overlap=0` on every run until the underlying `TWO_BRAIN_MCP_URL` / token is fixed. Repair the env, re-run the workflow.
 
 ## Rolling back
 
-Migrations are forward-only. To revert code, **prefer the workflow** so the image gets rebuilt automatically:
+Migrations are forward-only. To revert code, the supported path is **revert the bad commit on main, then redeploy**:
 
 ```
-gh workflow run deploy-vps.yml --ref <prior-sha>
+git revert <bad-sha>
+git push origin main
+gh workflow run deploy-vps.yml
 ```
 
-That checks out the older commit on the VPS via the workflow's `git reset --hard origin/main` step (NB: the workflow always pulls origin/main regardless of the `--ref` used to launch it — the `--ref` only picks which version of the workflow YAML runs). To roll back to an arbitrary SHA, instead update main via `git revert <bad-sha> && git push` and run the workflow.
+This rebuilds the `app` image from the post-revert tree, runs any pending forward migrations, and brings the stack up clean.
 
-If you must reach the VPS directly (workflow broken, GH outage):
+> ⚠️ **`gh workflow run deploy-vps.yml --ref <prior-sha>` is NOT a rollback.**
+> The workflow always does `git reset --hard origin/main` on the VPS regardless of which `--ref` triggered it, so passing an older SHA only selects which version of the workflow YAML executes — the code that gets deployed is still current `main`. To deploy a different revision, that revision must be `main`.
+
+If the workflow itself is broken (or GitHub is down) and you need to roll back via the VPS directly:
 
 ```
 ssh $VPS_USER@$VPS_HOST

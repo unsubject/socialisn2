@@ -46,6 +46,53 @@ jobs:
           chmod 700 ~/.ssh
           ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
 
+      - name: Bootstrap repo on VPS (clone if first deploy)
+        # The previous workflow required the operator to clone the
+        # repo into /opt/socialisn2 by hand before the first deploy.
+        # Now the workflow handles bootstrap itself — clone if the
+        # .git dir is missing, no-op otherwise.
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
+          set -euo pipefail
+          if [ ! -d /opt/socialisn2/.git ]; then
+            echo "[bootstrap] /opt/socialisn2 not a git repo — cloning"
+            mkdir -p /opt
+            git clone --quiet https://github.com/unsubject/socialisn2.git /opt/socialisn2
+          else
+            echo "[bootstrap] /opt/socialisn2 already cloned"
+          fi
+          EOF
+
+      - name: Sanity-check VPS prereqs
+        # Three fail-fast checks for the operator-side prereqs that
+        # docker compose / migrate can't surface clearly on its own:
+        #   - external Traefik network must exist (otherwise the
+        #     Traefik labels are silently inert and mcp.socialisn.com
+        #     404s post-deploy with no error in the workflow log)
+        #   - /opt/socialisn2/.env must exist (otherwise the
+        #     `env_file: .env` directive trips compose with a noisy
+        #     "POSTGRES_PASSWORD not set" before migrate even runs)
+        #   - /opt/socialisn2/.env must be readable by the deploy user
+        #     (caught the same way but worth a separate message —
+        #     `chmod 600 .env` with the wrong owner is a common slip)
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
+          set -euo pipefail
+          if ! docker network inspect n8n-traefik-1 >/dev/null 2>&1; then
+            echo "::error::Docker network 'n8n-traefik-1' not found on the VPS. The Traefik labels on app/nginx will be inert without it. See docs/deploy.md § One-time VPS bootstrap step 3."
+            exit 1
+          fi
+          if [ ! -f /opt/socialisn2/.env ]; then
+            echo "::error::/opt/socialisn2/.env not found. The deploy needs PUBLIC_HOST, DATABASE_URL, POSTGRES_PASSWORD, the LLM keys, and TWO_BRAIN_MCP_URL/TOKEN at minimum. See docs/deploy.md § Required .env keys."
+            exit 1
+          fi
+          if [ ! -r /opt/socialisn2/.env ]; then
+            echo "::error::/opt/socialisn2/.env exists but is not readable by $(whoami). Check ownership/permissions (chmod 600 is fine if the file owner matches VPS_USER)."
+            exit 1
+          fi
+          echo "[prereqs] traefik network present; .env present + readable"
+          EOF
+
       - name: Fast-forward repo on VPS to origin/main
         run: |
           ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'

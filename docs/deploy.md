@@ -13,9 +13,9 @@ The Workers are stateless and reach a separate D1 database; rolling them on ever
 
 These prereqs the deploy workflow can't do on its own.
 
-1. **Repo location.** Clone `unsubject/socialisn2` to `/opt/socialisn2` on srv1565522.
-2. **Populate `/opt/socialisn2/.env`** with every key listed in `.env.example`. Missing keys surface as `env.publicHost() throws "Missing required env var PUBLIC_HOST"` at app startup; the deploy gets through migrations but fails the post-deploy backfill assertion (confusing).
-3. **Traefik + LE resolver.** The existing n8n stack on srv1565522 owns the `n8n-traefik-1` Docker network and `mytlschallenge` resolver. Confirm both exist before the first deploy (`docker network inspect n8n-traefik-1`). Memory note `hostinger_traefik_cf_pattern` covers the pattern.
+1. **`VPS_USER` can write to `/opt`.** The workflow's first step clones the repo to `/opt/socialisn2` if it isn't there yet. If `VPS_USER` is `root`, no setup needed. Otherwise: once, as root, `mkdir -p /opt && chown $VPS_USER /opt` so the clone step doesn't trip on permissions.
+2. **Populate `/opt/socialisn2/.env`** with every key listed in `.env.example`. The workflow refuses to proceed if `.env` is missing (sanity-check step surfaces the error inline). Missing-but-required keys inside the file would still throw at app startup with `env.publicHost() throws "Missing required env var PUBLIC_HOST"` — but that's caught by the post-deploy backfill assertion.
+3. **Traefik + LE resolver.** The existing n8n stack on srv1565522 owns the `n8n-traefik-1` Docker network and `mytlschallenge` resolver. The workflow's sanity-check step verifies the network exists (`docker network inspect n8n-traefik-1`); the resolver is implicit if it's been working for the dtjam_odoo deploy. Memory note `hostinger_traefik_cf_pattern` covers the pattern.
 4. **DNS for `mcp.socialisn.com`.** Cloudflare DNS record pointing at srv1565522's IP. **Proxy ON** (orange cloud). SSL mode must be **Full (strict)** at the zone level — `Flexible` causes a 301 loop with Traefik's HTTPS-only entry point. Memory note `railway_cloudflare_ssl` covers the same pattern from a different deploy.
 5. **First deploy & RSS volume.** `feeds_data` is a named Docker volume, fresh on first deploy. nginx will return 404 for `/feeds/<slug>.xml` until the next scoring tick (cron at 05:00 / 14:00 ET) regenerates the files. To force a regen sooner, MCP `run_now` or `docker compose exec scoring-worker node -e 'import("./dist/orchestrator/run.js").then(m => …)'` — but waiting for the next cron is usually fine.
 
@@ -26,7 +26,7 @@ These prereqs the deploy workflow can't do on its own.
 | Secret name             | Used by              | Notes                                                                 |
 |-------------------------|----------------------|-----------------------------------------------------------------------|
 | `VPS_HOST`              | deploy-vps           | `srv1565522.hstgr.cloud` or the raw IP                                |
-| `VPS_USER`              | deploy-vps           | SSH user on the VPS with permission to run `docker compose`           |
+| `VPS_USER`              | deploy-vps           | SSH user on the VPS with permission to run `docker compose` + write to `/opt` |
 | `VPS_SSH_PRIVATE_KEY`   | deploy-vps           | ed25519 private key; matching public key in the VPS user's `~/.ssh/authorized_keys` |
 | `CLOUDFLARE_API_TOKEN`  | deploy-workers (existing) | Tracked under a separate scoped-token Build task; see PR #67 history |
 | `CLOUDFLARE_ACCOUNT_ID` | deploy-workers (existing) | account-level id                                                    |

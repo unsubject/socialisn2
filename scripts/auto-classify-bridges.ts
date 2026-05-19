@@ -153,20 +153,157 @@ interface CfCfg {
   dbId: string;
 }
 
+/**
+ * Upper bound for honoring a server's Retry-After. Longer hints are
+ * clamped to this value — preserves the helper's overall
+ * "fail fast and let the next cron tick retry" contract against a
+ * pathological `Retry-After: 3600` from a CF abuse-system action or a
+ * sustained-load Anthropic 60s value. See fetchWithRetry for the
+ * detailed budget math.
+ */
+const RETRY_AFTER_CAP_MS = 60_000;
+
+/**
+ * Parse an HTTP Retry-After header into milliseconds. Accepts numeric
+ * seconds ("30") and HTTP-date ("Wed, 21 Oct 2026 07:28:00 GMT").
+ * Returns null on malformed input. A past date returns 0. Exported
+ * for testing.
+ */
+export function parseRetryAfter(value: string | null): number | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  // Numeric seconds form.
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    return Math.floor(seconds * 1000);
+  }
+  // HTTP-date form.
+  const dateMs = Date.parse(trimmed);
+  if (!Number.isNaN(dateMs)) {
+    const diff = dateMs - Date.now();
+    return diff > 0 ? diff : 0;
+  }
+  return null;
+}
+
+/**
+ * Drain a Response we're about to discard. In Node's undici-backed
+ * fetch, an unread body holds the underlying socket open until GC.
+ * A run burning through many senders + retries could exhaust the
+ * connection pool before the GC catches up.
+ *
+ * Swallows any cancel error — a misbehaving stream must never block
+ * the retry path.
+ */
+async function drainResponse(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel();
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * fetch with retry on transient HTTP 429 (Cloudflare API error 971 +
+ * Anthropic per-key rate limit), any 5xx (Anthropic 529 overloaded,
+ * CF 502/503), and network-level rejections (DNS / ECONNRESET / TLS /
+ * AbortError / undici socket timeouts). Exponential backoff
+ * 2s / 4s / 8s plus 0-500ms jitter; with maxAttempts=4 that's three
+ * inter-attempt sleeps totalling ~14s before the final attempt. The
+ * final response is returned as-is so callers retain their own
+ * status-code handling. If the final attempt itself rejects (network
+ * error), the rejection is re-thrown.
+ *
+ * If the server sends a Retry-After header, the wait is
+ * max(min(Retry-After, RETRY_AFTER_CAP_MS), computed backoff) — we
+ * honor short server hints verbatim, clamp longer ones to 60s, and
+ * never retry sooner than our own backoff floor. The cap preserves
+ * the overall "fail fast, let next cron tick retry" contract: a
+ * 1-hour Retry-After would otherwise park the runner past the next
+ * 30-min tick.
+ *
+ * 14s is a deliberate baseline ceiling: the cron tick is 30 min, so a
+ * workflow that can't recover within ~14s on backoff alone should
+ * fail cleanly. With a server-supplied Retry-After at the 60s cap on
+ * every retry, a single exhausted call peaks at ~3 min (3 sleeps ×
+ * 60s) — still well under the cron cadence.
+ *
+ * Intermediate (discarded) response bodies are cancelled before
+ * sleeping so the underlying socket can return to the pool.
+ *
+ * `sleep`, `jitter`, and `fetchImpl` are injectable for unit tests.
+ */
+export async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  opts: {
+    maxAttempts?: number;
+    baseDelayMs?: number;
+    label?: string;
+    sleep?: (ms: number) => Promise<void>;
+    jitter?: () => number;
+    fetchImpl?: typeof fetch;
+  } = {},
+): Promise<Response> {
+  const maxAttempts = opts.maxAttempts ?? 4;
+  const baseDelayMs = opts.baseDelayMs ?? 2000;
+  const label = opts.label ?? 'fetch';
+  const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const jitter = opts.jitter ?? (() => Math.floor(Math.random() * 500));
+  const fetchImpl = opts.fetchImpl ?? fetch;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: Response;
+    try {
+      res = await fetchImpl(url, init);
+    } catch (err) {
+      // Network-level rejection — the same "transient infra blip"
+      // class as a 429. Retry until the budget is exhausted, then
+      // surface the error to the caller.
+      if (attempt === maxAttempts) throw err;
+      const delay = baseDelayMs * 2 ** (attempt - 1) + jitter();
+      console.warn(
+        `[${label}] fetch threw on attempt ${attempt}/${maxAttempts}: ${err instanceof Error ? err.message : String(err)} — retrying in ${delay}ms`,
+      );
+      await sleep(delay);
+      continue;
+    }
+    if (res.status !== 429 && res.status < 500) return res;
+    if (attempt === maxAttempts) return res;
+    const backoff = baseDelayMs * 2 ** (attempt - 1) + jitter();
+    const retryAfterRaw = parseRetryAfter(res.headers.get('retry-after'));
+    const retryAfter =
+      retryAfterRaw !== null ? Math.min(retryAfterRaw, RETRY_AFTER_CAP_MS) : null;
+    const delay = retryAfter !== null ? Math.max(retryAfter, backoff) : backoff;
+    console.warn(
+      `[${label}] HTTP ${res.status} on attempt ${attempt}/${maxAttempts}, retrying in ${delay}ms`,
+    );
+    await drainResponse(res);
+    await sleep(delay);
+  }
+  // Unreachable — the loop always returns or throws on the final attempt.
+  throw new Error('fetchWithRetry: exhausted attempts without returning');
+}
+
 async function d1Query<T>(
   cfg: CfCfg,
   sql: string,
   params: Array<string | number | null> = [],
 ): Promise<T[]> {
   const url = `https://api.cloudflare.com/client/v4/accounts/${cfg.accountId}/d1/database/${cfg.dbId}/query`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${cfg.token}`,
-      'Content-Type': 'application/json',
+  const res = await fetchWithRetry(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ sql, params }),
     },
-    body: JSON.stringify({ sql, params }),
-  });
+    { label: 'd1' },
+  );
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`D1 ${res.status}: ${text}`);
@@ -267,21 +404,25 @@ async function classifyWithLlm(
 ${headerLines.length > 0 ? '\nAdditional context headers (often the strongest identity signal when from_domain is a transport provider):\n' + headerLines.join('\n') + '\n' : ''}${transportNote}
 Use web_search if needed. Output JSON only.`;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': anthropicKey,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
+  const res = await fetchWithRetry(
+    'https://api.anthropic.com/v1/messages',
+    {
+      method: 'POST',
+      headers: {
+        'x-api-key': anthropicKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 1024,
+        system: buildSystemPrompt(seeds),
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+        messages: [{ role: 'user', content: userMsg }],
+      }),
     },
-    body: JSON.stringify({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 1024,
-      system: buildSystemPrompt(seeds),
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
-      messages: [{ role: 'user', content: userMsg }],
-    }),
-  });
+    { label: 'anthropic' },
+  );
   if (!res.ok) {
     console.warn(`[classify] anthropic ${res.status}: ${await res.text()}`);
     return null;
@@ -442,35 +583,54 @@ async function main(): Promise<void> {
       continue;
     }
 
-    // Write discovered_publishers (ON CONFLICT DO NOTHING by slug — the
-    // first classification wins; later re-classifications of the same
-    // slug stay no-op).
-    await d1Query(
-      cfg,
-      `INSERT INTO discovered_publishers
-         (slug, name, primary_domain, domains, authority, language, reasoning, discovered_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (slug) DO NOTHING`,
-      [
-        cls.slug,
-        cls.name,
-        cls.primary_domain,
-        JSON.stringify(cls.domains),
-        cls.authority,
-        cls.language,
-        cls.reasoning,
-        Date.now(),
-      ],
-    );
+    // Both INSERTs are ON CONFLICT DO NOTHING and the source row stays
+    // in `unmatched` until the email-worker successfully routes the
+    // next inbound, so failing here just defers this sender to the
+    // next cron tick. Catch + continue so a single D1 hiccup doesn't
+    // abandon the rest of the batch.
+    //
+    // Partial-write edge case: if the discovered_publishers INSERT
+    // succeeds but the sender_map INSERT fails, the next tick may
+    // re-classify under a different (non-deterministic LLM) slug. The
+    // earlier publisher row stays in place as an orphan — harmless
+    // because ON CONFLICT keeps it out of the hot path; just metadata
+    // bloat that a future table scan should expect.
+    try {
+      // Write discovered_publishers — first classification of this slug
+      // wins; later re-classifications stay no-op.
+      await d1Query(
+        cfg,
+        `INSERT INTO discovered_publishers
+           (slug, name, primary_domain, domains, authority, language, reasoning, discovered_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (slug) DO NOTHING`,
+        [
+          cls.slug,
+          cls.name,
+          cls.primary_domain,
+          JSON.stringify(cls.domains),
+          cls.authority,
+          cls.language,
+          cls.reasoning,
+          Date.now(),
+        ],
+      );
 
-    // Write sender_map (the hot path index for the worker).
-    await d1Query(
-      cfg,
-      `INSERT INTO sender_map (match_field, match_value, slug, created_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT DO NOTHING`,
-      [key.match_field, key.match_value, cls.slug, Date.now()],
-    );
+      // Write sender_map (the hot path index for the worker).
+      await d1Query(
+        cfg,
+        `INSERT INTO sender_map (match_field, match_value, slug, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`,
+        [key.match_field, key.match_value, cls.slug, Date.now()],
+      );
+    } catch (err: unknown) {
+      console.warn(
+        `[classify] D1 write failed for ${key.match_value}: ${err instanceof Error ? err.message : String(err)} — skipping, next tick retries`,
+      );
+      skipped.push({ sender, reason: 'D1 write failed' });
+      continue;
+    }
 
     newlyClassified.push({ sender, cls });
     existingKeys.add(keyStr);

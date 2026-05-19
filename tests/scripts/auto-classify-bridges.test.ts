@@ -11,10 +11,12 @@ import { describe, expect, it } from 'vitest';
 import {
   classificationFromSeed,
   extractClassification,
+  fetchWithRetry,
   isTransportProviderDomain,
   loadSeededBridges,
   matchSeededBridge,
   parseClassificationJson,
+  parseRetryAfter,
   senderKey,
   validateClassification,
   type SeededBridge,
@@ -291,5 +293,363 @@ describe('isTransportProviderDomain', () => {
 
   it('handles null gracefully', () => {
     expect(isTransportProviderDomain(null)).toBe(false);
+  });
+});
+
+describe('parseRetryAfter', () => {
+  it('parses numeric seconds', () => {
+    expect(parseRetryAfter('30')).toBe(30_000);
+  });
+
+  it('parses fractional seconds', () => {
+    expect(parseRetryAfter('1.5')).toBe(1500);
+  });
+
+  it('parses zero', () => {
+    expect(parseRetryAfter('0')).toBe(0);
+  });
+
+  it('parses a future HTTP-date', () => {
+    const futureMs = Date.now() + 10_000;
+    const httpDate = new Date(futureMs).toUTCString();
+    const got = parseRetryAfter(httpDate);
+    // Allow a couple of seconds of slack for clock granularity.
+    expect(got).not.toBeNull();
+    expect(got!).toBeGreaterThan(8_000);
+    expect(got!).toBeLessThanOrEqual(10_000);
+  });
+
+  it('treats a past HTTP-date as 0', () => {
+    expect(parseRetryAfter('Wed, 21 Oct 2015 07:28:00 GMT')).toBe(0);
+  });
+
+  it('returns null for null or empty', () => {
+    expect(parseRetryAfter(null)).toBeNull();
+    expect(parseRetryAfter('')).toBeNull();
+    expect(parseRetryAfter('   ')).toBeNull();
+  });
+
+  it('returns null for non-numeric, non-date input', () => {
+    expect(parseRetryAfter('soon')).toBeNull();
+  });
+});
+
+describe('fetchWithRetry', () => {
+  function mkRes(status: number, headers: Record<string, string> = {}): Response {
+    return new Response(status === 204 ? null : `body-${status}`, { status, headers });
+  }
+
+  it('returns immediately on 2xx (no retries, no sleep)', async () => {
+    const calls: string[] = [];
+    const sleeps: number[] = [];
+    const fetchImpl = (async () => {
+      calls.push('fetch');
+      return mkRes(200);
+    }) as unknown as typeof fetch;
+    const res = await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(calls.length).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('returns immediately on non-429 4xx (no retry)', async () => {
+    const sleeps: number[] = [];
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return mkRes(401);
+    }) as unknown as typeof fetch;
+    const res = await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    expect(res.status).toBe(401);
+    expect(calls).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('retries through 429s and returns the first non-429 response', async () => {
+    const statuses = [429, 429, 200];
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => mkRes(statuses[i++]!)) as unknown as typeof fetch;
+    const res = await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 10,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(i).toBe(3);
+    // Two backoffs between the three attempts: 10ms, 20ms (baseDelay * 2^n).
+    expect(sleeps).toEqual([10, 20]);
+  });
+
+  it('retries 5xx the same way (e.g. Anthropic 529 overloaded)', async () => {
+    const statuses = [529, 200];
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => mkRes(statuses[i++]!)) as unknown as typeof fetch;
+    const res = await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 10,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(i).toBe(2);
+    expect(sleeps).toEqual([10]);
+  });
+
+  it('returns the final 429 response when attempts are exhausted', async () => {
+    const sleeps: number[] = [];
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return mkRes(429);
+    }) as unknown as typeof fetch;
+    const res = await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        maxAttempts: 3,
+        baseDelayMs: 10,
+        fetchImpl,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    expect(res.status).toBe(429);
+    expect(calls).toBe(3);
+    // No sleep after the last attempt.
+    expect(sleeps).toEqual([10, 20]);
+  });
+
+  it('sums jitter into the computed backoff', async () => {
+    const statuses = [429, 429, 200];
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => mkRes(statuses[i++]!)) as unknown as typeof fetch;
+    await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 10,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 100,
+      },
+    );
+    // (baseDelay * 2^(attempt-1)) + jitter == [10+100, 20+100].
+    expect(sleeps).toEqual([110, 120]);
+  });
+
+  it('retries a network rejection and resolves on the next attempt', async () => {
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => {
+      i++;
+      if (i === 1) throw new Error('ECONNRESET');
+      return mkRes(200);
+    }) as unknown as typeof fetch;
+    const res = await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 10,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(i).toBe(2);
+    expect(sleeps).toEqual([10]);
+  });
+
+  it('re-throws when network rejections exhaust the budget', async () => {
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => {
+      i++;
+      throw new Error('ECONNRESET');
+    }) as unknown as typeof fetch;
+    await expect(
+      fetchWithRetry(
+        'https://example.com',
+        {},
+        {
+          maxAttempts: 3,
+          baseDelayMs: 10,
+          fetchImpl,
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+          jitter: () => 0,
+        },
+      ),
+    ).rejects.toThrow('ECONNRESET');
+    expect(i).toBe(3);
+    expect(sleeps).toEqual([10, 20]);
+  });
+
+  it('honors Retry-After when it exceeds computed backoff', async () => {
+    const statuses: Array<[number, Record<string, string>]> = [
+      [429, { 'retry-after': '5' }],
+      [200, {}],
+    ];
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => {
+      const [status, headers] = statuses[i++]!;
+      return mkRes(status, headers);
+    }) as unknown as typeof fetch;
+    await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 10,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    // computed backoff would be 10ms; Retry-After: 5s wins.
+    expect(sleeps).toEqual([5_000]);
+  });
+
+  it('does not shrink backoff when Retry-After is shorter', async () => {
+    const statuses: Array<[number, Record<string, string>]> = [
+      [429, { 'retry-after': '1' }],
+      [200, {}],
+    ];
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => {
+      const [status, headers] = statuses[i++]!;
+      return mkRes(status, headers);
+    }) as unknown as typeof fetch;
+    await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 5_000,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    // Retry-After: 1s is shorter than backoff 5000ms; backoff wins.
+    expect(sleeps).toEqual([5_000]);
+  });
+
+  it('caps a pathologically large Retry-After at 60s', async () => {
+    const statuses: Array<[number, Record<string, string>]> = [
+      [429, { 'retry-after': '3600' }], // 1 hour
+      [200, {}],
+    ];
+    const sleeps: number[] = [];
+    let i = 0;
+    const fetchImpl = (async () => {
+      const [status, headers] = statuses[i++]!;
+      return mkRes(status, headers);
+    }) as unknown as typeof fetch;
+    await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 10,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        jitter: () => 0,
+      },
+    );
+    // Retry-After 3600s = 3_600_000ms; clamped to RETRY_AFTER_CAP_MS = 60_000.
+    expect(sleeps).toEqual([60_000]);
+  });
+
+  it('cancels intermediate response bodies before retrying', async () => {
+    // Tracking flags via Object.defineProperty(array, index, …) — the
+    // descriptors are non-configurable by default, so don't try to
+    // re-assign these indices in a future refactor.
+    const cancelled: boolean[] = [];
+    function mkResWithSpy(status: number): Response {
+      let isCancelled = false;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`body-${status}`));
+          controller.close();
+        },
+        cancel() {
+          isCancelled = true;
+        },
+      });
+      // Track via a getter on the array so the assertion reflects state
+      // at assertion time, not at construction time.
+      Object.defineProperty(cancelled, cancelled.length, {
+        get: () => isCancelled,
+        enumerable: true,
+      });
+      return new Response(stream, { status });
+    }
+    const responses = [mkResWithSpy(429), mkResWithSpy(200)];
+    let i = 0;
+    const fetchImpl = (async () => responses[i++]!) as unknown as typeof fetch;
+    await fetchWithRetry(
+      'https://example.com',
+      {},
+      {
+        fetchImpl,
+        baseDelayMs: 1,
+        sleep: async () => undefined,
+        jitter: () => 0,
+      },
+    );
+    // First (429) was discarded → cancelled. Second (200) was returned
+    // to caller → caller's lifecycle; should NOT be cancelled by the
+    // helper.
+    expect(cancelled[0]).toBe(true);
+    expect(cancelled[1]).toBe(false);
   });
 });

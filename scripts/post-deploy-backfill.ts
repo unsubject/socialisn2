@@ -7,7 +7,15 @@
 // would degrade scoring Stage 5 to a no-op without surfacing as a
 // failure. The deploy aborts visibly here instead.
 //
-// Invoked from .github/workflows/deploy.yml via
+// Intentionally lenient on YouTube fetch failures: runBackfill
+// aggregates `youtube_fetch_failed: ...` into result.error alongside
+// the brain status, but isDeployGreen only consults brainCorpusStatus.
+// A transient YT quota error or 5xx shouldn't fail the entire deploy
+// because the corpus_size column is informational, not load-bearing.
+// The error column on the backfill_run row still records it for
+// triage.
+//
+// Invoked from .github/workflows/deploy-vps.yml via
 //   docker compose run --rm app node dist/scripts/post-deploy-backfill.js
 // so the env inside the container matches what the freshly-restarted
 // app/scoring-worker will run with.
@@ -66,6 +74,12 @@ async function main(): Promise<void> {
     if (verdict.ok) {
       console.log(`[post-deploy] OK: ${verdict.reason}`);
       console.log(`[post-deploy] backfill_run id=${result.backfillRunId}`);
+      // Surface YT-fetch degradations (they don't fail the deploy but
+      // operators still want to see them in the workflow log without
+      // SELECTing from backfill_run).
+      if (result.error) {
+        console.warn(`[post-deploy] backfill_run.error recorded: ${result.error}`);
+      }
       return;
     }
     console.error(`[post-deploy] DEPLOY ABORT: ${verdict.reason}`);

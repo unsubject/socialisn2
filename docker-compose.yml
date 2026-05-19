@@ -86,6 +86,19 @@ services:
     networks:
       - default
       - traefik
+    healthcheck:
+      # Uses node's global fetch — the slim image has neither curl nor
+      # wget, and adding either bloats the image for one diagnostic
+      # tool. start_period=20s covers Fastify boot + DB connection.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=n8n-traefik-1"
@@ -98,6 +111,14 @@ services:
       - "traefik.http.routers.socialisn2-app.tls.certresolver=mytlschallenge"
       - "traefik.http.routers.socialisn2-app.priority=1"
       - "traefik.http.services.socialisn2-app.loadbalancer.server.port=3000"
+      # Traefik-level health probe. Without this, Traefik routes the
+      # instant the container is `running`, before Fastify is
+      # listening — every deploy opens a brief 502 window. With it,
+      # Traefik returns 503 from the router until /healthz passes,
+      # which is the friendlier failure signal for CF / clients.
+      - "traefik.http.services.socialisn2-app.loadbalancer.healthcheck.path=/healthz"
+      - "traefik.http.services.socialisn2-app.loadbalancer.healthcheck.interval=10s"
+      - "traefik.http.services.socialisn2-app.loadbalancer.healthcheck.timeout=5s"
 
   nginx:
     # Static RSS server. Mounts the same feeds_data volume that the app
@@ -122,6 +143,12 @@ services:
       - "traefik.http.routers.socialisn2-feeds.tls.certresolver=mytlschallenge"
       - "traefik.http.routers.socialisn2-feeds.priority=10"
       - "traefik.http.services.socialisn2-feeds.loadbalancer.server.port=80"
+      # nginx healthcheck — Traefik probes the internal endpoint that
+      # the static-RSS config exposes for ops triage. Cheap to add
+      # given the path block is already in the conf file.
+      - "traefik.http.services.socialisn2-feeds.loadbalancer.healthcheck.path=/nginx-healthz"
+      - "traefik.http.services.socialisn2-feeds.loadbalancer.healthcheck.interval=10s"
+      - "traefik.http.services.socialisn2-feeds.loadbalancer.healthcheck.timeout=5s"
 
   ingestion-worker:
     build: .

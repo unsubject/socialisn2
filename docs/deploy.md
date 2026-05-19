@@ -17,7 +17,7 @@ These prereqs the deploy workflow can't do on its own.
 2. **Populate `/opt/socialisn2/.env`** with every key listed in `.env.example`. Missing keys surface as `env.publicHost() throws "Missing required env var PUBLIC_HOST"` at app startup; the deploy gets through migrations but fails the post-deploy backfill assertion (confusing).
 3. **Traefik + LE resolver.** The existing n8n stack on srv1565522 owns the `n8n-traefik-1` Docker network and `mytlschallenge` resolver. Confirm both exist before the first deploy (`docker network inspect n8n-traefik-1`). Memory note `hostinger_traefik_cf_pattern` covers the pattern.
 4. **DNS for `mcp.socialisn.com`.** Cloudflare DNS record pointing at srv1565522's IP. **Proxy ON** (orange cloud). SSL mode must be **Full (strict)** at the zone level — `Flexible` causes a 301 loop with Traefik's HTTPS-only entry point. Memory note `railway_cloudflare_ssl` covers the same pattern from a different deploy.
-5. **First-run image build.** `docker compose pull` in step 2 of the workflow will fail on the first deploy because the local `app` image hasn't been built yet (it's built from the Dockerfile, not pulled from a registry). On the very first deploy SSH in and run `docker compose build app` once.
+5. **First deploy & RSS volume.** `feeds_data` is a named Docker volume, fresh on first deploy. nginx will return 404 for `/feeds/<slug>.xml` until the next scoring tick (cron at 05:00 / 14:00 ET) regenerates the files. To force a regen sooner, MCP `run_now` or `docker compose exec scoring-worker node -e 'import("./dist/orchestrator/run.js").then(m => …)'` — but waiting for the next cron is usually fine.
 
 ## Required GitHub Actions secrets
 
@@ -67,18 +67,26 @@ If the workflow goes red on the post-deploy step, the stack is still running —
 
 ## Rolling back
 
-Migrations are forward-only. To revert code:
+Migrations are forward-only. To revert code, **prefer the workflow** so the image gets rebuilt automatically:
+
+```
+gh workflow run deploy-vps.yml --ref <prior-sha>
+```
+
+That checks out the older commit on the VPS via the workflow's `git reset --hard origin/main` step (NB: the workflow always pulls origin/main regardless of the `--ref` used to launch it — the `--ref` only picks which version of the workflow YAML runs). To roll back to an arbitrary SHA, instead update main via `git revert <bad-sha> && git push` and run the workflow.
+
+If you must reach the VPS directly (workflow broken, GH outage):
 
 ```
 ssh $VPS_USER@$VPS_HOST
 cd /opt/socialisn2
 git fetch origin
 git checkout <prior-sha>
-docker compose pull
+docker compose build app   # rebuild from the older Dockerfile/src
 docker compose up -d
 ```
 
-If a rollback requires a schema reverse (column drop, etc.), write a new migration file rather than reverting `_socialisn2_migrations`.
+If a rollback requires a schema reverse (column drop, etc.), write a new forward migration file rather than reverting `_socialisn2_migrations`.
 
 ## Where requests land
 

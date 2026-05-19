@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # socialisn2 app image. Used by the app, ingestion-worker, scoring-worker,
 # and whisper-worker services in docker-compose.yml; each service overrides
-# CMD via the compose file.
+# CMD via the compose file. Healthcheck is set per-service in compose
+# (only the `app` service serves HTTP — workers don't bind a port and
+# would flap as unhealthy if we set a curl-based check at image level).
 
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
@@ -31,10 +33,4 @@ COPY config ./config
 # must exist. Forward-only SQL files; one-shot container reads them.
 COPY migrations ./migrations
 EXPOSE 3000
-# Healthcheck — hits /healthz via node's built-in fetch so we don't
-# need to ship curl/wget in the slim image. Traefik picks up the
-# label-driven healthcheck via docker-compose; this one also gives
-# `docker compose ps` a meaningful status column for direct triage.
-HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://localhost:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" || exit 1
 CMD ["node", "dist/index.js"]

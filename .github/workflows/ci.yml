@@ -50,6 +50,14 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Validate docker-compose.yml
+        # Expands variable references via .env.example, validates label
+        # syntax, verifies external network declarations resolve. The
+        # external `n8n-traefik-1` network is declared external:true so
+        # compose config doesn't try to reach the runner's docker
+        # daemon to verify it exists — purely structural lint.
+        run: docker compose --env-file .env.example config --quiet
+
   email-worker:
     runs-on: ubuntu-latest
     defaults:

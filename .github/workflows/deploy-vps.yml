@@ -1,0 +1,134 @@
+name: deploy-vps
+
+# Manual companion to deploy-workers.yml. Workers (email-worker +
+# feed-worker) are auto-deployed by deploy-workers.yml on push to main;
+# the VPS side (app + ingestion/scoring/whisper workers + postgres +
+# redis + litellm + nginx) deploys here via SSH to srv1565522.
+#
+# Trigger: workflow_dispatch only. Auto-deploy on push to main can be
+# added later (paths filter on src/** + docker-compose.yml). The first
+# v1 invocation is deliberately operator-driven — matches Phase 5 PR 4
+# (5-day pilot) boundary in BUILD-PHASES.
+#
+# Required repo secrets — operator-side, see docs/deploy.md:
+#   VPS_HOST              — srv1565522.hstgr.cloud (or its IP)
+#   VPS_USER              — SSH user with docker permissions
+#   VPS_SSH_PRIVATE_KEY   — ed25519 private key authorised on the VPS
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  # Two deploys to the same VPS racing on docker compose / migrations
+  # would be worse than queueing them. cancel-in-progress: false so a
+  # partial deploy isn't abandoned half-way.
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+
+      - name: Trust the VPS host key
+        # ssh-keyscan into known_hosts avoids the StrictHostKeyChecking
+        # prompt without disabling host-key verification entirely. -H
+        # hashes the entry so the host isn't readable in cleartext if
+        # the runner image is reused.
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Fast-forward repo on VPS to origin/main
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
+          set -euo pipefail
+          cd /opt/socialisn2
+          git fetch --quiet origin main
+          git reset --hard origin/main
+          # Surface the new HEAD into the workflow log so an operator
+          # reading "deploy-vps run #N" can correlate to a specific
+          # commit without opening the GH UI for the runner.
+          git --no-pager log -1 --oneline
+          EOF
+
+      - name: Build app image
+        # `app` (and the ingestion/scoring/whisper workers that share
+        # `build: .`) has no `image:` directive, so it's built locally
+        # from the Dockerfile. Rebuild on every deploy so new code in
+        # main actually ships. Layer cache makes this cheap when only
+        # src/ changed; ~20-40s on a full cache invalidation.
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
+          set -euo pipefail
+          cd /opt/socialisn2
+          docker compose build app
+          EOF
+
+      - name: Bring up dependencies + apply Postgres migrations
+        # Migrations run BEFORE the app/workers come up so a deploy that
+        # depends on a new column can't crash-loop the runtime container
+        # waiting for a schema that the migrate step hasn't applied yet.
+        # postgres / redis / litellm come up first because the one-shot
+        # `app` container needs DATABASE_URL reachable. `--wait` blocks
+        # until each service's healthcheck reports healthy (depends_on
+        # condition `service_healthy`); without it, `up -d` returns the
+        # moment the container starts, and the subsequent --no-deps
+        # migrate could fire before Postgres accepts connections.
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
+          set -euo pipefail
+          cd /opt/socialisn2
+          docker compose up -d --wait postgres redis litellm
+          # --no-deps bypasses depends_on for the one-shot container so
+          # we don't accidentally tear down healthy postgres/redis on
+          # `--rm`. Postgres is already up-and-healthy from the
+          # previous step.
+          docker compose run --rm --no-deps app node dist/scripts/migrate.js
+          EOF
+
+      - name: Bring up app + workers + nginx
+        # `up -d` is idempotent — only services whose config/images
+        # changed get recreated. The full stack including the new
+        # nginx service comes up after migrations are confirmed.
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
+          set -euo pipefail
+          cd /opt/socialisn2
+          docker compose up -d
+          docker compose ps
+          EOF
+
+      - name: Post-deploy backfill + brain_corpus_status assertion
+        # Final gate. Runs inside a one-shot `app` container so the env
+        # is exactly what the freshly-started app/workers see. Non-zero
+        # exit here fails the workflow visibly per PR #64 review P2 #3
+        # (silent 'not_configured' is a worse failure mode than a red
+        # deploy).
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
+          set -euo pipefail
+          cd /opt/socialisn2
+          docker compose run --rm --no-deps app node dist/scripts/post-deploy-backfill.js
+          EOF
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## deploy-vps"
+            echo ""
+            echo "Triggered by: ${{ github.actor }}"
+            echo "Result: ${{ job.status }}"
+            echo ""
+            echo "Cloudflare Workers (email-worker, feed-worker) deploy via the"
+            echo "separate deploy-workers workflow on push to main — re-run that"
+            echo "workflow_dispatch if a Worker-only redeploy is needed."
+          } >> "$GITHUB_STEP_SUMMARY"

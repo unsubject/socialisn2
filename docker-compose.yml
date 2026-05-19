@@ -3,6 +3,15 @@
 # The Cloudflare Workers behind SPEC §6.9 — email-worker/ and feed-worker/ —
 # deploy independently via `wrangler deploy` against a shared D1 database and
 # are NOT in this file. VPS reboots must not affect inbound newsletter intake.
+#
+# VPS layout (Phase 5 PR 2): app + nginx join the external `n8n-traefik-1`
+# network so the existing Traefik instance routes mcp.socialisn.com over
+# HTTPS via its `mytlschallenge` resolver. Path-prefix split via Traefik
+# priority labels: /feeds → nginx (priority 10), everything else → app
+# (priority 1). Local dev runs the same compose; without Traefik in front,
+# nothing reaches mcp.socialisn.com but the app and nginx ports are
+# unaffected on the default network for direct container-to-container use
+# (e.g. tests).
 
 services:
   postgres:
@@ -65,8 +74,81 @@ services:
         condition: service_healthy
     env_file: .env
     command: ["node", "dist/index.js"]
-    ports:
-      - "3000:3000"
+    # No host port mapping — Traefik handles the externally-reachable
+    # HTTPS endpoint via the n8n-traefik-1 network. For direct
+    # container-to-container access on the default network (tests,
+    # `docker compose run`), the service is still listening on :3000
+    # internally.
+    volumes:
+      # App writes RSS feeds here via env.rssPath(); nginx reads
+      # from the same volume to serve them under /feeds.
+      - feeds_data:/var/www/socialisn2/feeds
+    networks:
+      - default
+      - traefik
+    healthcheck:
+      # Uses node's global fetch — the slim image has neither curl nor
+      # wget, and adding either bloats the image for one diagnostic
+      # tool. start_period=20s covers Fastify boot + DB connection.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=n8n-traefik-1"
+      # Catch-all on mcp.socialisn.com → app, lower priority than the
+      # nginx PathPrefix(/feeds) router below. Handles /healthz,
+      # /c/:id, /mcp (when SOCIALISN2_MCP_TOKEN is set).
+      - "traefik.http.routers.socialisn2-app.rule=Host(`mcp.socialisn.com`)"
+      - "traefik.http.routers.socialisn2-app.entrypoints=websecure"
+      - "traefik.http.routers.socialisn2-app.tls=true"
+      - "traefik.http.routers.socialisn2-app.tls.certresolver=mytlschallenge"
+      - "traefik.http.routers.socialisn2-app.priority=1"
+      - "traefik.http.services.socialisn2-app.loadbalancer.server.port=3000"
+      # Traefik-level health probe. Without this, Traefik routes the
+      # instant the container is `running`, before Fastify is
+      # listening — every deploy opens a brief 502 window. With it,
+      # Traefik returns 503 from the router until /healthz passes,
+      # which is the friendlier failure signal for CF / clients.
+      - "traefik.http.services.socialisn2-app.loadbalancer.healthcheck.path=/healthz"
+      - "traefik.http.services.socialisn2-app.loadbalancer.healthcheck.interval=10s"
+      - "traefik.http.services.socialisn2-app.loadbalancer.healthcheck.timeout=5s"
+
+  nginx:
+    # Static RSS server. Mounts the same feeds_data volume that the app
+    # writes to; serves it under /feeds/<slug>.xml. Custom config
+    # bind-mounted from infra/nginx/ rather than a custom image.
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./infra/nginx/socialisn2.conf:/etc/nginx/conf.d/default.conf:ro
+      - feeds_data:/var/www/socialisn2/feeds:ro
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=n8n-traefik-1"
+      # PathPrefix(`/feeds`) wins over the app's Host-only catch-all
+      # thanks to priority=10 vs priority=1. Anything under /feeds/
+      # routes here; everything else falls through to app.
+      - "traefik.http.routers.socialisn2-feeds.rule=Host(`mcp.socialisn.com`) && PathPrefix(`/feeds`)"
+      - "traefik.http.routers.socialisn2-feeds.entrypoints=websecure"
+      - "traefik.http.routers.socialisn2-feeds.tls=true"
+      - "traefik.http.routers.socialisn2-feeds.tls.certresolver=mytlschallenge"
+      - "traefik.http.routers.socialisn2-feeds.priority=10"
+      - "traefik.http.services.socialisn2-feeds.loadbalancer.server.port=80"
+      # nginx healthcheck — Traefik probes the internal endpoint that
+      # the static-RSS config exposes for ops triage. Cheap to add
+      # given the path block is already in the conf file.
+      - "traefik.http.services.socialisn2-feeds.loadbalancer.healthcheck.path=/nginx-healthz"
+      - "traefik.http.services.socialisn2-feeds.loadbalancer.healthcheck.interval=10s"
+      - "traefik.http.services.socialisn2-feeds.loadbalancer.healthcheck.timeout=5s"
 
   ingestion-worker:
     build: .
@@ -97,6 +179,11 @@ services:
         condition: service_healthy
     env_file: .env
     command: ["node", "dist/workers/scoring.js"]
+    volumes:
+      # Scoring run's tail hook regenerates RSS feeds (orchestrator/run.ts
+      # → defaultRegenerateFeeds → generateAllFeeds). Same mount as app
+      # so either container can be the writer.
+      - feeds_data:/var/www/socialisn2/feeds
 
   whisper-worker:
     build: .
@@ -110,6 +197,22 @@ services:
     # Phase 2 PR 1 (ADR-006 — Whisper model size for Cantonese) replaces this stub.
     command: ["node", "-e", "console.log('whisper-worker placeholder'); setInterval(()=>{}, 1<<30)"]
 
+networks:
+  # Default network is implicit when no `networks:` block exists on a
+  # service. Declaring it explicitly here documents that postgres /
+  # redis / litellm / workers all stay on `default` (container-to-
+  # container traffic only).
+  default:
+  # Shared Traefik network created by the existing n8n stack on
+  # srv1565522. Joined by services we want Traefik to route to.
+  # `name:` pins the actual docker network name regardless of the
+  # compose project prefix.
+  traefik:
+    name: n8n-traefik-1
+    external: true
+
 volumes:
   postgres_data:
   redis_data:
+  # RSS feeds written by app/scoring-worker, read by nginx.
+  feeds_data:

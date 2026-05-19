@@ -6,6 +6,6 @@
     "declaration": false,
     "sourceMap": true
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests", "scripts", "email-worker", "feed-worker"]
+  "include": ["src/**/*", "scripts/**/*"],
+  "exclude": ["node_modules", "dist", "tests", "email-worker", "feed-worker"]
 }

@@ -59,12 +59,17 @@ jobs:
           git --no-pager log -1 --oneline
           EOF
 
-      - name: Pull image updates
+      - name: Build app image
+        # `app` (and the ingestion/scoring/whisper workers that share
+        # `build: .`) has no `image:` directive, so it's built locally
+        # from the Dockerfile. Rebuild on every deploy so new code in
+        # main actually ships. Layer cache makes this cheap when only
+        # src/ changed; ~20-40s on a full cache invalidation.
         run: |
           ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
           set -euo pipefail
           cd /opt/socialisn2
-          docker compose pull
+          docker compose build app
           EOF
 
       - name: Bring up dependencies + apply Postgres migrations
@@ -72,16 +77,20 @@ jobs:
         # depends on a new column can't crash-loop the runtime container
         # waiting for a schema that the migrate step hasn't applied yet.
         # postgres / redis / litellm come up first because the one-shot
-        # `app` container needs DATABASE_URL reachable, and depends_on
-        # only resolves `service_healthy` once each base service is up.
+        # `app` container needs DATABASE_URL reachable. `--wait` blocks
+        # until each service's healthcheck reports healthy (depends_on
+        # condition `service_healthy`); without it, `up -d` returns the
+        # moment the container starts, and the subsequent --no-deps
+        # migrate could fire before Postgres accepts connections.
         run: |
           ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
           set -euo pipefail
           cd /opt/socialisn2
-          docker compose up -d postgres redis litellm
-          # No need for --build: docker compose pull above already
-          # refreshed the image cache from the registry (or local
-          # build on first run).
+          docker compose up -d --wait postgres redis litellm
+          # --no-deps bypasses depends_on for the one-shot container so
+          # we don't accidentally tear down healthy postgres/redis on
+          # `--rm`. Postgres is already up-and-healthy from the
+          # previous step.
           docker compose run --rm --no-deps app node dist/scripts/migrate.js
           EOF
 

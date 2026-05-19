@@ -62,7 +62,7 @@ These prereqs the deploy workflow can't do on its own. All commands as root unle
 
 6. **DNS for `mcp.socialisn.com`.** Cloudflare DNS record pointing at srv1565522's IP. **Proxy ON** (orange cloud). SSL mode must be **Full (strict)** at the zone level — `Flexible` causes a 301 loop with Traefik's HTTPS-only entry point. Memory note `railway_cloudflare_ssl` covers the same pattern from a different deploy.
 
-7. **First deploy & RSS volume.** `feeds_data` is a named Docker volume, fresh on first deploy. nginx will return 404 for `/feeds/<slug>.xml` until the next scoring tick (cron at 05:00 / 14:00 ET) regenerates the files. To force a regen sooner, MCP `run_now` or `docker compose exec scoring-worker node -e 'import("./dist/orchestrator/run.js").then(m => …)'` — but waiting for the next cron is usually fine.
+7. **First deploy & RSS volume.** `feeds_data` is a named Docker volume, fresh on first deploy. nginx will return 404 for `/feeds/<slug>.xml` until the next scoring tick (cron at 05:00 / 14:00 ET) regenerates the files. To force a regen sooner, MCP `run_now` or `docker compose exec scoring-worker node -e 'import("./dist/src/orchestrator/run.js").then(m => …)'` — but waiting for the next cron is usually fine.
 
 ## Required GitHub Actions secrets
 
@@ -75,7 +75,7 @@ The Cloudflare-side deploy (`deploy-workers.yml`) still uses two existing secret
 | `CLOUDFLARE_API_TOKEN`  | deploy-workers         | Tracked under a separate scoped-token Build task; see PR #67 history |
 | `CLOUDFLARE_ACCOUNT_ID` | deploy-workers         | account-level id                                                    |
 
-> Legacy: an earlier iteration of `deploy-vps.yml` used `VPS_HOST` / `VPS_USER` / `VPS_SSH_PRIVATE_KEY` for an SSH-based deploy. The self-hosted runner replaced that; the secrets can be deleted from repo settings (no consumer remains), or left untouched.
+> Historical note: an earlier iteration of `deploy-vps.yml` used `VPS_HOST` / `VPS_USER` / `VPS_SSH_PRIVATE_KEY` for an SSH-based deploy. The self-hosted runner replaced that pattern; the three secrets were removed from repo settings on 2026-05-19.
 
 ## Required `.env` keys on the VPS
 

@@ -55,13 +55,13 @@ jobs:
       - name: Sanity-check VPS prereqs
         # Three fail-fast checks for the operator-side prereqs that
         # docker compose / migrate can't surface clearly on its own:
-        #   - external Traefik network must exist
+        #   - Traefik container must be running (it routes mcp.socialisn.com)
         #   - /opt/socialisn2/.env must exist (env_file: .env)
         #   - .env must be readable by the runner user (deploy)
         run: |
           set -euo pipefail
-          if ! docker network inspect n8n-traefik-1 >/dev/null 2>&1; then
-            echo "::error::Docker network 'n8n-traefik-1' not found on the VPS. The Traefik labels on app/nginx will be inert without it. See docs/deploy.md § One-time VPS bootstrap step 3."
+          if ! docker inspect traefik-yffq-traefik-1 >/dev/null 2>&1; then
+            echo "::error::Container 'traefik-yffq-traefik-1' not found on the VPS. Without it the Traefik labels on app/nginx are inert and mcp.socialisn.com 404s. See docs/deploy.md § Traefik prereq."
             exit 1
           fi
           if [ ! -f /opt/socialisn2/.env ]; then
@@ -72,7 +72,7 @@ jobs:
             echo "::error::/opt/socialisn2/.env exists but is not readable by $(whoami). Check ownership/permissions."
             exit 1
           fi
-          echo "[prereqs] traefik network present; .env present + readable"
+          echo "[prereqs] traefik container present; .env present + readable"
 
       - name: Fast-forward repo to origin/main
         run: |

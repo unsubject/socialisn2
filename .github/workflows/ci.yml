@@ -51,12 +51,21 @@ jobs:
         run: npm test
 
       - name: Validate docker-compose.yml
-        # Expands variable references via .env.example, validates label
-        # syntax, verifies external network declarations resolve. The
-        # external `n8n-traefik-1` network is declared external:true so
-        # compose config doesn't try to reach the runner's docker
-        # daemon to verify it exists — purely structural lint.
-        run: docker compose --env-file .env.example config --quiet
+        # Structural lint of the compose file: expands ${VAR}
+        # substitutions and validates label / network / service
+        # references. The `external: true` on n8n-traefik-1 means
+        # compose config does NOT try to reach the docker daemon to
+        # verify the network exists — purely YAML-level.
+        #
+        # The service-level `env_file: .env` in compose is validated
+        # for existence separately from the --env-file CLI flag.
+        # Staging .env from .env.example satisfies the existence
+        # check; it ALSO supplies the ${VAR} substitutions, so the
+        # --env-file flag is unnecessary here.
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          rm .env
 
   email-worker:
     runs-on: ubuntu-latest

@@ -3,17 +3,22 @@ name: deploy-vps
 # Manual companion to deploy-workers.yml. Workers (email-worker +
 # feed-worker) are auto-deployed by deploy-workers.yml on push to main;
 # the VPS side (app + ingestion/scoring/whisper workers + postgres +
-# redis + litellm + nginx) deploys here via SSH to srv1565522.
+# redis + litellm + nginx) deploys here via a self-hosted runner on
+# srv1565522 — see docs/deploy.md § Self-hosted runner setup.
 #
 # Trigger: workflow_dispatch only. Auto-deploy on push to main can be
 # added later (paths filter on src/** + docker-compose.yml). The first
 # v1 invocation is deliberately operator-driven — matches Phase 5 PR 4
 # (5-day pilot) boundary in BUILD-PHASES.
 #
-# Required repo secrets — operator-side, see docs/deploy.md:
-#   VPS_HOST              — srv1565522.hstgr.cloud (or its IP)
-#   VPS_USER              — SSH user with docker permissions
-#   VPS_SSH_PRIVATE_KEY   — ed25519 private key authorised on the VPS
+# Why self-hosted instead of ubuntu-latest + SSH:
+#   - Hostinger firewall ("Gandalf") restricts port 22 to a single
+#     source IP; rotating GH runner IPs would need a permanent broad
+#     allowlist or a dynamic firewall rule per deploy.
+#   - Self-hosted runner polls outbound — no inbound exposure, no
+#     SSH key to leak from secrets, no firewall surface.
+#   - Workflow runs `docker compose ...` directly on the VPS without
+#     SSH heredocs; net ~65 lines simpler than the SSH version.
 
 on:
   workflow_dispatch:
@@ -27,56 +32,33 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # The runner is installed at /home/deploy/actions-runner on
+    # srv1565522 as a systemd service (`actions.runner.unsubject-...`),
+    # configured with labels `self-hosted,linux,x64`. Default GH labels.
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Configure SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-
-      - name: Trust the VPS host key
-        # ssh-keyscan into known_hosts avoids the StrictHostKeyChecking
-        # prompt without disabling host-key verification entirely. -H
-        # hashes the entry so the host isn't readable in cleartext if
-        # the runner image is reused.
+      - name: Bootstrap repo (clone if first deploy)
+        # First-deploy bootstrap: clone /opt/socialisn2 if missing.
+        # On the runner host /opt/socialisn2 should already exist
+        # because the operator pre-chowned it to `deploy` (see
+        # docs/deploy.md), but this step also handles a wipe-and-
+        # redeploy or a fresh VPS rebuild.
         run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
-
-      - name: Bootstrap repo on VPS (clone if first deploy)
-        # The previous workflow required the operator to clone the
-        # repo into /opt/socialisn2 by hand before the first deploy.
-        # Now the workflow handles bootstrap itself — clone if the
-        # .git dir is missing, no-op otherwise.
-        run: |
-          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
           set -euo pipefail
           if [ ! -d /opt/socialisn2/.git ]; then
             echo "[bootstrap] /opt/socialisn2 not a git repo — cloning"
-            mkdir -p /opt
             git clone --quiet https://github.com/unsubject/socialisn2.git /opt/socialisn2
           else
             echo "[bootstrap] /opt/socialisn2 already cloned"
           fi
-          EOF
 
       - name: Sanity-check VPS prereqs
         # Three fail-fast checks for the operator-side prereqs that
         # docker compose / migrate can't surface clearly on its own:
-        #   - external Traefik network must exist (otherwise the
-        #     Traefik labels are silently inert and mcp.socialisn.com
-        #     404s post-deploy with no error in the workflow log)
-        #   - /opt/socialisn2/.env must exist (otherwise the
-        #     `env_file: .env` directive trips compose with a noisy
-        #     "POSTGRES_PASSWORD not set" before migrate even runs)
-        #   - /opt/socialisn2/.env must be readable by the deploy user
-        #     (caught the same way but worth a separate message —
-        #     `chmod 600 .env` with the wrong owner is a common slip)
+        #   - external Traefik network must exist
+        #   - /opt/socialisn2/.env must exist (env_file: .env)
+        #   - .env must be readable by the runner user (deploy)
         run: |
-          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
           set -euo pipefail
           if ! docker network inspect n8n-traefik-1 >/dev/null 2>&1; then
             echo "::error::Docker network 'n8n-traefik-1' not found on the VPS. The Traefik labels on app/nginx will be inert without it. See docs/deploy.md § One-time VPS bootstrap step 3."
@@ -87,15 +69,13 @@ jobs:
             exit 1
           fi
           if [ ! -r /opt/socialisn2/.env ]; then
-            echo "::error::/opt/socialisn2/.env exists but is not readable by $(whoami). Check ownership/permissions (chmod 600 is fine if the file owner matches VPS_USER)."
+            echo "::error::/opt/socialisn2/.env exists but is not readable by $(whoami). Check ownership/permissions."
             exit 1
           fi
           echo "[prereqs] traefik network present; .env present + readable"
-          EOF
 
-      - name: Fast-forward repo on VPS to origin/main
+      - name: Fast-forward repo to origin/main
         run: |
-          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
           set -euo pipefail
           cd /opt/socialisn2
           git fetch --quiet origin main
@@ -104,7 +84,6 @@ jobs:
           # reading "deploy-vps run #N" can correlate to a specific
           # commit without opening the GH UI for the runner.
           git --no-pager log -1 --oneline
-          EOF
 
       - name: Build app image
         # `app` (and the ingestion/scoring/whisper workers that share
@@ -113,11 +92,9 @@ jobs:
         # main actually ships. Layer cache makes this cheap when only
         # src/ changed; ~20-40s on a full cache invalidation.
         run: |
-          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
           set -euo pipefail
           cd /opt/socialisn2
           docker compose build app
-          EOF
 
       - name: Bring up dependencies + apply Postgres migrations
         # Migrations run BEFORE the app/workers come up so a deploy that
@@ -130,7 +107,6 @@ jobs:
         # moment the container starts, and the subsequent --no-deps
         # migrate could fire before Postgres accepts connections.
         run: |
-          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
           set -euo pipefail
           cd /opt/socialisn2
           docker compose up -d --wait postgres redis litellm
@@ -139,19 +115,16 @@ jobs:
           # `--rm`. Postgres is already up-and-healthy from the
           # previous step.
           docker compose run --rm --no-deps app node dist/scripts/migrate.js
-          EOF
 
       - name: Bring up app + workers + nginx
         # `up -d` is idempotent — only services whose config/images
         # changed get recreated. The full stack including the new
         # nginx service comes up after migrations are confirmed.
         run: |
-          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
           set -euo pipefail
           cd /opt/socialisn2
           docker compose up -d
           docker compose ps
-          EOF
 
       - name: Post-deploy backfill + brain_corpus_status assertion
         # Final gate. Runs inside a one-shot `app` container so the env
@@ -160,11 +133,9 @@ jobs:
         # (silent 'not_configured' is a worse failure mode than a red
         # deploy).
         run: |
-          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'bash -se' <<'EOF'
           set -euo pipefail
           cd /opt/socialisn2
           docker compose run --rm --no-deps app node dist/scripts/post-deploy-backfill.js
-          EOF
 
       - name: Step summary
         if: always()

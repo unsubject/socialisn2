@@ -9,29 +9,73 @@ Two surfaces deploy independently:
 
 The Workers are stateless and reach a separate D1 database; rolling them on every push is safe. The VPS deploy touches Postgres, restarts background workers, and re-runs migrations — keep it manual until the Phase 5 PR 4 pilot signs off on auto-deploy.
 
+The VPS deploy runs on a **self-hosted GitHub Actions runner** installed on srv1565522 itself. The runner polls GH outbound, so there's no inbound surface (no SSH key in repo secrets, no firewall hole, no rotating runner IPs to allowlist). The trade-off: anyone with push to `main` can execute arbitrary code on srv1565522 via workflow YAML. For a private repo with you as sole pusher, this is fine — but treat the repo's collaborator list as the VPS's effective ACL.
+
 ## One-time VPS bootstrap
 
-These prereqs the deploy workflow can't do on its own.
+These prereqs the deploy workflow can't do on its own. All commands as root unless noted.
 
-1. **`VPS_USER` can write to `/opt`.** The workflow's first step clones the repo to `/opt/socialisn2` if it isn't there yet. If `VPS_USER` is `root`, no setup needed. Otherwise: once, as root, `mkdir -p /opt && chown $VPS_USER /opt` so the clone step doesn't trip on permissions.
-2. **Populate `/opt/socialisn2/.env`** with every key listed in `.env.example`. The workflow refuses to proceed if `.env` is missing (sanity-check step surfaces the error inline). Missing-but-required keys inside the file would still throw at app startup with `env.publicHost() throws "Missing required env var PUBLIC_HOST"` — but that's caught by the post-deploy backfill assertion.
-3. **Traefik + LE resolver.** The existing n8n stack on srv1565522 owns the `n8n-traefik-1` Docker network and `mytlschallenge` resolver. The workflow's sanity-check step verifies the network exists (`docker network inspect n8n-traefik-1`); the resolver is implicit if it's been working for the dtjam_odoo deploy. Memory note `hostinger_traefik_cf_pattern` covers the pattern.
-4. **DNS for `mcp.socialisn.com`.** Cloudflare DNS record pointing at srv1565522's IP. **Proxy ON** (orange cloud). SSL mode must be **Full (strict)** at the zone level — `Flexible` causes a 301 loop with Traefik's HTTPS-only entry point. Memory note `railway_cloudflare_ssl` covers the same pattern from a different deploy.
-5. **First deploy & RSS volume.** `feeds_data` is a named Docker volume, fresh on first deploy. nginx will return 404 for `/feeds/<slug>.xml` until the next scoring tick (cron at 05:00 / 14:00 ET) regenerates the files. To force a regen sooner, MCP `run_now` or `docker compose exec scoring-worker node -e 'import("./dist/orchestrator/run.js").then(m => …)'` — but waiting for the next cron is usually fine.
+1. **Create the deploy user.** Non-root user with docker access. Don't reuse root for the runner — `actions/runner` refuses to configure as root.
+   ```sh
+   useradd -m -G docker -s /bin/bash deploy
+   ```
+
+2. **Pre-create `/opt/socialisn2` owned by deploy.** The workflow's first step clones the repo here; deploy needs write access.
+   ```sh
+   mkdir -p /opt/socialisn2
+   chown -R deploy:deploy /opt/socialisn2
+   ```
+
+3. **Populate `/opt/socialisn2/.env`** with every key listed in `.env.example`. The workflow refuses to proceed if `.env` is missing (sanity-check step). Make sure deploy can read it:
+   ```sh
+   chown deploy:deploy /opt/socialisn2/.env
+   chmod 600 /opt/socialisn2/.env
+   ```
+
+4. **Install the self-hosted runner.** Get a one-time registration token from GitHub:
+   - Browser: `https://github.com/unsubject/socialisn2/settings/actions/runners/new`
+   - Or `gh`: `gh api -X POST repos/unsubject/socialisn2/actions/runners/registration-token --jq .token`
+   
+   Then as deploy (NOT root — `actions/runner` refuses root):
+   ```sh
+   su - deploy
+   mkdir -p ~/actions-runner && cd ~/actions-runner
+   A=actions-runner-linux-x64-2.334.0.tar.gz
+   U=https://github.com/actions/runner/releases/download/v2.334.0
+   curl -fsSL -o "$A" "$U/$A"
+   tar xzf "$A"
+   ./config.sh --url https://github.com/unsubject/socialisn2 \
+     --token <PASTE-TOKEN> \
+     --labels self-hosted,linux,x64 --unattended
+   exit  # back to root
+   ```
+   
+   Install as systemd service (as root — `svc.sh install <user>` configures the service to run as that user):
+   ```sh
+   cd /home/deploy/actions-runner
+   ./svc.sh install deploy
+   ./svc.sh start
+   ./svc.sh status   # should show: active (running)
+   ```
+
+5. **Traefik + LE resolver.** The existing n8n stack on srv1565522 owns the `n8n-traefik-1` Docker network and `mytlschallenge` resolver. The workflow's sanity-check step verifies the network exists (`docker network inspect n8n-traefik-1`). Memory note `hostinger_traefik_cf_pattern` covers the pattern.
+
+6. **DNS for `mcp.socialisn.com`.** Cloudflare DNS record pointing at srv1565522's IP. **Proxy ON** (orange cloud). SSL mode must be **Full (strict)** at the zone level — `Flexible` causes a 301 loop with Traefik's HTTPS-only entry point. Memory note `railway_cloudflare_ssl` covers the same pattern from a different deploy.
+
+7. **First deploy & RSS volume.** `feeds_data` is a named Docker volume, fresh on first deploy. nginx will return 404 for `/feeds/<slug>.xml` until the next scoring tick (cron at 05:00 / 14:00 ET) regenerates the files. To force a regen sooner, MCP `run_now` or `docker compose exec scoring-worker node -e 'import("./dist/orchestrator/run.js").then(m => …)'` — but waiting for the next cron is usually fine.
 
 ## Required GitHub Actions secrets
 
-`.github/workflows/deploy-vps.yml` needs three new secrets in addition to the Workers-side ones that already exist:
+For the VPS-side deploy: **none.** The self-hosted runner is authenticated by virtue of being registered with the repo; no SSH key, no host secret needed.
 
-| Secret name             | Used by              | Notes                                                                 |
-|-------------------------|----------------------|-----------------------------------------------------------------------|
-| `VPS_HOST`              | deploy-vps           | `srv1565522.hstgr.cloud` or the raw IP                                |
-| `VPS_USER`              | deploy-vps           | SSH user on the VPS with permission to run `docker compose` + write to `/opt` |
-| `VPS_SSH_PRIVATE_KEY`   | deploy-vps           | ed25519 private key; matching public key in the VPS user's `~/.ssh/authorized_keys` |
-| `CLOUDFLARE_API_TOKEN`  | deploy-workers (existing) | Tracked under a separate scoped-token Build task; see PR #67 history |
-| `CLOUDFLARE_ACCOUNT_ID` | deploy-workers (existing) | account-level id                                                    |
+The Cloudflare-side deploy (`deploy-workers.yml`) still uses two existing secrets:
 
-Adding the SSH key: generate locally with `ssh-keygen -t ed25519 -C "gha-deploy" -N "" -f gha_deploy_key`, append the `.pub` to `~/.ssh/authorized_keys` on the VPS for `$VPS_USER`, paste the private key into the GH Actions secret.
+| Secret name             | Used by                | Notes                                                                 |
+|-------------------------|------------------------|-----------------------------------------------------------------------|
+| `CLOUDFLARE_API_TOKEN`  | deploy-workers         | Tracked under a separate scoped-token Build task; see PR #67 history |
+| `CLOUDFLARE_ACCOUNT_ID` | deploy-workers         | account-level id                                                    |
+
+> Legacy: an earlier iteration of `deploy-vps.yml` used `VPS_HOST` / `VPS_USER` / `VPS_SSH_PRIVATE_KEY` for an SSH-based deploy. The self-hosted runner replaced that; the secrets can be deleted from repo settings (no consumer remains), or left untouched.
 
 ## Required `.env` keys on the VPS
 
@@ -83,7 +127,7 @@ This rebuilds the `app` image from the post-revert tree, runs any pending forwar
 If the workflow itself is broken (or GitHub is down) and you need to roll back via the VPS directly:
 
 ```
-ssh $VPS_USER@$VPS_HOST
+ssh root@srv1565522.hstgr.cloud   # your normal admin SSH, allowlisted to one source IP
 cd /opt/socialisn2
 git fetch origin
 git checkout <prior-sha>
@@ -92,6 +136,16 @@ docker compose up -d
 ```
 
 If a rollback requires a schema reverse (column drop, etc.), write a new forward migration file rather than reverting `_socialisn2_migrations`.
+
+## Maintaining the runner
+
+The runner runs as a systemd service. Common operations (as root):
+
+- **Stop / start / status:** `cd /home/deploy/actions-runner && ./svc.sh stop|start|status`
+- **Upgrade runner version:** `./svc.sh stop`, replace tarball, `./svc.sh start`. The runner auto-updates the worker binary on each job, but the `runsvc` host process needs a manual upgrade for major versions.
+- **Deregister and rebuild:** as `deploy`, `./config.sh remove --token <fresh-token>`; then redo the install steps.
+
+GitHub shows runner status under repo settings → Actions → Runners. If the runner is `Offline`, check the systemd unit (`systemctl status actions.runner.unsubject-socialisn2.srv1565522.service`).
 
 ## Where requests land
 

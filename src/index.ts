@@ -3,7 +3,7 @@
 //   - grammy Telegram bot (src/telegram/bot.ts) — when TELEGRAM_BOT_TOKEN
 //     and TELEGRAM_CHAT_ID are both set
 //
-// docker-compose `app` service runs `node dist/index.js`. SIG handlers
+// docker-compose `app` service runs `node dist/src/index.js`. SIG handlers
 // drain components in dependency order on shutdown (see ADR-010).
 
 import process from 'node:process';

@@ -28,12 +28,6 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev --no-audit --no-fund; fi
 COPY --from=build /app/dist ./dist
-# Belt-and-suspenders: also expose the source config/ at /app/config in
-# case anything loads via process.cwd() or an absolute path rather than
-# import.meta.url-relative. dist/config/ is the canonical runtime path
-# (see Dockerfile build stage); this is the fallback. Cleanup deferred
-# pending audit that nothing actually reads from /app/config directly.
-COPY config ./config
 # Migrations consumed by `dist/scripts/migrate.js` via
 # readdirSync(resolve(process.cwd(), 'migrations')). The Phase 5 PR 2
 # deploy invokes the migrator with WORKDIR /app, so /app/migrations

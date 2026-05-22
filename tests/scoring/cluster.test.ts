@@ -217,7 +217,7 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
         embedding: vA,
         primaryDomain: 'economy',
         itemDomains: ['economy'],
-        publishedAt: new Date('2026-05-15T10:00:00Z'),
+        publishedAt: new Date(),
       });
 
       expect(result.isNew).toBe(true);
@@ -230,17 +230,22 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
     });
 
     it('joins an existing cluster when nearest distance is below threshold', async () => {
+      // assignCluster's SQL filters `last_seen_at > NOW() - 7 days`, so
+      // use relative timestamps; fixed wall-clock dates time-bomb the test
+      // once they age out of the recency window.
+      const t1 = new Date(Date.now() - 3 * 60 * 60 * 1000); // 3h ago
+      const t2 = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2h ago, later
       const first = await assignCluster(db, {
         embedding: vA,
         primaryDomain: 'economy',
         itemDomains: ['economy'],
-        publishedAt: new Date('2026-05-15T10:00:00Z'),
+        publishedAt: t1,
       });
       const second = await assignCluster(db, {
         embedding: vB,
         primaryDomain: 'economy',
         itemDomains: ['economy'],
-        publishedAt: new Date('2026-05-15T11:00:00Z'),
+        publishedAt: t2,
       });
 
       expect(second.isNew).toBe(false);
@@ -250,29 +255,33 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
 
       const c = await getCluster(first.clusterId);
       expect(c.item_count).toBe(2);
-      // last_seen_at advanced to the 11:00 publishedAt.
-      expect(c.last_seen_at.toISOString()).toBe('2026-05-15T11:00:00.000Z');
+      // last_seen_at advanced to t2 (the later publishedAt).
+      expect(c.last_seen_at.toISOString()).toBe(t2.toISOString());
     });
 
     it('does NOT pull last_seen_at backwards when an item arrives out-of-order', async () => {
-      // First item lands with publishedAt = 12:00.
+      // Relative timestamps for the same reason as the previous test —
+      // assignCluster's 7-day recency window is server-side NOW()-based.
+      const tLater = new Date(Date.now() - 1 * 60 * 60 * 1000); // 1h ago
+      const tEarlier = new Date(Date.now() - 5 * 60 * 60 * 1000); // 5h ago
+      // First item lands with the later publishedAt.
       const first = await assignCluster(db, {
         embedding: vA,
         primaryDomain: 'economy',
         itemDomains: ['economy'],
-        publishedAt: new Date('2026-05-15T12:00:00Z'),
+        publishedAt: tLater,
       });
-      // A late-fetched second item joins with publishedAt = 08:00 (earlier).
-      // The GREATEST/Math.max branch must keep last_seen_at pinned at 12:00.
+      // A late-fetched second item joins with an earlier publishedAt.
+      // The GREATEST/Math.max branch must keep last_seen_at pinned at tLater.
       await assignCluster(db, {
         embedding: vB,
         primaryDomain: 'economy',
         itemDomains: ['economy'],
-        publishedAt: new Date('2026-05-15T08:00:00Z'),
+        publishedAt: tEarlier,
       });
       const c = await getCluster(first.clusterId);
       expect(c.item_count).toBe(2);
-      expect(c.last_seen_at.toISOString()).toBe('2026-05-15T12:00:00.000Z');
+      expect(c.last_seen_at.toISOString()).toBe(tLater.toISOString());
     });
 
     it('creates a new cluster when nearest centroid is above threshold', async () => {

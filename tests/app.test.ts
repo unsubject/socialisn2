@@ -201,8 +201,7 @@ describe.skipIf(!DATABASE_URL)('Fastify app (src/app.ts)', () => {
 
   it('GET /status reflects a seeded run + pending raw_items', async () => {
     const runId = await seedRun({ status: 'completed', candidatesCount: 12 });
-    const raw = await seedRawItem('pending-source');
-    void raw;
+    await seedRawItem('pending-source');
     const res = await app.inject({ method: 'GET', url: '/status' });
     expect(res.statusCode).toBe(200);
     const body = res.json() as Record<string, unknown>;

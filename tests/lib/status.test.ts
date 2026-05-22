@@ -181,7 +181,7 @@ describe.skipIf(!DATABASE_URL)('buildStatus (src/lib/status.ts)', () => {
   });
 
   it('cost.atAlertThreshold flips true once spend crosses 80%', async () => {
-    await seedSpend(1.2); // 80% of 1.50 — FP-fragile boundary; ceiling.ts handles
+    await seedSpend(1.2); // 80% of 1.50 — FP-fragile boundary; ceiling.ts applies COMPARISON_EPSILON
     const snap = await buildStatus(db);
     expect(snap.cost.atAlertThreshold).toBe(true);
     expect(snap.cost.hitCeiling).toBe(false);

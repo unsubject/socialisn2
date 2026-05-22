@@ -102,6 +102,9 @@ export async function buildStatus(db: Db): Promise<StatusSnapshot> {
     `),
   ]);
 
+  // runsTodayRows always has exactly one row — COUNT(*) on a GROUP-less
+  // query never returns zero rows. The non-null assertion is sound; the
+  // pendingRows[0] surface uses the same pattern via optional chaining.
   return {
     version: STATUS_SNAPSHOT_VERSION,
     taken_at: new Date().toISOString(),
@@ -110,6 +113,6 @@ export async function buildStatus(db: Db): Promise<StatusSnapshot> {
     queue: {
       pending_raw_items: pendingRows[0]?.n ?? 0,
     },
-    runs_today: runsTodayRows[0] ?? { total: 0, failed: 0 },
+    runs_today: runsTodayRows[0]!,
   };
 }

@@ -12,6 +12,7 @@
 // pass plain strings + optional reply_markup payloads.
 
 import { env } from '../config/env.js';
+import { escapeMarkdownV2 } from './format.js';
 
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -112,4 +113,28 @@ export async function sendMessage(
     return { ok: true, messageId: json.result?.message_id };
   }
   return { ok: false, description: json.description ?? 'unknown Telegram API error' };
+}
+
+/**
+ * Send a plain-text (no markdown) message via the same Bot API.
+ * MarkdownV2 reserves a wide set of punctuation (`.`, `(`, `$`, `-`,
+ * `!`, …) — any plain-prose alert sent via sendMessage() would silently
+ * fail the API's parse step. This helper escapes the input so callers
+ * can pass natural language without thinking about it.
+ *
+ * Returns the same SendMessageResult contract as sendMessage. Throws
+ * Error on Telegram-side failure so the caller (cost-alert state
+ * rollback) can detect and recover.
+ */
+export async function pushPlainText(
+  text: string,
+  opts: SendMessageOptions = {},
+): Promise<void> {
+  const result = await sendMessage(
+    { text: escapeMarkdownV2(text) },
+    opts,
+  );
+  if (!result.ok) {
+    throw new Error(result.description ?? 'unknown sendMessage error');
+  }
 }

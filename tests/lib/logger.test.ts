@@ -85,7 +85,7 @@ describe('createLogger', () => {
       cap.restore();
     }
     expect(cap.lines).toHaveLength(1);
-    const rec = cap.lines[0].record;
+    const rec = cap.lines[0]!.record;
     expect(rec.level).toBe('info');
     expect(rec.component).toBe('alpha');
     expect(rec.msg).toBe('hello');
@@ -100,7 +100,7 @@ describe('createLogger', () => {
     } finally {
       cap.restore();
     }
-    const rec = cap.lines[0].record;
+    const rec = cap.lines[0]!.record;
     expect(rec.run_id).toBe('r1');
     expect(rec.count).toBe(7);
   });
@@ -166,6 +166,6 @@ describe('createLogger', () => {
     } finally {
       cap.restore();
     }
-    expect(cap.lines[0].record.run_id).toBe('r-override');
+    expect(cap.lines[0]!.record.run_id).toBe('r-override');
   });
 });

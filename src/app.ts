@@ -1,11 +1,12 @@
 // Fastify entry per SPEC §4.2 + §16. Exposes:
 //
 //   GET /healthz   — liveness probe (no DB roundtrip)
+//   GET /status    — observability snapshot (open; consumed by ops-digest)
 //   GET /c/:id     — candidate detail HTML page (SPEC §11.2 link target)
 //
 // The Phase 4 PR 3 MCP server and the Phase 4 PR 2 Telegram bot add
 // their own surfaces — those are independent Node processes / Fastify
-// plugins. This module is intentionally small: one route, one helper.
+// plugins. This module is intentionally small.
 //
 // `buildApp(db)` returns the Fastify instance without listening, so
 // tests can use `app.inject({ method, url })` to exercise routes
@@ -17,6 +18,7 @@ import { sql } from 'drizzle-orm';
 
 import { env } from './config/env.js';
 import type { Db } from './db/client.js';
+import { buildStatus } from './lib/status.js';
 import { UUID_RE } from './lib/uuid.js';
 import { buildMcpServer } from './mcp/server.js';
 import { mcpPlugin } from './mcp/transport.js';
@@ -65,6 +67,11 @@ export function buildApp(db: Db): FastifyInstance {
   });
 
   app.get('/healthz', async () => ({ ok: true }));
+
+  // Open by design — see ADR-001/PR Obs-1 discussion. Surface is
+  // observability-only (no mutators, no secrets). ops-digest polls
+  // this; ad-hoc `curl mcp.socialisn.com/status` is the operator path.
+  app.get('/status', async () => buildStatus(db));
 
   app.get<{ Params: { id: string } }>('/c/:id', async (req, reply) => {
     const id = req.params.id;

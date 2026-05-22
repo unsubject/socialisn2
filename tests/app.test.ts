@@ -18,6 +18,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { buildApp } from '../src/app.js';
 import * as schema from '../src/db/schema.js';
+import { STATUS_SNAPSHOT_VERSION } from '../src/lib/status.js';
 import { assertDestructiveAllowed } from './helpers/destructive-guard.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -55,7 +56,10 @@ describe.skipIf(!DATABASE_URL)('Fastify app (src/app.ts)', () => {
     await client.unsafe(
       'TRUNCATE TABLE candidates, items, gdelt_coverage, clusters CASCADE',
     );
-    await client.unsafe('TRUNCATE TABLE raw_items CASCADE');
+    // Extended to cover runs + cost_ledger so /status tests start from a
+    // known-empty state. Pre-existing /c/:id tests don't seed either, so
+    // adding them is a safe widening.
+    await client.unsafe('TRUNCATE TABLE raw_items, runs, cost_ledger CASCADE');
     clusterId = uuidv7();
     const zeroVec = `[${new Array(1536).fill(0.001).join(',')}]`;
     await client`
@@ -150,6 +154,26 @@ describe.skipIf(!DATABASE_URL)('Fastify app (src/app.ts)', () => {
     `;
   }
 
+  async function seedRun(opts: {
+    status?: string;
+    candidatesCount?: number | null;
+    error?: string | null;
+  } = {}): Promise<string> {
+    const id = uuidv7();
+    await client`
+      INSERT INTO runs (id, kind, status, started_at, completed_at, candidates_count, error)
+      VALUES (
+        ${id}, 'morning',
+        ${opts.status ?? 'completed'},
+        NOW(),
+        ${opts.status === 'running' ? null : new Date().toISOString()}::timestamptz,
+        ${opts.candidatesCount ?? 7},
+        ${opts.error ?? null}
+      )
+    `;
+    return id;
+  }
+
   // -------------------------------------------------------------------------
   // /healthz
   // -------------------------------------------------------------------------
@@ -158,6 +182,36 @@ describe.skipIf(!DATABASE_URL)('Fastify app (src/app.ts)', () => {
     const res = await app.inject({ method: 'GET', url: '/healthz' });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true });
+  });
+
+  // -------------------------------------------------------------------------
+  // /status
+  // -------------------------------------------------------------------------
+
+  it('GET /status returns 200 + the empty StatusSnapshot when nothing is seeded', async () => {
+    const res = await app.inject({ method: 'GET', url: '/status' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+    const body = res.json() as Record<string, unknown>;
+    expect(body.version).toBe(STATUS_SNAPSHOT_VERSION);
+    expect(body.last_run).toBeNull();
+    expect((body.queue as Record<string, unknown>).pending_raw_items).toBe(0);
+    expect((body.runs_today as Record<string, unknown>).total).toBe(0);
+  });
+
+  it('GET /status reflects a seeded run + pending raw_items', async () => {
+    const runId = await seedRun({ status: 'completed', candidatesCount: 12 });
+    const raw = await seedRawItem('pending-source');
+    void raw;
+    const res = await app.inject({ method: 'GET', url: '/status' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as Record<string, unknown>;
+    const lastRun = body.last_run as Record<string, unknown>;
+    expect(lastRun.id).toBe(runId);
+    expect(lastRun.candidates_count).toBe(12);
+    expect((body.queue as Record<string, unknown>).pending_raw_items).toBe(1);
+    expect((body.runs_today as Record<string, unknown>).total).toBe(1);
+    expect((body.runs_today as Record<string, unknown>).failed).toBe(0);
   });
 
   // -------------------------------------------------------------------------

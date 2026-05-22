@@ -31,6 +31,7 @@ import {
   type IngestionJobData,
 } from '../queue/ingestion-queue.js';
 import { startScheduler } from '../scheduler/cron.js';
+import { startRecalibrationCron } from '../scheduler/recalibrate.js';
 
 type SourceJob = Extract<IngestionJobData, { target: 'source' }>;
 type CompetitorJob = Extract<IngestionJobData, { target: 'competitor' }>;
@@ -170,10 +171,17 @@ async function main(): Promise<void> {
   });
 
   const scheduler = startScheduler(db, queue);
+  // ADR-013: daily 04:00 UTC Bayesian recalibration of source authority.
+  // Lives on the ingestion worker process for two reasons: (1) it needs
+  // the same DB handle as the scheduler, (2) the scoring worker already
+  // owns the compaction cron — keeping recalibration here colocates it
+  // with the schedule-only side, not the compute-heavy side.
+  const recalibrationCron = startRecalibrationCron(db);
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[ingestion-worker] ${signal} received; shutting down`);
     scheduler.stop();
+    recalibrationCron.stop();
     await worker.close();
     await queue.close();
     await connection.quit();

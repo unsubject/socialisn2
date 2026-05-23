@@ -12,6 +12,7 @@ import { sql } from 'drizzle-orm';
 import {
   type AnyPgColumn,
   boolean,
+  date,
   doublePrecision,
   index,
   integer,
@@ -303,6 +304,18 @@ export const costLedger = pgTable(
     occurredAtIdx: index('idx_cost_ledger_occurred_at').on(t.occurredAt.desc()),
   }),
 );
+
+// Obs-2 — one-row-per-UTC-day persistence for the 80% cost-alert fire
+// path. The orchestrator calls maybeFireCostAlert after each successful
+// assertWithinCeiling; INSERT ... ON CONFLICT (alert_day) DO NOTHING
+// guarantees the Telegram push fires exactly once per UTC day.
+// pct_at_fire snapshots pctOfCeiling so a later /status surface can
+// show "alerted at 84.3%" without re-reading the ledger.
+export const costAlertState = pgTable('cost_alert_state', {
+  alertDay: date('alert_day').primaryKey(),
+  firedAt: timestamp('fired_at', { withTimezone: true }).notNull().defaultNow(),
+  pctAtFire: numeric('pct_at_fire', { precision: 5, scale: 4 }).notNull(),
+});
 
 // Per SPEC §13 — one row per cold-start backfill run, with full provenance.
 // Migration 013 added the *_status + youtube_corpus_size columns to record

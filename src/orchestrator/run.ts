@@ -37,11 +37,15 @@ import { v7 as uuidv7 } from 'uuid';
 import { DOMAIN_CONFIGS, domainWeight } from '../../config/domains.js';
 import { env } from '../config/env.js';
 import type { Db } from '../db/client.js';
+import { maybeFireCostAlert, type CostAlertPusher } from '../cost/alert.js';
 import { assertWithinCeiling, CostCeilingHitError } from '../cost/ceiling.js';
 import { recordCost } from '../cost/ledger.js';
 import { generateAllFeeds } from '../rss/generate.js';
 import { formatDigest, formatExclusivePush } from '../telegram/format.js';
-import { sendMessage as defaultSendTelegram } from '../telegram/push.js';
+import {
+  pushPlainText as defaultPushPlainText,
+  sendMessage as defaultSendTelegram,
+} from '../telegram/push.js';
 import {
   archiveOverlapDecision,
   computeArchiveOverlap,
@@ -123,6 +127,11 @@ export interface RunDependencies {
   /** Per-insert exclusive push to Telegram. Default reads same env
    *  and no-ops on empty. Tests stub. */
   notifyExclusive?: (input: ExclusivePushInput) => Promise<void>;
+  /** Plain-text push used by the 80% cost-alert fire path (Obs-2).
+   *  Default wraps src/telegram/push.ts:pushPlainText with the same
+   *  env-gated no-op as the other Telegram hooks. Tests inject a spy
+   *  here to assert fire/no-fire without a real round-trip. */
+  notifyCostAlert?: CostAlertPusher;
 }
 
 export interface RunResult {
@@ -169,6 +178,7 @@ export async function runScoring(
   const regenerateFeeds = deps.regenerateFeeds ?? defaultRegenerateFeeds;
   const notifyDigest = deps.notifyDigest ?? defaultNotifyDigest;
   const notifyExclusive = deps.notifyExclusive ?? defaultNotifyExclusive;
+  const notifyCostAlert = deps.notifyCostAlert ?? defaultNotifyCostAlert;
   const topN = opts.topN ?? 200;
 
   const runId = opts.runId ?? uuidv7();
@@ -246,6 +256,12 @@ export async function runScoring(
         }
         throw err;
       }
+      // Obs-2 — fire the 80% cost alert on the *non-throwing* path so it
+      // lands once we've crossed but before the next Gemini call. Wrapped
+      // in safeMaybeFireCostAlert so an alert-path failure can never
+      // surface to runs.error (push errors are already surfaced by
+      // alert.ts internally).
+      await safeMaybeFireCostAlert(db, notifyCostAlert);
 
       const summariseItems = await loadClusterItems(db, cluster.id);
       if (summariseItems.length === 0) continue;
@@ -292,6 +308,8 @@ export async function runScoring(
         }
         throw err;
       }
+      // Obs-2 — see note above the Stage-4 assertWithinCeiling block.
+      await safeMaybeFireCostAlert(db, notifyCostAlert);
 
       const curation = await curate({
         headline: summary.output.headline,
@@ -431,6 +449,30 @@ async function defaultNotifyExclusive(input: ExclusivePushInput): Promise<void> 
   const result = await defaultSendTelegram({ text });
   if (!result.ok) {
     throw new Error(result.description ?? 'unknown sendMessage error');
+  }
+}
+
+/** Default cost-alert pusher. Same env-gate as digest/exclusive — when
+ *  Telegram isn't configured, swallow silently so dev environments
+ *  don't trip on missing credentials. Throws on Telegram-side failure
+ *  so maybeFireCostAlert can roll back the alert_state row. */
+async function defaultNotifyCostAlert(text: string): Promise<void> {
+  if (!env.telegramBotToken() || !env.telegramChatId()) return;
+  await defaultPushPlainText(text);
+}
+
+/** Cost-alert wrapper — log only, never surface to runs.error. The
+ *  push-failure rollback inside maybeFireCostAlert already handles
+ *  retry semantics; the orchestrator only cares that the scoring loop
+ *  continues. */
+async function safeMaybeFireCostAlert(
+  db: Db,
+  hook: CostAlertPusher,
+): Promise<void> {
+  try {
+    await maybeFireCostAlert(db, hook);
+  } catch (err) {
+    console.error('[orchestrator] cost-alert path failed:', err);
   }
 }
 

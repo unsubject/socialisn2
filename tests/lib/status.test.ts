@@ -1,5 +1,6 @@
 // Real-PG integration test for src/lib/status.ts. Seeds runs +
-// cost_ledger + raw_items, then asserts the buildStatus shape.
+// cost_ledger + raw_items + items + clusters, then asserts the
+// buildStatus shape.
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -59,7 +60,7 @@ describe.skipIf(!DATABASE_URL)('buildStatus (src/lib/status.ts)', () => {
 
   beforeEach(async () => {
     await client.unsafe(
-      'TRUNCATE TABLE cost_ledger, raw_items, runs CASCADE',
+      'TRUNCATE TABLE cost_ledger, items, clusters, raw_items, runs CASCADE',
     );
   });
 
@@ -106,7 +107,7 @@ describe.skipIf(!DATABASE_URL)('buildStatus (src/lib/status.ts)', () => {
   async function seedRawItem(opts: {
     processedAt?: Date | null;
     processingAttempts?: number;
-  } = {}): Promise<void> {
+  } = {}): Promise<string> {
     const id = uuidv7();
     const processedAt =
       opts.processedAt === undefined ? null : opts.processedAt?.toISOString() ?? null;
@@ -125,6 +126,41 @@ describe.skipIf(!DATABASE_URL)('buildStatus (src/lib/status.ts)', () => {
         ${opts.processingAttempts ?? 0}
       )
     `;
+    return id;
+  }
+
+  async function seedClusterWithItem(opts: {
+    status?: 'active' | 'archived' | 'merged';
+  } = {}): Promise<{ clusterId: string; rawItemId: string }> {
+    const clusterId = uuidv7();
+    const vec = `[${new Array(1536).fill(0.001).join(',')}]`;
+    await client`
+      INSERT INTO clusters (
+        id, centroid, first_seen_at, last_seen_at, item_count,
+        domains, primary_domain, status
+      ) VALUES (
+        ${clusterId}, ${vec}::vector(1536),
+        NOW(), NOW(), 1,
+        ARRAY['economy']::text[], 'economy',
+        ${opts.status ?? 'active'}
+      )
+    `;
+    const rawItemId = await seedRawItem({ processedAt: new Date() });
+    const itemVec = `[${new Array(1536).fill(0.002).join(',')}]`;
+    await client`
+      INSERT INTO items (
+        id, raw_item_id, title_original, summary_en, context_en,
+        language_original, entities, keywords, domains, primary_domain,
+        embedding, published_at, cluster_id
+      ) VALUES (
+        ${uuidv7()}, ${rawItemId}, 'orig', 'sum', 'ctx', 'en',
+        ARRAY['Ent']::text[], ARRAY['kw']::text[],
+        ARRAY['economy']::text[], 'economy',
+        ${itemVec}::vector(1536),
+        NOW(), ${clusterId}
+      )
+    `;
+    return { clusterId, rawItemId };
   }
 
   it('returns the empty-system snapshot when nothing has been seeded', async () => {
@@ -137,6 +173,13 @@ describe.skipIf(!DATABASE_URL)('buildStatus (src/lib/status.ts)', () => {
     expect(snap.cost.spent).toBe(0);
     expect(snap.cost.ceiling).toBe(1.5);
     expect(snap.cost.atAlertThreshold).toBe(false);
+    expect(snap.phase2_stats).toEqual({
+      raw_items_total: 0,
+      raw_items_processed: 0,
+      raw_items_failed_3x: 0,
+      items_total: 0,
+      clusters_active: 0,
+    });
   });
 
   it('taken_at is a fresh ISO-8601 timestamp', async () => {
@@ -207,6 +250,30 @@ describe.skipIf(!DATABASE_URL)('buildStatus (src/lib/status.ts)', () => {
     expect(snap.runs_today.failed).toBe(1);
   });
 
+  it('phase2_stats counts raw_items / items / clusters across the full pipeline', async () => {
+    // 4 raw_items distributed across the four states the field captures:
+    await seedRawItem({ processedAt: new Date(), processingAttempts: 1 });   // processed
+    await seedRawItem({ processedAt: new Date(), processingAttempts: 0 });   // processed
+    await seedRawItem({ processedAt: null, processingAttempts: 3 });         // failed_3x
+    await seedRawItem({ processedAt: null, processingAttempts: 1 });         // pending (in queue)
+
+    // 2 items + 2 clusters (1 active, 1 archived). seedClusterWithItem also
+    // inserts a fresh processed raw_item per call, so we'll have 4+2=6 raw_items_total.
+    await seedClusterWithItem({ status: 'active' });
+    await seedClusterWithItem({ status: 'archived' });
+
+    const snap = await buildStatus(db);
+    expect(snap.phase2_stats).toEqual({
+      raw_items_total: 6,
+      raw_items_processed: 4,   // 2 explicit + 2 from seedClusterWithItem
+      raw_items_failed_3x: 1,
+      items_total: 2,
+      clusters_active: 1,
+    });
+    // Sanity: pending_raw_items only sees attempts<3 and processed_at NULL
+    expect(snap.queue.pending_raw_items).toBe(1);
+  });
+
   it('result is JSON-serialisable end-to-end (ops-digest contract)', async () => {
     await seedRun({ candidatesCount: 5, totalCostUsd: '0.1234' });
     await seedSpend(0.3);
@@ -217,5 +284,7 @@ describe.skipIf(!DATABASE_URL)('buildStatus (src/lib/status.ts)', () => {
     expect(parsed.version).toBe(STATUS_SNAPSHOT_VERSION);
     expect(parsed.last_run.candidates_count).toBe(5);
     expect(parsed.queue.pending_raw_items).toBe(1);
+    expect(parsed.phase2_stats).toBeDefined();
+    expect(typeof parsed.phase2_stats.raw_items_total).toBe('number');
   });
 });

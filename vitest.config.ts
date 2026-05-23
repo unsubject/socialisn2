@@ -5,5 +5,10 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     fileParallelism: false,
+    // Shim Duplex.prototype.destroySoon → destroy so @hono/node-server's
+    // post-response 500ms forceClose timer doesn't throw a TypeError when
+    // it fires against Fastify inject's mock socket. See the helper file
+    // for the full rationale.
+    setupFiles: ['./tests/helpers/destroy-soon-shim.ts'],
   },
 });

@@ -32,7 +32,11 @@ export interface LastRun {
   error: string | null;
 }
 
-export interface Phase2Stats {
+// `type` alias (not `interface`) so it satisfies the
+// `Record<string, unknown>` constraint that drizzle's `db.execute<T>`
+// imposes — interfaces are open-ended and TypeScript refuses to widen
+// them to the index signature. Memory: drizzle_execute_type_alias.
+export type Phase2Stats = {
   /** All-time row count in raw_items. */
   raw_items_total: number;
   /** raw_items.processed_at IS NOT NULL (made it through Phase 2 — normal or dedup-hit). */
@@ -48,7 +52,7 @@ export interface Phase2Stats {
   items_total: number;
   /** clusters.status='active' — the input pool to Stage 3 heuristic ranking. */
   clusters_active: number;
-}
+};
 
 export interface StatusSnapshot {
   version: typeof STATUS_SNAPSHOT_VERSION;
@@ -89,8 +93,6 @@ type RunsTodayRow = {
 
 type PendingRow = { n: number };
 
-type Phase2StatsRow = Phase2Stats;
-
 /**
  * Assemble a status snapshot from the database. Pure read; no side effects.
  * The five sub-queries run in parallel, so round-trip ≈ slowest single hop.
@@ -129,7 +131,7 @@ export async function buildStatus(db: Db): Promise<StatusSnapshot> {
     // of-thousands row table is sub-second on the live VPS PG. If raw_items
     // grows past ~1M, revisit with pg_class.reltuples or a maintained
     // counter table.
-    db.execute<Phase2StatsRow>(sql`
+    db.execute<Phase2Stats>(sql`
       SELECT
         (SELECT COUNT(*)::int FROM raw_items) AS raw_items_total,
         (SELECT COUNT(*)::int FROM raw_items WHERE processed_at IS NOT NULL) AS raw_items_processed,

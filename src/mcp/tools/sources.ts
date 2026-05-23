@@ -102,16 +102,23 @@ export async function addInfluencer(
   // raw_items (PG raises "no unique or exclusion constraint matching
   // the ON CONFLICT specification" on every call). Duplicate URLs CAN
   // land; operator dedupes via SQL if it happens.
+  // ADR-013: authority_score_seed is NOT NULL after migration 015. On
+  // initial insert it equals authority_score — the seed IS the operator's
+  // hand-curated starting weight, by definition. The recalibrate cron is
+  // the only path that ever changes authority_score after this point;
+  // authority_score_seed is intentionally never written by add_influencer.
   const rows = await db.execute<{ id: string }>(sql`
     INSERT INTO sources (
       id, kind, url, name, language, domains,
-      authority_score, fetch_interval_min, enabled
+      authority_score, authority_score_seed,
+      fetch_interval_min, enabled
     ) VALUES (
       ${id}, 'rss', ${parsed.toString()}, ${name}, 'en',
       ${sql`ARRAY[${sql.join(
         domains.map((d) => sql`${d}`),
         sql`, `,
       )}]::text[]`},
+      ${INFLUENCER_DEFAULT_AUTHORITY},
       ${INFLUENCER_DEFAULT_AUTHORITY},
       ${INFLUENCER_DEFAULT_FETCH_INTERVAL_MIN},
       true

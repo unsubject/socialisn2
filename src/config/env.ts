@@ -88,4 +88,12 @@ export const env = {
   // (SPEC §13, ADR-012). Default matches the canonical handle in
   // SPEC §13. Override for test channels or if the handle changes.
   youtubeChannelHandle: () => optional('YOUTUBE_CHANNEL_HANDLE', '@leesimon'),
+  // ADR-013: daily Bayesian recalibration of source authority. Default
+  // 04:00 UTC (between morning and afternoon scoring runs). Prior strength
+  // k controls how much accumulated feedback is needed to meaningfully
+  // move a source away from its seed authority — k=20 means ~20 picks/passes
+  // before the posterior moves materially.
+  recalibrateCron: () => optional('RECALIBRATE_CRON', '0 4 * * *'),
+  recalibratePriorStrength: () =>
+    positiveIntEnv('RECALIBRATE_PRIOR_STRENGTH', 20),
 };

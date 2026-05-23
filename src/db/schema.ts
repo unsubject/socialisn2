@@ -36,6 +36,17 @@ export const sources = pgTable('sources', {
   language: text('language'),
   domains: text('domains').array().notNull(),
   authorityScore: integer('authority_score').notNull().default(50),
+  // ADR-013: hand-curated authority at first insertion. Anchors the
+  // Beta-Bernoulli prior; survives recalibration so a long defer streak
+  // can't permanently demote a source past its seed-intended weight.
+  // Migration 015 backfilled this from authority_score for all existing
+  // rows; add_influencer (src/mcp/tools/sources.ts) sets it at insert.
+  authorityScoreSeed: integer('authority_score_seed').notNull().default(50),
+  // Stamped by the daily recalibrate cron on every successful update.
+  // NULL until the first recalibrate pass touches the row.
+  authorityScoreCalibratedAt: timestamp('authority_score_calibrated_at', {
+    withTimezone: true,
+  }),
   fetchIntervalMin: integer('fetch_interval_min').notNull().default(60),
   enabled: boolean('enabled').notNull().default(true),
   lastFetchedAt: timestamp('last_fetched_at', { withTimezone: true }),
@@ -273,7 +284,7 @@ export const gdeltCoverage = pgTable('gdelt_coverage', {
 
 export const runs = pgTable('runs', {
   id: uuid('id').primaryKey(),
-  kind: text('kind').notNull(),    // CHECK: 'morning'|'afternoon'|'manual'
+  kind: text('kind').notNull(),    // CHECK: 'morning'|'afternoon'|'manual'|'recalibrate'
   startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
   completedAt: timestamp('completed_at', { withTimezone: true }),
   status: text('status').notNull(), // CHECK: 'running'|'completed'|'failed'

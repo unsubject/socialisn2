@@ -1,13 +1,19 @@
-// Smoke-tests migrations/001_init.sql against a real Postgres (vector-enabled).
+// Smoke-tests migrations/ against a real Postgres (vector-enabled).
 // In CI the workflow's `pgvector/pgvector:pg16` service container provides this.
 // Locally: `docker compose up -d postgres` and export DATABASE_URL pointing at
 // a `*_test` database (NOT the default `socialisn2`).
 //
+// Originally scoped to 001_init only; widened in PR Obs-3 (migration 015) to
+// apply every migration in order, since later schema-only migrations
+// (notably 011 `dedup_cluster_id`, 015 `authority_score_seed`) add columns
+// that the typed schema in src/db/schema.ts references — so `db.insert(...)`
+// no longer matches 001-only DDL.
+//
 // The destructive-DB guard lives in tests/helpers/destructive-guard.ts and is
 // shared with seeds.test.ts.
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import process from 'node:process';
 
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -19,12 +25,8 @@ import { costLedger, sources } from '../../src/db/schema.js';
 import { assertDestructiveAllowed } from '../helpers/destructive-guard.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
-const migrationSql = readFileSync(
-  resolve(process.cwd(), 'migrations/001_init.sql'),
-  'utf-8',
-);
 
-describe.skipIf(!DATABASE_URL)('001_init schema', () => {
+describe.skipIf(!DATABASE_URL)('migrations smoke', () => {
   let client: ReturnType<typeof postgres>;
   let db: ReturnType<typeof drizzle>;
 
@@ -33,7 +35,11 @@ describe.skipIf(!DATABASE_URL)('001_init schema', () => {
     client = postgres(DATABASE_URL!);
     // Idempotent reset — lets the test rerun cleanly on the same CI service.
     await client.unsafe('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;');
-    await client.unsafe(migrationSql);
+    const dir = resolve(process.cwd(), 'migrations');
+    const files = readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+    for (const file of files) {
+      await client.unsafe(readFileSync(join(dir, file), 'utf-8'));
+    }
     db = drizzle(client);
   });
 

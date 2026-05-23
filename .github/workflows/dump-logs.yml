@@ -1,0 +1,92 @@
+name: dump-logs
+
+# Generic on-demand log dumper for the socialisn2 VPS stack. Runs on
+# the self-hosted runner which has docker access to all VPS containers.
+# Surfaces output to the job summary so the operator (or me, via
+# `gh run view --log`) can read it without an SSH session.
+#
+# Output is INSIDE the workflow log + job summary, both gated by repo
+# read access. The repo is private — logs may include URLs, titles,
+# normalize prompts, and error messages; do not widen visibility.
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'docker-compose service name (e.g. scoring-worker, ingestion-worker, app, nginx, postgres)'
+        required: true
+        type: string
+      tail:
+        description: 'lines to tail (default 200)'
+        required: false
+        default: '200'
+        type: string
+      grep_pattern:
+        description: 'optional grep -E pattern to filter (e.g. "raw_item.*failed")'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  # Multiple dumps in flight are harmless; let them run in parallel.
+  group: dump-logs-${{ github.event.inputs.service }}-${{ github.event.inputs.grep_pattern }}
+  cancel-in-progress: false
+
+jobs:
+  dump:
+    runs-on: self-hosted
+    steps:
+      - name: Dump container logs
+        run: |
+          set -euo pipefail
+
+          SERVICE='${{ github.event.inputs.service }}'
+          TAIL='${{ github.event.inputs.tail }}'
+          PATTERN='${{ github.event.inputs.grep_pattern }}'
+
+          cd /opt/socialisn2
+
+          # Validate service exists before dumping (clearer error than
+          # docker compose's own "no such service" output).
+          if ! docker compose config --services | grep -qx "$SERVICE"; then
+            echo "::error::Service '$SERVICE' not in docker-compose.yml. Known services:"
+            docker compose config --services
+            exit 1
+          fi
+
+          # Capture raw logs first (so we can echo + write summary).
+          LOG_FILE=$(mktemp)
+          docker compose logs --tail="$TAIL" --no-color --timestamps "$SERVICE" > "$LOG_FILE" 2>&1
+
+          if [ -n "$PATTERN" ]; then
+            FILTERED=$(mktemp)
+            grep -E "$PATTERN" "$LOG_FILE" > "$FILTERED" || true
+            DISPLAY="$FILTERED"
+            FILTER_LINE="**Filter:** \`grep -E '$PATTERN'\`"
+          else
+            DISPLAY="$LOG_FILE"
+            FILTER_LINE="**Filter:** none"
+          fi
+
+          LINES=$(wc -l < "$DISPLAY" | tr -d ' ')
+          echo "$LINES lines matching for $SERVICE"
+
+          {
+            echo "## dump-logs"
+            echo ""
+            echo "- **service:** \`$SERVICE\`"
+            echo "- **tail:** \`$TAIL\`"
+            echo "- $FILTER_LINE"
+            echo "- **lines shown:** $LINES"
+            echo ""
+            echo '```'
+            cat "$DISPLAY"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Also dump to the workflow's stdout so `gh run view --log`
+          # surfaces it (the job summary is structured, but stdout is
+          # what gh's log streamer flushes).
+          echo "::group::$SERVICE logs ($LINES lines, filter='$PATTERN')"
+          cat "$DISPLAY"
+          echo "::endgroup::"

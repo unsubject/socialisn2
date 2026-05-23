@@ -96,4 +96,12 @@ export const env = {
   recalibrateCron: () => optional('RECALIBRATE_CRON', '0 4 * * *'),
   recalibratePriorStrength: () =>
     positiveIntEnv('RECALIBRATE_PRIOR_STRENGTH', 20),
+  // Twice-daily orchestrator cron (Build task U0xDaFVlYkpZVW02aEcwdg,
+  // SPEC §9). Defaults match the spec: 05:00 ET morning, 14:00 ET
+  // afternoon. Timezone is pinned via the cron-registration options so
+  // the schedule is independent of host TZ. Override via env to test
+  // (e.g. set both to '* * * * *' against a stub runScoring in dev).
+  orchestratorMorningCron: () => optional('ORCHESTRATOR_MORNING_CRON', '0 5 * * *'),
+  orchestratorAfternoonCron: () => optional('ORCHESTRATOR_AFTERNOON_CRON', '0 14 * * *'),
+  orchestratorTimezone: () => optional('ORCHESTRATOR_TIMEZONE', 'America/New_York'),
 };

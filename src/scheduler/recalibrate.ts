@@ -245,7 +245,6 @@ export function startRecalibrationCron(db: Db): RecalibrationCronHandle {
       });
     },
     {
-      scheduled: true,
       timezone: 'UTC',
     },
   );

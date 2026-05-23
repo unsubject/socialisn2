@@ -18,6 +18,7 @@ import type { ScheduledTask } from 'node-cron';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Db } from '../../src/db/client.js';
+import type { Logger } from '../../src/lib/logger.js';
 import type { RunOptions, RunResult } from '../../src/orchestrator/run.js';
 import {
   startOrchestratorCron,
@@ -34,21 +35,22 @@ function fakeTask(): FakeTask {
 
 /** Silent logger that records error/info calls for the swallow assertion.
  *  Implements just enough of Logger to satisfy the dep contract. */
-function makeLogger(): {
+type LoggerWithMocks = Logger & {
   info: ReturnType<typeof vi.fn>;
   error: ReturnType<typeof vi.fn>;
   warn: ReturnType<typeof vi.fn>;
   debug: ReturnType<typeof vi.fn>;
-  child: () => ReturnType<typeof makeLogger>;
-} {
+};
+
+function makeLogger(): LoggerWithMocks {
   const log = {
     info: vi.fn(),
     error: vi.fn(),
     warn: vi.fn(),
     debug: vi.fn(),
-    child: (): ReturnType<typeof makeLogger> => log,
+    child: (): LoggerWithMocks => log as unknown as LoggerWithMocks,
   };
-  return log;
+  return log as unknown as LoggerWithMocks;
 }
 
 /** Build a successful RunResult — runScoring's full return shape, all
@@ -98,8 +100,8 @@ describe('startOrchestratorCron', () => {
 
     // CRITICAL: both schedules must be pinned to America/New_York so the
     // morning/afternoon fire times don't drift if the host TZ changes.
-    expect(firstCall[2]).toMatchObject({ scheduled: true, timezone: 'America/New_York' });
-    expect(secondCall[2]).toMatchObject({ scheduled: true, timezone: 'America/New_York' });
+    expect(firstCall[2]).toMatchObject({ timezone: 'America/New_York' });
+    expect(secondCall[2]).toMatchObject({ timezone: 'America/New_York' });
 
     expect(handle.morning).toBe(morning as unknown as ScheduledTask);
     expect(handle.afternoon).toBe(afternoon as unknown as ScheduledTask);

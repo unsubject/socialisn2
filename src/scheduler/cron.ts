@@ -79,7 +79,7 @@ export function startScheduler(
         console.error('[scheduler] tick failed', err);
       });
     },
-    { scheduled: true },
+    {},
   );
 
   return {

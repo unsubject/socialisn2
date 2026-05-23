@@ -104,7 +104,6 @@ export function startOrchestratorCron(
           });
       },
       {
-        scheduled: true,
         timezone,
       },
     );

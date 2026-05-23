@@ -10,7 +10,10 @@
 
 import { Queue, type ConnectionOptions } from 'bullmq';
 
-export const INGESTION_QUEUE = 'socialisn2:ingestion';
+// BullMQ 5.x rejects queue names containing `:` (reserved for the Redis
+// key-prefix separator that BullMQ generates internally as `bull:<name>:*`).
+// Earlier versions silently accepted colons. Keep this name `:`-free.
+export const INGESTION_QUEUE = 'socialisn2-ingestion';
 
 export type IngestionJobData =
   | { target: 'source'; sourceId: string; kind: 'rss' | 'arxiv' | 'email_bridge' }

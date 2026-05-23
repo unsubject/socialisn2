@@ -31,6 +31,7 @@ import {
   type IngestionJobData,
 } from '../queue/ingestion-queue.js';
 import { startScheduler } from '../scheduler/cron.js';
+import { startOrchestratorCron } from '../scheduler/orchestrator-cron.js';
 import { startRecalibrationCron } from '../scheduler/recalibrate.js';
 
 type SourceJob = Extract<IngestionJobData, { target: 'source' }>;
@@ -177,11 +178,18 @@ async function main(): Promise<void> {
   // owns the compaction cron — keeping recalibration here colocates it
   // with the schedule-only side, not the compute-heavy side.
   const recalibrationCron = startRecalibrationCron(db);
+  // SPEC §9: twice-daily morning (05:00 ET) + afternoon (14:00 ET)
+  // orchestrator runs. Same rationale for colocation — shares the DB
+  // handle and the cron-host process with the schedulers above. The
+  // run itself dispatches to the scoring stack (Stages 3-7); this layer
+  // only handles the schedule.
+  const orchestratorCron = startOrchestratorCron(db);
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[ingestion-worker] ${signal} received; shutting down`);
     scheduler.stop();
     recalibrationCron.stop();
+    orchestratorCron.stop();
     await worker.close();
     await queue.close();
     await connection.quit();

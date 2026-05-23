@@ -85,16 +85,24 @@ jobs:
           # commit without opening the GH UI for the runner.
           git --no-pager log -1 --oneline
 
-      - name: Build app image
-        # `app` (and the ingestion/scoring/whisper workers that share
-        # `build: .`) has no `image:` directive, so it's built locally
-        # from the Dockerfile. Rebuild on every deploy so new code in
-        # main actually ships. Layer cache makes this cheap when only
-        # src/ changed; ~20-40s on a full cache invalidation.
+      - name: Build all service images
+        # `app` + `ingestion-worker` + `scoring-worker` + `whisper-worker`
+        # all have `build: .` in docker-compose.yml — each gets its own
+        # image tag (socialisn2-app, socialisn2-ingestion-worker, etc.)
+        # because compose builds per-service when no `image:` is set.
+        #
+        # `docker compose build` (no service arg) rebuilds ALL services
+        # with a `build:` directive. Layer cache shares the deps +
+        # npm-ci layers across them, so the cost is one extra build per
+        # worker (~5-15s each, cache warm). Required because targeting
+        # only `app` leaves the worker images on whatever bytes were
+        # last built (possibly months old on workers-only code changes)
+        # — see the regression PR #84 was supposed to fix but didn't,
+        # because the worker image wasn't rebuilt with the new src.
         run: |
           set -euo pipefail
           cd /opt/socialisn2
-          docker compose build app
+          docker compose build
 
       - name: Bring up dependencies + preflight + apply Postgres migrations
         # Migrations run BEFORE the app/workers come up so a deploy that
@@ -126,9 +134,11 @@ jobs:
           docker compose run --rm --no-deps app node dist/scripts/migrate.js
 
       - name: Bring up app + workers + nginx
-        # `up -d` is idempotent — only services whose config/images
-        # changed get recreated. The full stack including the new
-        # nginx service comes up after migrations are confirmed.
+        # `up -d` is idempotent — services whose image SHA or config
+        # changed get recreated. After the build-all step above, the
+        # worker images carry the new SHA when src/workers/* or
+        # src/queue/* changed, so the workers recreate cleanly with
+        # the new bytes.
         run: |
           set -euo pipefail
           cd /opt/socialisn2

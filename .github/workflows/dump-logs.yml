@@ -46,15 +46,13 @@ jobs:
 
           cd /opt/socialisn2
 
-          # Validate service exists before dumping (clearer error than
-          # docker compose's own "no such service" output).
-          if ! docker compose config --services | grep -qx "$SERVICE"; then
-            echo "::error::Service '$SERVICE' not in docker-compose.yml. Known services:"
-            docker compose config --services
-            exit 1
-          fi
-
-          # Capture raw logs first (so we can echo + write summary).
+          # Capture raw logs. If the service name is wrong, docker compose
+          # will emit "no such service" to stderr and exit non-zero, which
+          # set -euo pipefail surfaces as a red workflow run with a clear
+          # error in the log. (An earlier `grep -qx` validation step had a
+          # phantom-mismatch bug — likely invisible-char issue with the
+          # GH Actions env-expansion path; dropped in favor of letting
+          # docker compose's own check do the validation.)
           LOG_FILE=$(mktemp)
           docker compose logs --tail="$TAIL" --no-color --timestamps "$SERVICE" > "$LOG_FILE" 2>&1
 

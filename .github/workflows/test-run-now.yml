@@ -1,0 +1,113 @@
+name: test-run-now
+
+# Manual one-shot. Fires the MCP `run_now` tool via the self-hosted
+# runner (which has /opt/socialisn2/.env access) and polls /status
+# until the run completes. Useful for verifying the Stage 0-7
+# orchestrator works end-to-end without SSH'ing into the VPS or
+# carrying the SOCIALISN2_MCP_TOKEN bearer outside the VPS.
+#
+# Read the result via the job summary or `gh run view --log`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: 'runs.kind value to write (manual | morning | afternoon | recalibrate)'
+        required: false
+        default: 'manual'
+        type: string
+
+concurrency:
+  # Two manual runs racing on the orchestrator would be confusing
+  # (the second's last_run snapshot would overwrite the first).
+  group: test-run-now
+  cancel-in-progress: false
+
+jobs:
+  fire:
+    runs-on: self-hosted
+    steps:
+      - name: Fire MCP run_now + poll until terminal
+        run: |
+          set -euo pipefail
+
+          # ---- extract bearer (never echoed) -----------------------
+          BEARER=$(grep '^SOCIALISN2_MCP_TOKEN=' /opt/socialisn2/.env | cut -d= -f2-)
+          if [ -z "$BEARER" ]; then
+            echo "::error::SOCIALISN2_MCP_TOKEN missing or empty in /opt/socialisn2/.env"
+            exit 1
+          fi
+
+          KIND='${{ github.event.inputs.kind }}'
+          echo "Triggering run_now with kind=$KIND"
+
+          # ---- fire run_now ----------------------------------------
+          RESP=$(curl -sS -X POST https://mcp.socialisn.com/mcp \
+            -H "Authorization: Bearer $BEARER" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_now\",\"arguments\":{\"kind\":\"$KIND\"}}}")
+
+          echo "MCP response (raw):"
+          echo "$RESP"
+
+          # ---- parse run_id ---------------------------------------
+          # Response is an SSE-framed text/event-stream body OR plain JSON
+          # depending on transport. Either way, the inner JSON-RPC result
+          # carries a content[0].text whose value is JSON containing run_id.
+          RUN_ID=$(echo "$RESP" | grep -oE '"run_id\\":\\"[^"\\]+' | head -1 | sed -E 's/.*:\\?"//; s/\\?"$//' || true)
+          if [ -z "$RUN_ID" ]; then
+            # Fallback: try unescaped form (plain JSON response, not SSE)
+            RUN_ID=$(echo "$RESP" | grep -oE '"run_id":"[^"]+' | head -1 | cut -d'"' -f4 || true)
+          fi
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::Could not parse run_id from MCP response"
+            echo "::group::Raw MCP response"
+            echo "$RESP"
+            echo "::endgroup::"
+            exit 1
+          fi
+          echo "run_id=$RUN_ID"
+
+          # ---- poll /status (5s x 60 = 5min cap) -------------------
+          FINAL=""
+          for i in $(seq 1 60); do
+            sleep 5
+            BODY=$(curl -sS https://mcp.socialisn.com/status)
+            ID=$(echo "$BODY" | jq -r '.last_run.id // ""')
+            ST=$(echo "$BODY" | jq -r '.last_run.status // ""')
+            if [ "$ID" = "$RUN_ID" ] && { [ "$ST" = "completed" ] || [ "$ST" = "failed" ]; }; then
+              echo "Run $RUN_ID terminal: $ST"
+              FINAL="$BODY"
+              break
+            fi
+          done
+
+          if [ -z "$FINAL" ]; then
+            echo "::error::Run $RUN_ID did not reach terminal state within 5 min"
+            FINAL=$(curl -sS https://mcp.socialisn.com/status)
+            echo "$FINAL" | jq .
+            FAILED=1
+          else
+            FAILED=0
+          fi
+
+          # ---- job summary -----------------------------------------
+          {
+            echo "## test-run-now"
+            echo ""
+            echo "- **kind:** \`$KIND\`"
+            echo "- **run_id:** \`$RUN_ID\`"
+            echo ""
+            echo "### Initial MCP response"
+            echo '```'
+            echo "$RESP"
+            echo '```'
+            echo ""
+            echo "### Final /status (run-terminal or 5-min timeout)"
+            echo '```json'
+            echo "$FINAL" | jq .
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit $FAILED

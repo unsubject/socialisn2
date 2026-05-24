@@ -1,0 +1,73 @@
+name: inspect-pg
+
+# Read-only SQL inspector for the socialisn2 VPS Postgres. Companion to
+# dump-logs.yml (container logs) and test-run-now.yml (fire run_now). Runs
+# on the self-hosted runner, which has docker access to the postgres
+# container in /opt/socialisn2.
+#
+# SAFETY: the psql session is opened with `default_transaction_read_only
+# = on`, so every auto-committed statement runs in a read-only transaction
+# — any INSERT/UPDATE/DELETE/DDL aborts with "cannot execute ... in a
+# read-only transaction". This is a diagnostic tool only.
+#
+# Output is INSIDE the workflow log + job summary, both gated by repo read
+# access. The repo is private — query results may include URLs, titles and
+# error text; do not widen visibility.
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'Read-only SQL (the session is forced read-only; writes abort)'
+        required: true
+        type: string
+      label:
+        description: 'Short label for the job summary'
+        required: false
+        default: 'query'
+        type: string
+
+concurrency:
+  group: inspect-pg
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: self-hosted
+    steps:
+      - name: Run read-only SQL
+        env:
+          # Pass inputs via env (not inline ${{ }}) so quotes/semicolons in
+          # the query can't break out of the shell command.
+          QUERY: ${{ github.event.inputs.query }}
+          LABEL: ${{ github.event.inputs.label }}
+        run: |
+          set -euo pipefail
+          cd /opt/socialisn2
+
+          QUERY_FILE=$(mktemp)
+          # Force the whole session read-only before the operator's SQL.
+          printf '%s\n' "SET default_transaction_read_only = on;" > "$QUERY_FILE"
+          printf '%s\n' "$QUERY" >> "$QUERY_FILE"
+
+          OUT=$(mktemp)
+          if ! docker compose exec -T postgres \
+                 psql -U socialisn2 -d socialisn2 -v ON_ERROR_STOP=1 -P pager=off \
+                 < "$QUERY_FILE" > "$OUT" 2>&1; then
+            {
+              echo "## inspect-pg: $LABEL (ERROR)"
+              echo '```'
+              cat "$OUT"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::group::$LABEL (error)"; cat "$OUT"; echo "::endgroup::"
+            exit 1
+          fi
+
+          {
+            echo "## inspect-pg: $LABEL"
+            echo '```'
+            cat "$OUT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::group::$LABEL"; cat "$OUT"; echo "::endgroup::"

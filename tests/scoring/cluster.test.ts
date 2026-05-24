@@ -207,6 +207,12 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
     };
   }
 
+  /** Assert a timestamp is within `toleranceMs` of wall-clock now. */
+  function expectNearNow(ts: Date, toleranceMs = 5 * 60 * 1000): void {
+    const deltaMs = Math.abs(Date.now() - ts.getTime());
+    expect(deltaMs).toBeLessThan(toleranceMs);
+  }
+
   // -------------------------------------------------------------------------
   // assignCluster
   // -------------------------------------------------------------------------
@@ -255,11 +261,14 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
 
       const c = await getCluster(first.clusterId);
       expect(c.item_count).toBe(2);
-      // last_seen_at advanced to t2 (the later publishedAt).
-      expect(c.last_seen_at.toISOString()).toBe(t2.toISOString());
+      // last_seen_at tracks observation (wall-clock) time, not publishedAt —
+      // the join advances it to NOW(), even though both items were published
+      // hours ago. (See cluster.ts: the recency window is over observation
+      // time, so this must be ~now rather than t2.)
+      expectNearNow(c.last_seen_at);
     });
 
-    it('does NOT pull last_seen_at backwards when an item arrives out-of-order', async () => {
+    it('advances last_seen_at to observation time even when an item arrives out-of-order', async () => {
       // Relative timestamps for the same reason as the previous test —
       // assignCluster's 7-day recency window is server-side NOW()-based.
       const tLater = new Date(Date.now() - 1 * 60 * 60 * 1000); // 1h ago
@@ -271,8 +280,10 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
         itemDomains: ['economy'],
         publishedAt: tLater,
       });
-      // A late-fetched second item joins with an earlier publishedAt.
-      // The GREATEST/Math.max branch must keep last_seen_at pinned at tLater.
+      // A late-fetched second item joins with an earlier publishedAt. Under
+      // the corrected semantics last_seen_at = observation time, so the join
+      // stamps it with NOW() regardless of the out-of-order publishedAt — it
+      // is NOT a function of either item's publish date.
       await assignCluster(db, {
         embedding: vB,
         primaryDomain: 'economy',
@@ -281,7 +292,51 @@ describe.skipIf(!DATABASE_URL)('clustering (SPEC §7.4)', () => {
       });
       const c = await getCluster(first.clusterId);
       expect(c.item_count).toBe(2);
-      expect(c.last_seen_at.toISOString()).toBe(tLater.toISOString());
+      expectNearNow(c.last_seen_at);
+    });
+
+    it('collapses old-publishedAt items into one cluster (born-stale regression)', async () => {
+      // Regression for the born-stale bug: clusters were stamped with the
+      // item's publishedAt as last_seen_at. Items with a publishedAt older
+      // than the 7-day recency window were therefore born outside the
+      // candidate-lookup window, so each new old-publishedAt item created
+      // its own cluster instead of joining — a near-1:1 item:cluster ratio.
+      //
+      // Drive assignCluster directly (NOT insertCluster) with several
+      // high-mutual-cosine same-domain vectors, all published ~30 days ago.
+      // Correct behaviour: they collapse into ONE cluster, item_count === N,
+      // and last_seen_at ≈ now (observation time, not the 30-day-old date).
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      // Mutually close (cosine ≳ 0.95, distance ≲ 0.05) seed vectors — well
+      // within the 0.30 join threshold of each other.
+      const vecs = [
+        mkVec([1]),
+        mkVec([0.99, Math.sqrt(1 - 0.99 * 0.99)]),
+        mkVec([0.98, Math.sqrt(1 - 0.98 * 0.98)]),
+        mkVec([0.97, Math.sqrt(1 - 0.97 * 0.97)]),
+      ];
+
+      const clusterIds = new Set<string>();
+      for (const embedding of vecs) {
+        const r = await assignCluster(db, {
+          embedding,
+          primaryDomain: 'economy',
+          itemDomains: ['economy'],
+          publishedAt: thirtyDaysAgo,
+        });
+        clusterIds.add(r.clusterId);
+      }
+
+      // All collapse into a single cluster — the first creates it, the rest
+      // join. On pre-fix code each item would be born stale and start its
+      // own cluster (clusterIds.size === N).
+      expect(clusterIds.size).toBe(1);
+
+      const onlyId = [...clusterIds][0]!;
+      const c = await getCluster(onlyId);
+      expect(c.item_count).toBe(vecs.length);
+      // last_seen_at is observation time (~now), NOT the 30-day-old publishedAt.
+      expectNearNow(c.last_seen_at);
     });
 
     it('creates a new cluster when nearest centroid is above threshold', async () => {

@@ -44,7 +44,7 @@ export interface AssignClusterInput {
   primaryDomain: string;
   /** Multi-label domain set from normalisation. Merged into cluster.domains. */
   itemDomains: string[];
-  /** The item's publication time. Used for first_seen / last_seen book-keeping. */
+  /** The item's publication time. Used for first_seen book-keeping. */
   publishedAt: Date;
 }
 
@@ -87,6 +87,13 @@ export async function assignCluster(
   // Find the closest active cluster in the same domain within the window.
   // pgvector's `<=>` is cosine distance (1 - cosine similarity). HNSW index
   // on `clusters.centroid` makes ORDER BY ... LIMIT 1 cheap.
+  //
+  // `last_seen_at` is observation (wall-clock) time — "when our system last
+  // saw an item for this cluster" — NOT the article's publish date. This
+  // filter therefore defines an *observation* recency window; seeding it
+  // from publishedAt (as an earlier version did) made backfilled / old-
+  // publishedAt items born outside the window and invisible here, which
+  // collapsed clustering to a near-1:1 item:cluster ratio.
   const found = await db.execute<{
     id: string;
     distance: number;
@@ -113,9 +120,8 @@ export async function assignCluster(
         centroid: string;
         item_count: number;
         domains: string[];
-        last_seen_at: Date | string;
       }>(sql`
-        SELECT centroid::text AS centroid, item_count, domains, last_seen_at
+        SELECT centroid::text AS centroid, item_count, domains
         FROM clusters
         WHERE id = ${match.id}
         FOR UPDATE
@@ -134,19 +140,19 @@ export async function assignCluster(
       );
       const newCentroidLit = toPgvectorLiteral(newCentroid);
       const mergedDomains = sortedUnique([...row.domains, ...input.itemDomains]);
-      // GREATEST defends against out-of-order arrivals — a late-fetched
-      // item published before the cluster's current last_seen_at must not
-      // pull the marker backwards. `new Date(...)` because drizzle's raw
-      // `execute<T>` returns timestamptz as an ISO string, not a Date.
-      const newLastSeenIso = new Date(
-        Math.max(new Date(row.last_seen_at).getTime(), input.publishedAt.getTime()),
-      ).toISOString();
 
+      // Advance `last_seen_at` to observation (wall-clock) time, NOT the
+      // item's publishedAt. The candidate-lookup recency filter is over
+      // observation time, so each observed item — even a late-fetched one
+      // with an older publishedAt — must keep the cluster inside the window.
+      // (The previous GREATEST(existing, publishedAt) logic tracked publish
+      // time, which let old-publishedAt seeds fall out of the window and
+      // defeated multi-outlet clustering.)
       await tx.execute(sql`
         UPDATE clusters
         SET centroid = ${newCentroidLit}::vector(${sql.raw(String(EMBEDDING_DIM))}),
             item_count = item_count + 1,
-            last_seen_at = ${newLastSeenIso}::timestamptz,
+            last_seen_at = NOW(),
             domains = ${textArrayLiteral(mergedDomains)}
         WHERE id = ${match.id}
       `);
@@ -157,6 +163,10 @@ export async function assignCluster(
 
   // No match — create a new cluster with this item as the seed. domains is
   // pre-sorted+deduped for the same reason as the merge path above.
+  // `first_seen_at` keeps the item's publishedAt (editorial "story first
+  // appeared" semantics), but `last_seen_at` is stamped with NOW() — it is
+  // observation time and gates the recency window for future candidate
+  // lookups (see the SELECT comment above).
   const newId = uuidv7();
   const seedDomains = sortedUnique(input.itemDomains);
   const publishedIso = input.publishedAt.toISOString();
@@ -166,7 +176,7 @@ export async function assignCluster(
       ${newId},
       ${vecLit}::vector(${sql.raw(String(EMBEDDING_DIM))}),
       ${publishedIso}::timestamptz,
-      ${publishedIso}::timestamptz,
+      NOW(),
       1,
       ${textArrayLiteral(seedDomains)},
       ${input.primaryDomain},
@@ -333,7 +343,11 @@ export async function compactClusters(
       const mergedLit = toPgvectorLiteral(merged);
 
       // `new Date(...)` because drizzle's raw `execute<T>` returns
-      // timestamptz as an ISO string, not a Date.
+      // timestamptz as an ISO string, not a Date. Compaction merges two
+      // clusters' *existing* book-keeping: keep the earliest first_seen_at
+      // (oldest story origin) and the latest last_seen_at (most recent
+      // observation). Both sides already carry observation-time last_seen_at,
+      // so GREATEST over them is correct here.
       const newFirstSeen = new Date(
         Math.min(
           new Date(lockedTarget.first_seen_at).getTime(),

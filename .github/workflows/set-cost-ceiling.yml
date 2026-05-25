@@ -1,0 +1,75 @@
+name: set-cost-ceiling
+
+# Scoped config-mutation ops workflow. Sets ONLY the daily LLM cost ceiling
+# (COST_CEILING_DAILY_USD) in /opt/socialisn2/.env on the VPS and recreates
+# the two containers that read it at call time (app hosts the run_now MCP
+# tool; ingestion-worker hosts the orchestrator cron). assertWithinCeiling
+# (src/cost/ceiling.ts) reads env.costCeilingDailyUsd() per call, and env is
+# fixed at container start from env_file: .env — so a value change needs a
+# --force-recreate, not a restart.
+#
+# Deliberately NOT a generic .env editor: it touches a single, non-secret
+# numeric key. Restore the default by dispatching again with ceiling_usd=1.50.
+#
+# Companion to dump-logs.yml (read logs), inspect-pg.yml (read SQL),
+# test-run-now.yml (fire run_now).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ceiling_usd:
+        description: 'New COST_CEILING_DAILY_USD (e.g. 3.00). Use 1.50 to restore the default.'
+        required: true
+        type: string
+
+concurrency:
+  group: set-cost-ceiling
+  cancel-in-progress: false
+
+jobs:
+  set:
+    runs-on: self-hosted
+    steps:
+      - name: Set COST_CEILING_DAILY_USD + recreate orchestrator containers
+        env:
+          # Pass via env (not inline ${{ }}) so the value can't break the shell.
+          CEILING: ${{ github.event.inputs.ceiling_usd }}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "$CEILING" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
+            echo "::error::ceiling_usd must be a non-negative number (got '$CEILING')"
+            exit 1
+          fi
+
+          cd /opt/socialisn2
+          touch .env
+
+          if grep -q '^COST_CEILING_DAILY_USD=' .env; then
+            sed -i.bak "s|^COST_CEILING_DAILY_USD=.*|COST_CEILING_DAILY_USD=$CEILING|" .env
+          else
+            printf '\nCOST_CEILING_DAILY_USD=%s\n' "$CEILING" >> .env
+          fi
+          rm -f .env.bak
+
+          # Recreate only the processes that read the ceiling. postgres/redis/
+          # litellm are left untouched.
+          docker compose up -d --force-recreate --no-deps app ingestion-worker
+
+          # Read the effective value back from the running app container. This
+          # is a non-secret integer/decimal — safe to surface.
+          sleep 3
+          EFFECTIVE=$(docker compose exec -T app printenv COST_CEILING_DAILY_USD 2>/dev/null || echo "(unset)")
+
+          {
+            echo "## set-cost-ceiling"
+            echo ""
+            echo "- **requested:** \`$CEILING\`"
+            echo "- **effective in app container:** \`$EFFECTIVE\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "effective COST_CEILING_DAILY_USD=$EFFECTIVE"
+
+          if [ "$EFFECTIVE" != "$CEILING" ]; then
+            echo "::error::effective value '$EFFECTIVE' does not match requested '$CEILING' — container may not have picked up .env"
+            exit 1
+          fi

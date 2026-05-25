@@ -89,6 +89,47 @@ describe('archiveSearch', () => {
     expect(fakeFetch).toHaveBeenCalledTimes(1);
   });
 
+  it('unwraps the real 2nd-brain {count, hits:[...]} object to a bare array', async () => {
+    // REGRESSION GUARD: 2nd-brain's archive_search returns an OBJECT, not a
+    // bare array. The buggy code returned the wrapper object as if it were
+    // an ArchiveMatch[]; downstream summariseMatches did `[...matches]` and
+    // threw "matches is not iterable" (prod run 019e5ced, Stage 5). The
+    // inner JSON below is deliberately the wrapper object — if this stub
+    // were `mcpResult(matches)` (bare array) it would pass against the buggy
+    // code too and prove nothing. `url: null` mirrors essays without a URL.
+    const matches: ArchiveMatch[] = [
+      {
+        id: 'e1',
+        title: 'Prior essay',
+        url: 'https://example.com/e1',
+        published_at: '2026-04-01T00:00:00Z',
+        similarity: 0.87,
+        type: 'essay',
+      },
+      {
+        id: 'ep2',
+        title: 'Episode without a public URL',
+        url: null,
+        published_at: '2026-03-15T00:00:00Z',
+        similarity: 0.71,
+        type: 'episode',
+      },
+    ];
+    const envelope = { count: 2, hits: matches };
+    const fakeFetch = vi.fn(async () =>
+      stubResponse(mcpResult(envelope)),
+    ) as unknown as typeof fetch;
+
+    const result = await archiveSearch(makeEmbedding(), 2, { fetchFn: fakeFetch });
+
+    // Must be the bare hits array, NOT the wrapper object.
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toEqual(matches);
+    expect(result).toHaveLength(2);
+    // The wrapper's own keys must not leak through.
+    expect((result as unknown as { count?: number }).count).toBeUndefined();
+  });
+
   it('parses MCP responses sent as text/event-stream', async () => {
     const matches: ArchiveMatch[] = [
       {
@@ -244,6 +285,17 @@ describe('archiveSearch', () => {
         id: 1,
         result: { content: [] },
       })) as unknown as typeof fetch;
+
+    const result = await archiveSearch(makeEmbedding(), 5, { fetchFn: fakeFetch });
+
+    expect(result).toEqual([]);
+  });
+
+  it('degrades to [] when the parsed payload is neither an array nor a {hits} object', async () => {
+    // Graceful by construction: an unrecognised shape must degrade to []
+    // rather than leaking a non-iterable downstream (the original crash).
+    const fakeFetch = (async (): Promise<Response> =>
+      stubResponse(mcpResult({ unexpected: 'shape' }))) as unknown as typeof fetch;
 
     const result = await archiveSearch(makeEmbedding(), 5, { fetchFn: fakeFetch });
 

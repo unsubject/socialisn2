@@ -71,6 +71,18 @@ describe('summariseMatches', () => {
     expect(result.overlap).toBe(0.7);
     expect(result.links).toHaveLength(1);
   });
+
+  it("coerces a null match url to '' (essays without a public URL)", () => {
+    // ArchiveMatch.url is nullable on the wire; ArchiveOverlapLink.url must
+    // stay a string so a null never reaches Telegram digest formatting.
+    const result = summariseMatches([
+      mkMatch({ id: 'noUrl', similarity: 0.8, url: null }),
+    ]);
+    expect(result.links).toHaveLength(1);
+    expect(result.links[0]?.url).toBe('');
+    // The coercion must not affect the rest of the link.
+    expect(result.links[0]).toMatchObject({ id: 'noUrl', similarity: 0.8 });
+  });
 });
 
 describe('archiveOverlapDecision', () => {

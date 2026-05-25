@@ -11,6 +11,7 @@ import {
   DROP_THRESHOLD,
   FLAG_THRESHOLD,
   summariseMatches,
+  type ArchiveOverlapLink,
   type ArchiveOverlapResult,
 } from '../../src/scoring/archive.js';
 import { EMBEDDING_DIM } from '../../src/db/schema.js';
@@ -25,6 +26,23 @@ function mkMatch(overrides: Partial<ArchiveMatch>): ArchiveMatch {
     similarity: 0.5,
     type: 'essay',
     ...overrides,
+  };
+}
+
+// ArchiveOverlapLink.url is a plain string (summariseMatches coerces the
+// nullable ArchiveMatch.url to ''). Build decision-test fixtures through
+// this helper so they carry the same coercion the production path does,
+// rather than spreading an ArchiveMatch (whose url is string | null) into
+// an ArchiveOverlapLink-typed array.
+function mkLink(overrides: Partial<ArchiveMatch>): ArchiveOverlapLink {
+  const m = mkMatch(overrides);
+  return {
+    id: m.id,
+    title: m.title,
+    url: m.url ?? '',
+    published_at: m.published_at,
+    similarity: m.similarity,
+    type: m.type,
   };
 }
 
@@ -71,6 +89,18 @@ describe('summariseMatches', () => {
     expect(result.overlap).toBe(0.7);
     expect(result.links).toHaveLength(1);
   });
+
+  it("coerces a null match url to '' (essays without a public URL)", () => {
+    // ArchiveMatch.url is nullable on the wire; ArchiveOverlapLink.url must
+    // stay a string so a null never reaches Telegram digest formatting.
+    const result = summariseMatches([
+      mkMatch({ id: 'noUrl', similarity: 0.8, url: null }),
+    ]);
+    expect(result.links).toHaveLength(1);
+    expect(result.links[0]?.url).toBe('');
+    // The coercion must not affect the rest of the link.
+    expect(result.links[0]).toMatchObject({ id: 'noUrl', similarity: 0.8 });
+  });
 });
 
 describe('archiveOverlapDecision', () => {
@@ -88,7 +118,7 @@ describe('archiveOverlapDecision', () => {
     const recentIso = new Date(now.getTime() - 30 * 86_400_000).toISOString();
     const r: ArchiveOverlapResult = {
       overlap: 0.9,
-      links: [{ ...mkMatch({ similarity: 0.9, published_at: recentIso }) }],
+      links: [mkLink({ similarity: 0.9, published_at: recentIso })],
     };
     const d = archiveOverlapDecision(r, now);
     expect(d.drop).toBe(true);
@@ -99,7 +129,7 @@ describe('archiveOverlapDecision', () => {
     const staleIso = new Date(now.getTime() - 120 * 86_400_000).toISOString();
     const r: ArchiveOverlapResult = {
       overlap: 0.9,
-      links: [{ ...mkMatch({ similarity: 0.9, published_at: staleIso }) }],
+      links: [mkLink({ similarity: 0.9, published_at: staleIso })],
     };
     const d = archiveOverlapDecision(r, now);
     expect(d.drop).toBe(false);
@@ -112,7 +142,7 @@ describe('archiveOverlapDecision', () => {
     const recentIso = new Date(now.getTime() - 7 * 86_400_000).toISOString();
     const r: ArchiveOverlapResult = {
       overlap: 0.8,
-      links: [{ ...mkMatch({ similarity: 0.8, published_at: recentIso }) }],
+      links: [mkLink({ similarity: 0.8, published_at: recentIso })],
     };
     const d = archiveOverlapDecision(r, now);
     expect(d.drop).toBe(false);
@@ -123,9 +153,7 @@ describe('archiveOverlapDecision', () => {
     const recentIso = new Date(now.getTime() - 7 * 86_400_000).toISOString();
     const r: ArchiveOverlapResult = {
       overlap: DROP_THRESHOLD, // 0.85 exactly
-      links: [
-        { ...mkMatch({ similarity: DROP_THRESHOLD, published_at: recentIso }) },
-      ],
+      links: [mkLink({ similarity: DROP_THRESHOLD, published_at: recentIso })],
     };
     const d = archiveOverlapDecision(r, now);
     expect(d.drop).toBe(false);
@@ -138,9 +166,7 @@ describe('archiveOverlapDecision', () => {
     const recentIso = new Date(now.getTime() - 7 * 86_400_000).toISOString();
     const r: ArchiveOverlapResult = {
       overlap: FLAG_THRESHOLD,
-      links: [
-        { ...mkMatch({ similarity: FLAG_THRESHOLD, published_at: recentIso }) },
-      ],
+      links: [mkLink({ similarity: FLAG_THRESHOLD, published_at: recentIso })],
     };
     const d = archiveOverlapDecision(r, now);
     expect(d.drop).toBe(false);
@@ -151,7 +177,7 @@ describe('archiveOverlapDecision', () => {
     const recentIso = new Date(now.getTime() - 7 * 86_400_000).toISOString();
     const r: ArchiveOverlapResult = {
       overlap: 0.5,
-      links: [{ ...mkMatch({ similarity: 0.5, published_at: recentIso }) }],
+      links: [mkLink({ similarity: 0.5, published_at: recentIso })],
     };
     const d = archiveOverlapDecision(r, now);
     expect(d.drop).toBe(false);

@@ -37,6 +37,9 @@ export const RECENT_WINDOW_DAYS = 90;
 export interface ArchiveOverlapLink {
   id: string;
   title: string;
+  // Always a string here even though the upstream ArchiveMatch.url is
+  // nullable — summariseMatches coerces null -> '' so downstream
+  // consumers (Telegram digest formatting) never see a null url.
   url: string;
   published_at: string;
   similarity: number;
@@ -102,7 +105,10 @@ export function summariseMatches(matches: ArchiveMatch[]): ArchiveOverlapResult 
   const links = sorted.slice(0, LINKS_KEPT).map((m) => ({
     id: m.id,
     title: m.title,
-    url: m.url,
+    // ArchiveMatch.url is nullable (essays without a public URL). Coerce
+    // to '' so ArchiveOverlapLink.url stays a plain string and a null
+    // never reaches Telegram digest formatting.
+    url: m.url ?? '',
     published_at: m.published_at,
     similarity: m.similarity,
     type: m.type,

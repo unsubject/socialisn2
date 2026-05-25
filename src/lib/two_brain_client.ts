@@ -54,10 +54,42 @@ function isPermanentHttpStatus(status: number): boolean {
 export interface ArchiveMatch {
   id: string;
   title: string;
-  url: string;
+  // 2nd-brain returns `null` for archive entries without a public URL
+  // (e.g. essays not yet published to the web). Modelled as nullable so
+  // the wire shape is honest; callers that need a string coerce at the
+  // boundary (see src/scoring/archive.ts summariseMatches).
+  url: string | null;
   published_at: string;
   similarity: number;
   type: 'essay' | 'episode';
+}
+
+/**
+ * Live wire shape of 2nd-brain's `archive_search` tool result. The tool
+ * returns an OBJECT `{ count, hits: [...] }`, NOT a bare array — the
+ * `hits` array is what callers want. Modelled loosely so we can also
+ * tolerate a bare-array response (older/forward-compat servers) without
+ * the unwrap throwing. See `unwrapArchiveHits`.
+ */
+interface ArchiveSearchEnvelope {
+  count?: number;
+  hits?: ArchiveMatch[];
+}
+
+/**
+ * Normalise an `archive_search` tool result into a bare `ArchiveMatch[]`.
+ *
+ * The 2nd-brain MCP tool returns `{ count, hits: [...] }`; earlier code
+ * assumed a bare array and crashed downstream (`[...matches]` on a
+ * non-iterable object → "matches is not iterable"). We accept either
+ * shape and degrade to `[]` for anything we don't recognise — never
+ * throw on an unexpected shape, in keeping with the module's
+ * graceful-by-construction philosophy.
+ */
+function unwrapArchiveHits(parsed: unknown): ArchiveMatch[] {
+  if (Array.isArray(parsed)) return parsed as ArchiveMatch[];
+  const hits = (parsed as ArchiveSearchEnvelope | null | undefined)?.hits;
+  return Array.isArray(hits) ? hits : [];
 }
 
 export interface RecordPickCandidate {
@@ -306,10 +338,15 @@ async function callMcpTool<T>(
  * `archive_search` per SPEC §10.1. Returns prior essays + YouTube
  * episodes by cosine similarity against the supplied 1536-dim embedding.
  *
+ * The 2nd-brain tool returns an OBJECT `{ count, hits: [...] }`, not a
+ * bare array — we unwrap `.hits` here (tolerating a bare-array response
+ * for forward/backward compat) so callers always get an `ArchiveMatch[]`.
+ *
  * Graceful by contract: any failure (network, RPC, missing tool on
  * server, missing env, etc.) returns an empty array and logs a warning,
  * so the caller's Stage 5 (archive overlap) proceeds with
- * archive_overlap=0 instead of failing the whole scoring run.
+ * archive_overlap=0 instead of failing the whole scoring run. An
+ * unrecognised result shape also degrades to [] rather than throwing.
  *
  * The dim check is the one exception — a wrong-sized embedding is a
  * programmer bug that would silently produce 0 matches forever, and is
@@ -329,11 +366,12 @@ export async function archiveSearch(
     throw new Error(`archive_search: top_k must be a positive integer (got ${topK})`);
   }
   try {
-    return await callMcpTool<ArchiveMatch[]>(
+    const parsed = await callMcpTool<unknown>(
       'archive_search',
       { query_embedding: queryEmbedding, top_k: topK },
       opts,
     );
+    return unwrapArchiveHits(parsed);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[two-brain] archive_search degraded to []: ${msg}`);
@@ -419,13 +457,17 @@ export async function probeArchiveSearch(
     // full 3-attempt + backoff budget on a misconfigured deploy.
     const url = env.twoBrainMcpUrl();
     const token = env.twoBrainMcpToken();
-    const hits = await attemptMcpCall<ArchiveMatch[]>(
+    const parsed = await attemptMcpCall<unknown>(
       'archive_search',
       { query_embedding: probeVector, top_k: 1 },
       url,
       token,
       opts,
     );
+    // Same envelope-vs-bare-array unwrap as archiveSearch — otherwise the
+    // probe reads `.length` off the wrapper object (undefined) and reports
+    // a misleading hitCount of 0 even when the corpus has matches.
+    const hits = unwrapArchiveHits(parsed);
     return { status: 'available', hitCount: hits.length };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

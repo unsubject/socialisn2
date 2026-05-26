@@ -15,6 +15,13 @@
 // unauthenticated /mcp requests. It enforces token audience automatically
 // when the client binds one via RFC 8707 `resource` (claude.ai does).
 //
+// Topology: this gateway lives at its OWN host (mcp-oauth.socialisn.com) and
+// proxies authenticated /mcp calls to the unchanged VPS MCP at
+// MCP_ORIGIN (https://mcp.socialisn.com), injecting the static bearer
+// server-side. mcp.socialisn.com is left untouched — it also serves /status
+// (ops-digest), /c/:id (Telegram digest links) and /feeds (RSS), which must
+// keep working. Claude Code/Desktop keep using mcp.socialisn.com + bearer.
+//
 // Security posture (see README → Security checklist):
 //   - allowImplicitFlow: false  → authorization-code only
 //   - allowPlainPKCE: false     → PKCE S256 only
@@ -42,11 +49,11 @@ export default new OAuthProvider({
   accessTokenTTL: 3600, // short-lived access tokens (1h).
 
   // RFC 9728 protected-resource-metadata advertised on the well-known route
-  // and referenced by the WWW-Authenticate header. `resource` is the MCP
-  // endpoint identifier; binding it lets clients send a matching RFC 8707
-  // `resource` so the provider can audience-scope tokens to /mcp.
+  // and referenced by the WWW-Authenticate header. `resource` is THIS
+  // gateway's MCP endpoint (its own host), so claude.ai's RFC 8707 `resource`
+  // binding matches and the provider can audience-scope tokens to /mcp.
   resourceMetadata: {
-    resource: 'https://mcp.socialisn.com/mcp',
+    resource: 'https://mcp-oauth.socialisn.com/mcp',
     scopes_supported: ['mcp'],
   },
 });

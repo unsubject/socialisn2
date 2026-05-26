@@ -64,7 +64,7 @@ npx wrangler secret put ALLOWED_GITHUB_ID   # recommended
 
 | Var | Value |
 | --- | --- |
-| `MCP_ORIGIN` | Origin of the VPS MCP, e.g. `https://mcp-origin.socialisn.com`. |
+| `MCP_ORIGIN` | **Origin only** (no path) of the VPS MCP, e.g. `https://mcp-origin.socialisn.com`. The proxy appends the request path/query, so a trailing `/mcp` here would be dropped. |
 | `ALLOWED_GITHUB_LOGIN` | Fallback gate when `ALLOWED_GITHUB_ID` is unset (login is mutable — prefer the id). |
 
 ### KV namespace (`OAUTH_KV`)

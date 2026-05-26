@@ -10,24 +10,20 @@ account_id = "2f58eaae9db581b9856eaa50937f0098"
 # gates consent behind a single GitHub user, and proxies authenticated
 # /mcp requests to the VPS MCP with the static bearer injected server-side.
 #
-# Sibling Workers (email-worker, feed-worker) use wrangler.toml, so this
-# Worker matches that convention rather than the wrangler.jsonc hint in the
-# build brief. See oauth-worker/README.md.
+# TOPOLOGY (own-subdomain): this Worker answers on mcp-oauth.socialisn.com and
+# proxies to the UNCHANGED VPS MCP at MCP_ORIGIN (mcp.socialisn.com). The VPS
+# host keeps serving /mcp (bearer, for Claude Code/Desktop), /status, /c/:id
+# and /feeds untouched. claude.ai web connects to https://mcp-oauth.socialisn.com/mcp.
 #
-# This Worker is intentionally NOT wired into .github/workflows/deploy-workers.yml.
-# That workflow auto-deploys on push to main and would fail here before the
-# secrets and DNS cutover exist. Deploy stays manual until cutover:
-#   cd oauth-worker && npx wrangler deploy
-# See README.md → "Manual deploy" and "DNS cutover".
+# Deploy is manual via .github/workflows/deploy-oauth-worker.yml (workflow_dispatch);
+# NOT wired into deploy-workers.yml. `custom_domain = true` makes wrangler create
+# the mcp-oauth.socialisn.com DNS record + route on deploy (CF token needs
+# Zone:Read + DNS:Edit on socialisn.com in addition to Workers Scripts/KV:Edit).
 
-# --- HTTP route -----------------------------------------------------------
-# TODO(cutover): claim mcp.socialisn.com for this Worker ONLY during the DNS
-# cutover (see README → "DNS cutover"). The VPS MCP currently answers on the
-# hostname that will become mcp-origin.socialisn.com. Uncomment then:
-#
-# routes = [
-#   { pattern = "mcp.socialisn.com", custom_domain = true },
-# ]
+# --- HTTP route: the gateway's own custom domain --------------------------
+routes = [
+  { pattern = "mcp-oauth.socialisn.com", custom_domain = true },
+]
 
 # --- KV: OAuthProvider storage (grants, tokens, clients, auth-flow state) --
 [[kv_namespaces]]
@@ -37,16 +33,15 @@ id = "81ec45bbe8204542872af1e1c74007b1"
 
 # --- Non-secret vars ------------------------------------------------------
 [vars]
-# Origin of the existing VPS MCP. After cutover this is the new VPS hostname.
-MCP_ORIGIN = "https://mcp-origin.socialisn.com"
+# The unchanged VPS MCP host that this gateway proxies authenticated /mcp to.
+MCP_ORIGIN = "https://mcp.socialisn.com"
 # Fallback login gate; the preferred check is the ALLOWED_GITHUB_ID secret
 # (numeric, immutable). Simon's GitHub login.
 ALLOWED_GITHUB_LOGIN = "unsubject"
 
-# --- Secrets (set with `wrangler secret put <NAME>`, never commit) --------
+# --- Secrets (set via deploy-oauth-worker.yml from GH repo secrets) -------
 #   SOCIALISN2_MCP_TOKEN   static bearer for the upstream VPS MCP (server-side only)
 #   GITHUB_CLIENT_ID       GitHub OAuth app client id
 #   GITHUB_CLIENT_SECRET   GitHub OAuth app client secret
 #   COOKIE_ENCRYPTION_KEY  HMAC key signing the OAuth-state cookie (CSRF binding)
-#   ALLOWED_GITHUB_ID      (recommended) numeric GitHub user id (174284337);
-#                          takes precedence over ALLOWED_GITHUB_LOGIN
+#   ALLOWED_GITHUB_ID      numeric GitHub user id (174284337); precedence over login

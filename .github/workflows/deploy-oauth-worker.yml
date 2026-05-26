@@ -1,0 +1,79 @@
+name: deploy-oauth-worker
+
+# Manual deploy for the socialisn2 MCP OAuth gateway Worker (oauth-worker/).
+#
+# Separate from deploy-workers.yml (email/feed auto-deploy on push) on purpose:
+# this is workflow_dispatch only and also pushes the Worker's secrets from GH
+# repo secrets. The custom domain mcp.socialisn.com is NOT claimed here — that
+# happens at cutover by uncommenting `routes` in oauth-worker/wrangler.toml and
+# re-running this workflow.
+#
+# Required GH repo secrets (set via `gh secret set <NAME> -R unsubject/socialisn2`):
+#   CLOUDFLARE_API_TOKEN   (already used by deploy-workers.yml; needs
+#                           Workers Scripts:Edit + Workers KV Storage:Edit, and
+#                           later Workers Routes:Edit + Zone:Read on socialisn.com
+#                           for the custom-domain cutover)
+#   SOCIALISN2_MCP_TOKEN   upstream VPS MCP bearer → Worker secret of same name
+#   OAUTH_GH_CLIENT_ID     GitHub OAuth app client id     → Worker GITHUB_CLIENT_ID
+#   OAUTH_GH_CLIENT_SECRET GitHub OAuth app client secret → Worker GITHUB_CLIENT_SECRET
+#   OAUTH_COOKIE_KEY       CSRF cookie HMAC key           → Worker COOKIE_ENCRYPTION_KEY
+# (GH forbids secret names beginning with GITHUB_, hence the OAUTH_ prefixes.)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-oauth-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oauth-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install
+        run: npm ci
+
+      - name: Deploy worker
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Push secrets (stdin — values never echoed)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          S_MCP_TOKEN: ${{ secrets.SOCIALISN2_MCP_TOKEN }}
+          S_GH_ID: ${{ secrets.OAUTH_GH_CLIENT_ID }}
+          S_GH_SECRET: ${{ secrets.OAUTH_GH_CLIENT_SECRET }}
+          S_COOKIE: ${{ secrets.OAUTH_COOKIE_KEY }}
+        run: |
+          set -euo pipefail
+          put() {
+            if [ -z "${2:-}" ]; then
+              echo "::error::missing GH secret for Worker secret $1"; exit 1
+            fi
+            printf '%s' "$2" | npx wrangler secret put "$1"
+          }
+          put SOCIALISN2_MCP_TOKEN  "$S_MCP_TOKEN"
+          put GITHUB_CLIENT_ID      "$S_GH_ID"
+          put GITHUB_CLIENT_SECRET  "$S_GH_SECRET"
+          put COOKIE_ENCRYPTION_KEY "$S_COOKIE"
+          # ALLOWED_GITHUB_ID is a public GitHub user id, not sensitive — inline.
+          printf '%s' "174284337" | npx wrangler secret put ALLOWED_GITHUB_ID
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## deploy-oauth-worker"
+            echo "- worker: socialisn2-oauth"
+            echo "- result: ${{ job.status }}"
+            echo "- custom domain claimed: no (cutover step — uncomment routes in wrangler.toml)"
+          } >> "$GITHUB_STEP_SUMMARY"

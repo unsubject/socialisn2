@@ -1,0 +1,52 @@
+name = "socialisn2-oauth"
+main = "src/index.ts"
+compatibility_date = "2025-05-01"
+compatibility_flags = ["nodejs_compat"]
+account_id = "2f58eaae9db581b9856eaa50937f0098"
+
+# OAuth 2.1 gateway in front of the socialisn2 MCP. Implements the MCP
+# Authorization spec (Dynamic Client Registration + PKCE S256 + RFC 9728
+# protected-resource-metadata) via @cloudflare/workers-oauth-provider@0.7.0,
+# gates consent behind a single GitHub user, and proxies authenticated
+# /mcp requests to the VPS MCP with the static bearer injected server-side.
+#
+# Sibling Workers (email-worker, feed-worker) use wrangler.toml, so this
+# Worker matches that convention rather than the wrangler.jsonc hint in the
+# build brief. See oauth-worker/README.md.
+#
+# This Worker is intentionally NOT wired into .github/workflows/deploy-workers.yml.
+# That workflow auto-deploys on push to main and would fail here before the
+# secrets and DNS cutover exist. Deploy stays manual until cutover:
+#   cd oauth-worker && npx wrangler deploy
+# See README.md → "Manual deploy" and "DNS cutover".
+
+# --- HTTP route -----------------------------------------------------------
+# TODO(cutover): claim mcp.socialisn.com for this Worker ONLY during the DNS
+# cutover (see README → "DNS cutover"). The VPS MCP currently answers on the
+# hostname that will become mcp-origin.socialisn.com. Uncomment then:
+#
+# routes = [
+#   { pattern = "mcp.socialisn.com", custom_domain = true },
+# ]
+
+# --- KV: OAuthProvider storage (grants, tokens, clients, auth-flow state) --
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+# Provisioned 2026-05-25 via Cloudflare MCP (account Simon Lee 2f58eaae…).
+id = "81ec45bbe8204542872af1e1c74007b1"
+
+# --- Non-secret vars ------------------------------------------------------
+[vars]
+# Origin of the existing VPS MCP. After cutover this is the new VPS hostname.
+MCP_ORIGIN = "https://mcp-origin.socialisn.com"
+# Fallback login gate; the preferred check is the ALLOWED_GITHUB_ID secret
+# (numeric, immutable). Simon's GitHub login.
+ALLOWED_GITHUB_LOGIN = "unsubject"
+
+# --- Secrets (set with `wrangler secret put <NAME>`, never commit) --------
+#   SOCIALISN2_MCP_TOKEN   static bearer for the upstream VPS MCP (server-side only)
+#   GITHUB_CLIENT_ID       GitHub OAuth app client id
+#   GITHUB_CLIENT_SECRET   GitHub OAuth app client secret
+#   COOKIE_ENCRYPTION_KEY  HMAC key signing the OAuth-state cookie (CSRF binding)
+#   ALLOWED_GITHUB_ID      (recommended) numeric GitHub user id (174284337);
+#                          takes precedence over ALLOWED_GITHUB_LOGIN

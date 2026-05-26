@@ -16,14 +16,13 @@ account_id = "2f58eaae9db581b9856eaa50937f0098"
 # and /feeds untouched. claude.ai web connects to https://mcp-oauth.socialisn.com/mcp.
 #
 # Deploy is manual via .github/workflows/deploy-oauth-worker.yml (workflow_dispatch);
-# NOT wired into deploy-workers.yml. `custom_domain = true` makes wrangler create
-# the mcp-oauth.socialisn.com DNS record + route on deploy (CF token needs
-# Zone:Read + DNS:Edit on socialisn.com in addition to Workers Scripts/KV:Edit).
-
-# --- HTTP route: the gateway's own custom domain --------------------------
-routes = [
-  { pattern = "mcp-oauth.socialisn.com", custom_domain = true },
-]
+# NOT wired into deploy-workers.yml.
+#
+# CUSTOM DOMAIN is bound out-of-band via the CF dashboard
+# (Workers & Pages → socialisn2-oauth → Settings → Domains & Routes → Add →
+# mcp-oauth.socialisn.com), NOT here: the deploy token lacks zone
+# Workers-Routes:Edit, and a dashboard-added custom domain persists across
+# `wrangler deploy` runs (wrangler only manages routes declared in config).
 
 # --- KV: OAuthProvider storage (grants, tokens, clients, auth-flow state) --
 [[kv_namespaces]]

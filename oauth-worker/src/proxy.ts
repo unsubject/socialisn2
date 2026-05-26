@@ -38,6 +38,9 @@ const STRIP_RESPONSE_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
   'content-length',
+  // Defense-in-depth: the single-tenant VPS MCP shouldn't set cookies, but
+  // never let an upstream Set-Cookie reach the claude.ai client.
+  'set-cookie',
 ]);
 
 export const proxyHandler = {

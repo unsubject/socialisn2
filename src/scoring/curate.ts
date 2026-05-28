@@ -1,10 +1,11 @@
 // Stage 6 of the scoring pipeline (SPEC §9.4) — curation.
 //
-// Sonnet receives the Stage 4 cluster summary (headline + context_summary
-// + keywords + tags) plus the cluster's source list, the temperature /
-// trajectory annotations from §9.5, the archive_overlap metadata from
-// §9.3, and Simon's positioning statement (config/positioning.md). It
-// outputs a 0-100 score and a 1-2 sentence rationale.
+// The curate model receives the Stage 4 cluster summary (headline +
+// context_summary + keywords + tags) plus the cluster's source list,
+// the temperature / trajectory annotations from §9.5, the
+// archive_overlap metadata from §9.3, and Simon's positioning
+// statement (config/positioning.md). It outputs a 0-100 score and
+// a 1-2 sentence rationale.
 //
 // The 60-cutoff ("only clusters with curation_score ≥ 60 become
 // candidates") is the orchestrator's call (Phase 3 PR 4) — this module
@@ -12,8 +13,13 @@
 // is preserved for debugging the cutoff decision and for the eventual
 // authority recalibration pass (Phase 5 PR 1).
 //
-// Model: claude-sonnet-4.5 via LiteLLM. Chosen per SPEC §12 cost
-// budget — ~$0.54/day for ~100 cluster calls at $3/$15 per 1M tokens.
+// Model: gemini-3.5-flash via LiteLLM. Replaced claude-sonnet-4.5 on
+// 2026-05-28 to halve curate spend ($1.50/$9.00 per 1M vs $3/$15)
+// under the SPEC §12 budget — the prior Sonnet routing was tripping
+// the $1.50/day cost ceiling under current queue volume. Route +
+// pricing entry live in config/litellm.yaml + src/cost/pricing.ts;
+// SPEC.md §12 cost table still references the Sonnet number and
+// is a follow-up.
 //
 // This module is PURE TRANSFORMATION: it does not read from or write to
 // the database. The caller threads a CurateInput in and gets a
@@ -39,7 +45,7 @@ const POSITIONING_PATH = fileURLToPath(
 const SYSTEM_PROMPT = readFileSync(SYSTEM_PROMPT_PATH, 'utf-8');
 const POSITIONING = readFileSync(POSITIONING_PATH, 'utf-8');
 
-const DEFAULT_MODEL = 'claude-sonnet-4.5';
+const DEFAULT_MODEL = 'gemini-3.5-flash';
 
 export type Temperature = 'cold' | 'warm' | 'hot' | 'over_saturated';
 export type Trajectory = 'new' | 'rising' | 'peaking' | 'declining';

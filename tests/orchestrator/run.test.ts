@@ -309,7 +309,14 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
   });
 
   it('halts mid-run with status=completed + error=cost_ceiling_hit when ceiling fires', async () => {
-    process.env.COST_CEILING_DAILY_USD = '0.015';
+    // Sized so cluster 1 fully processes ($0.0076 spent: $0.0006 summarise +
+    // $0.007 curate stub) and cluster 2's pre-curate gate trips. The gate
+    // condition is (spent + CURATE_PROJECTED_USD) > ceiling — at $0.010 the
+    // margin (≈$0.0018) is small enough that the test stays robust against
+    // future curate-projection re-tunes (the previous $0.015 ceiling worked
+    // only at the old $0.008 Sonnet projection and silently went green after
+    // the 2026-05 swap to gemini-3.5-flash dropped it to $0.004).
+    process.env.COST_CEILING_DAILY_USD = '0.010';
 
     const c1 = await makeCluster();
     const c2 = await makeCluster();

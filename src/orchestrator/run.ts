@@ -8,8 +8,8 @@
 //   Stage 4 — cluster summarisation via Gemini Flash-Lite (headline.ts).
 //   Stage 5 — archive_overlap via 2nd-brain MCP. Drops clusters with
 //             overlap > 0.85 AND match within 90d; flags 0.70-0.85.
-//   Stage 6 — curation via Sonnet (curate.ts). Persists only clusters
-//             scoring ≥ 60.
+//   Stage 6 — curation via the curate-stage LLM (curate.ts; currently
+//             gemini-3.5-flash). Persists only clusters scoring ≥ 60.
 //   Stage 7 — INSERT candidates row.
 //   Per-insert — for is_exclusive=true candidates, notifyExclusive
 //               fires immediately (SPEC §11.3 "instant standalone
@@ -22,9 +22,11 @@
 //             persisted candidates.
 //
 // Cost ceiling per SPEC §12 — assertWithinCeiling fires BEFORE each
-// Gemini / Sonnet call, with a conservative per-call projection.
-// CostCeilingHitError halts the loop; partial candidates already
-// persisted remain (SPEC §12 "partial candidates are still persisted").
+// LLM call (Stage 4 summarise + Stage 6 curate), with a conservative
+// per-call projection sized to the model currently routed for that
+// stage. CostCeilingHitError halts the loop; partial candidates
+// already persisted remain (SPEC §12 "partial candidates are still
+// persisted").
 //
 // External dependencies (summarise, curate, archiveSearcher,
 // regenerateFeeds, notifyDigest, notifyExclusive) are dependency-
@@ -81,8 +83,16 @@ import {
 } from '../scoring/trajectory.js';
 import { archiveSearch as defaultArchiveSearch } from '../lib/two_brain_client.js';
 
-const GEMINI_PROJECTED_USD = 0.001;
-const SONNET_PROJECTED_USD = 0.008;
+// Stage 4 summarise — Gemini 2.5 Flash-Lite at $0.10 / $0.40 per 1M.
+// Empirical ~$0.0006/call; projection sits ~1.6× above so the gate
+// can't underestimate a larger prompt.
+const SUMMARISE_PROJECTED_USD = 0.001;
+// Stage 6 curate — gemini-3.5-flash since 2026-05-28 at $1.50/$9.00
+// per 1M (was claude-sonnet-4.5 at $3/$15). A typical bounded call
+// (maxTokens=400 output, ~1.5k prompt input) lands ~$0.003; the
+// projection sits at $0.004 so the gate keeps a safety margin. Was
+// $0.008 under the prior Sonnet routing.
+const CURATE_PROJECTED_USD = 0.004;
 const ACTIVE_WINDOW_DAYS = 7;
 const CURATION_CUTOFF = 60;
 
@@ -248,7 +258,7 @@ export async function runScoring(
 
     for (const cluster of top) {
       try {
-        await assertWithinCeiling(db, GEMINI_PROJECTED_USD);
+        await assertWithinCeiling(db, SUMMARISE_PROJECTED_USD);
       } catch (err) {
         if (err instanceof CostCeilingHitError) {
           halt = { reason: err.code, err };
@@ -300,7 +310,7 @@ export async function runScoring(
       }
 
       try {
-        await assertWithinCeiling(db, SONNET_PROJECTED_USD);
+        await assertWithinCeiling(db, CURATE_PROJECTED_USD);
       } catch (err) {
         if (err instanceof CostCeilingHitError) {
           halt = { reason: err.code, err };

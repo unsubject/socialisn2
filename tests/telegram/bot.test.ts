@@ -290,4 +290,55 @@ describe.skipIf(!DATABASE_URL)('telegram bot (buildBot)', () => {
     expect(row[0]?.status).toBe('picked');
     expect(row[0]?.decision_reason).toBe('because reasons');
   });
+
+  // Regression for 2026-05-29: /today on a full 30-candidate day produced
+  // a ~4600-char body and 400'd with "message is too long". After
+  // chunkForTelegram, the handler should fan out across multiple
+  // sendMessage calls, each under Telegram's 4096-char cap.
+  it('/today on a 30-candidate day fans out into multiple sendMessage calls below the 4096 char cap', async () => {
+    // 30 candidates with long-ish headlines + spread across 4 domains —
+    // shape matches the production failure case.
+    const longHeadline =
+      'A reasonably long headline about regulatory shifts in financial markets and AI policy implications';
+    const domains = ['economy', 'scitech', 'geopolitics', 'national'];
+    for (let i = 0; i < 30; i += 1) {
+      const id = uuidv7();
+      const runId = uuidv7();
+      await client`
+        INSERT INTO candidates (
+          id, cluster_id, headline, context_summary,
+          primary_domain, domains, temperature, trajectory,
+          is_exclusive, similarity_score, archive_overlap, archive_overlap_links,
+          curation_score, curation_rationale, keywords, tags, status,
+          generated_run_id, expires_at
+        ) VALUES (
+          ${id}, ${clusterId},
+          ${`${longHeadline} #${i}`},
+          'context', ${domains[i % 4]!}, ARRAY[${domains[i % 4]!}]::text[],
+          'warm', 'rising', false, 0.5, 0.1,
+          ${JSON.stringify({ overlap: 0.1, links: [] })}::jsonb,
+          75, 'r', ARRAY['kw']::text[], ARRAY['tag']::text[], 'new', ${runId},
+          ${new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()}::timestamptz
+        )
+      `;
+    }
+
+    await bot.handleUpdate(
+      commandUpdate('/today') as Parameters<typeof bot.handleUpdate>[0],
+    );
+
+    const sends = apiCalls.filter((c) => c.method === 'sendMessage');
+    expect(sends.length).toBeGreaterThan(1);
+    for (const s of sends) {
+      const text = s.payload.text as string;
+      // Hard cap is 4096; we chunk at 3800 with headroom for the
+      // API's invisible escape accounting.
+      expect(text.length).toBeLessThanOrEqual(3800);
+      expect(s.payload.parse_mode).toBe('MarkdownV2');
+    }
+    // The combined sends still cover every candidate's id once.
+    const combined = sends.map((s) => s.payload.text as string).join('\n\n');
+    const candIdMatches = combined.match(/\/cand /g) ?? [];
+    expect(candIdMatches.length).toBe(30);
+  });
 });

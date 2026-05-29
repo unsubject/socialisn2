@@ -52,6 +52,71 @@ export function escapeMarkdownV2(s: string): string {
   return s.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
 }
 
+/** Below Telegram's hard 4096-char sendMessage limit, with headroom for
+ *  invisible MarkdownV2 escape bytes the API may double-count. 3800 is
+ *  also what the n8n Summarizer Bot uses, keeping the two surfaces
+ *  consistent. */
+const MAX_TELEGRAM_TEXT_CHARS = 3800;
+
+/**
+ * Split a MarkdownV2-formatted message body so each chunk fits Telegram's
+ * sendMessage limit. Prefers paragraph boundaries (`\n\n`) over line
+ * boundaries (`\n`) over hard slices — only the first two are safe inside
+ * MarkdownV2 (a hard slice CAN break an unclosed `*bold*` span and 400 the
+ * send). In practice the call sites (formatTodayList + formatCandidateDetail)
+ * always have paragraph breaks between candidate rows / detail sections,
+ * so the hard-slice fallback is unreachable for our renderers.
+ *
+ * Returns `[text]` when no splitting is needed — callers can iterate
+ * unconditionally.
+ */
+export function chunkForTelegram(
+  text: string,
+  maxLen: number = MAX_TELEGRAM_TEXT_CHARS,
+): string[] {
+  if (text.length <= maxLen) return [text];
+  const chunks: string[] = [];
+  let buf = '';
+  for (const para of text.split('\n\n')) {
+    const candidate = buf ? buf + '\n\n' + para : para;
+    if (candidate.length <= maxLen) {
+      buf = candidate;
+      continue;
+    }
+    if (buf) {
+      chunks.push(buf);
+      buf = '';
+    }
+    if (para.length <= maxLen) {
+      buf = para;
+      continue;
+    }
+    // Paragraph itself oversized — split on \n.
+    for (const line of para.split('\n')) {
+      const lineCandidate = buf ? buf + '\n' + line : line;
+      if (lineCandidate.length <= maxLen) {
+        buf = lineCandidate;
+        continue;
+      }
+      if (buf) {
+        chunks.push(buf);
+        buf = '';
+      }
+      if (line.length <= maxLen) {
+        buf = line;
+        continue;
+      }
+      // Last resort — hard slice. Will likely 400 if it lands mid-span,
+      // but the alternative (silently dropping content) is worse.
+      for (let i = 0; i < line.length; i += maxLen) {
+        chunks.push(line.slice(i, i + maxLen));
+      }
+    }
+  }
+  if (buf) chunks.push(buf);
+  return chunks;
+}
+
 /**
  * Build a single-line candidate row for list views. Format:
  *   [icon] [icon] *headline*  — [primary_domain] · /cand <id>

@@ -55,13 +55,29 @@ async function main(): Promise<void> {
     await bot.init();
     // bot.start() returns when polling stops, which never happens
     // during normal operation. Deliberately NOT awaited — we attach a
-    // catch so a runtime polling error (network drop, getUpdates 5xx
-    // loop) gets logged rather than crashing the process. The actual
-    // stop happens via bot.stop() in the shutdown handler.
-    bot.start().catch((err: unknown) => {
-      console.error('[telegram-bot] start failed:', err);
-    });
-    console.log('[telegram-bot] long-polling started');
+    // catch + onStart so:
+    //   - the "long-polling started" log accurately reflects "polling
+    //     loop alive" rather than "we just called bot.start()" — the
+    //     previous spelling printed the line BEFORE the catch could fire
+    //     on an immediate failure.
+    //   - a fatal start error (e.g. 409 Conflict from a webhook race —
+    //     see [[socialisn2_telegram_webhook_conflict]] / the 2026-05-25
+    //     incident) exits the process so docker-compose restarts the
+    //     container. The previous spelling logged-and-continued, which
+    //     left the bot silently dead for 4 days while the HTTP
+    //     healthcheck kept reporting green. grammY calls deleteWebhook
+    //     before getUpdates on start, so a transient 409 self-heals on
+    //     the next container start.
+    bot
+      .start({
+        onStart: () => {
+          console.log('[telegram-bot] long-polling started');
+        },
+      })
+      .catch((err: unknown) => {
+        console.error('[telegram-bot] start failed; exiting so docker restarts:', err);
+        process.exit(1);
+      });
   } else {
     console.log(
       '[telegram-bot] disabled (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to enable)',

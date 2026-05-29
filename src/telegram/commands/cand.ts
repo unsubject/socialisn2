@@ -8,6 +8,7 @@ import type { BotContext } from '../bot.js';
 import { UUID_RE } from '../../lib/uuid.js';
 import {
   candidateKeyboard,
+  chunkForTelegram,
   escapeMarkdownV2,
   formatCandidateDetail,
   type RenderCandidate,
@@ -92,9 +93,19 @@ export async function handleCand(db: Db, ctx: BotContext): Promise<void> {
     sources,
   };
 
-  await ctx.reply(formatCandidateDetail(candidate), {
-    parse_mode: 'MarkdownV2',
-    reply_markup: candidateKeyboard(row.id),
-    link_preview_options: { is_disabled: true },
-  });
+  // Detail bodies are usually well under Telegram's 4096-char limit, but
+  // can approach it when context_summary + curation_rationale + a long
+  // source list combine with MarkdownV2's escape doubling on every `.`
+  // / `-` / `(` / `)`. Chunk defensively and attach the keyboard to the
+  // LAST chunk so the buttons land where the user's eye finishes
+  // reading.
+  const chunks = chunkForTelegram(formatCandidateDetail(candidate));
+  for (let i = 0; i < chunks.length; i += 1) {
+    const isLast = i === chunks.length - 1;
+    await ctx.reply(chunks[i]!, {
+      parse_mode: 'MarkdownV2',
+      reply_markup: isLast ? candidateKeyboard(row.id) : undefined,
+      link_preview_options: { is_disabled: true },
+    });
+  }
 }

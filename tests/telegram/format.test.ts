@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   candidateKeyboard,
+  chunkForTelegram,
   escapeMarkdownV2,
   formatCandidateDetail,
   formatCandidateLine,
@@ -174,6 +175,73 @@ describe('formatExclusivePush', () => {
     expect(out.startsWith('⚡')).toBe(true);
     expect(out).toContain('Scoop');
     expect(out).toContain('/cand ');
+  });
+});
+
+describe('chunkForTelegram', () => {
+  // Regression: a real 2026-05-29 /today response was ~4600 chars
+  // (30 candidates × ~150-char rows + MarkdownV2 escape doubling on
+  // every `.` `-` `(`) and 400'd Telegram with "message is too long".
+  // The 4096 hard cap means chunks must land STRICTLY below it; we
+  // chunk at 3800 to leave headroom for Telegram's invisible escape
+  // accounting (the API sometimes counts escaped chars differently
+  // than the strlen we see).
+  it('returns the input unchanged when below the limit', () => {
+    expect(chunkForTelegram('hello')).toEqual(['hello']);
+  });
+
+  it('splits a long formatTodayList output across multiple chunks, each <= 3800', () => {
+    const candidates: RenderCandidate[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      candidates.push(
+        mkCandidate({
+          id: `${i.toString().padStart(8, '0')}-1234-5678-9012-345678901234`,
+          headline: 'A reasonably long headline about regulatory shifts in financial markets and AI policy implications',
+          primaryDomain: i % 4 === 0 ? 'economy' : i % 4 === 1 ? 'scitech' : i % 4 === 2 ? 'geopolitics' : 'national',
+        }),
+      );
+    }
+    const body = formatTodayList(candidates);
+    expect(body.length).toBeGreaterThan(3800);
+
+    const chunks = chunkForTelegram(body);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(3800);
+    }
+    // Round-trip: rejoining preserves the content (modulo the `\n\n`
+    // boundaries the chunker splits on). Every candidate id must
+    // appear exactly once across all chunks.
+    const rejoined = chunks.join('\n\n');
+    for (const c of candidates) {
+      const escapedId = c.id.replace(/-/g, '\\-');
+      expect(rejoined).toContain(escapedId);
+    }
+  });
+
+  it('prefers paragraph (\\n\\n) boundaries over line (\\n) boundaries', () => {
+    // Two paragraphs, each comfortably small, sum > limit.
+    const para = 'x'.repeat(2500);
+    const body = `${para}\n\n${para}`;
+    const chunks = chunkForTelegram(body, 3000);
+    expect(chunks).toEqual([para, para]);
+  });
+
+  it('falls through to line splitting when a single paragraph exceeds the limit', () => {
+    const longPara = `${'a'.repeat(1500)}\n${'b'.repeat(1500)}\n${'c'.repeat(1500)}`;
+    const chunks = chunkForTelegram(longPara, 2000);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(2000);
+    }
+  });
+
+  it('hard-slices as a last resort when a single line exceeds the limit', () => {
+    const huge = 'z'.repeat(2500);
+    const chunks = chunkForTelegram(huge, 1000);
+    expect(chunks.length).toBe(3);
+    expect(chunks.every((c) => c.length <= 1000)).toBe(true);
+    expect(chunks.join('')).toBe(huge);
   });
 });
 

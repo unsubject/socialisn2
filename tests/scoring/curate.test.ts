@@ -64,7 +64,7 @@ function llmEnvelope(content: string): unknown {
   return {
     choices: [{ message: { content } }],
     usage: { prompt_tokens: 100, completion_tokens: 30 },
-    model: 'claude-sonnet-4.5',
+    model: 'gemini-3.5-flash',
   };
 }
 
@@ -172,7 +172,7 @@ describe('curateCluster', () => {
     const result = await curateCluster(sampleInput(), { fetchFn });
     expect(result.output.curationScore).toBe(72);
     expect(result.output.curationRationale).toMatch(/economy/i);
-    expect(result.llm.model).toBe('claude-sonnet-4.5');
+    expect(result.llm.model).toBe('gemini-3.5-flash');
     expect(result.llm.usd).toBeGreaterThan(0);
   });
 
@@ -219,7 +219,7 @@ describe('curateCluster', () => {
     );
   });
 
-  it('uses claude-sonnet-4.5 by default; honours model override', async () => {
+  it('uses gemini-3.5-flash by default; honours model override', async () => {
     const { fetchFn, captured } = stubFetchReturning(
       llmEnvelope(
         JSON.stringify({ curation_score: 50, curation_rationale: 'meh' }),

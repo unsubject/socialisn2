@@ -28,6 +28,9 @@ export const PRICING: Record<string, ModelPricing> = {
   'claude-haiku-4.5': { inputUsdPerToken: 1 / M, outputUsdPerToken: 5 / M },
   // Google Gemini 2.5 Flash-Lite — $0.10 / $0.40 per 1M.
   'gemini-2.5-flash-lite': { inputUsdPerToken: 0.1 / M, outputUsdPerToken: 0.4 / M },
+  // Google Gemini 3.5 Flash — $1.50 / $9.00 per 1M. Curate stage
+  // default since 2026-05-28 (config/litellm.yaml + src/scoring/curate.ts).
+  'gemini-3.5-flash': { inputUsdPerToken: 1.5 / M, outputUsdPerToken: 9 / M },
 };
 
 // Pessimistic fallback for unknown models. Sonnet rates — the most

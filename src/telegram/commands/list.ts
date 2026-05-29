@@ -9,12 +9,12 @@ import { sql } from 'drizzle-orm';
 
 import type { Db } from '../../db/client.js';
 import type { BotContext } from '../bot.js';
-import { formatTodayList, type RenderCandidate } from '../format.js';
+import { chunkForTelegram, formatTodayList, type RenderCandidate } from '../format.js';
 
 /** Cap on candidates surfaced per command. Telegram's single-message
  *  limit is 4096 chars and our per-candidate row is ~150 chars; 30
- *  gives ~4500 chars worst-case which we'd split if it ever blew past
- *  the limit. Most days the list is well under. */
+ *  gives ~4500 chars worst-case which `chunkForTelegram` splits into
+ *  two sendMessages. Most days the list is well under. */
 const LIST_LIMIT = 30;
 
 const VALID_DOMAINS = new Set([
@@ -40,9 +40,7 @@ type CandidateRow = {
 
 export async function handleToday(db: Db, ctx: BotContext): Promise<void> {
   const rows = await loadActiveCandidates(db, null);
-  await ctx.reply(formatTodayList(rows.map(toRenderCandidate)), {
-    parse_mode: 'MarkdownV2',
-  });
+  await sendInChunks(ctx, formatTodayList(rows.map(toRenderCandidate)));
 }
 
 export async function handleDomain(db: Db, ctx: BotContext): Promise<void> {
@@ -65,9 +63,16 @@ export async function handleDomain(db: Db, ctx: BotContext): Promise<void> {
     return;
   }
   const rows = await loadActiveCandidates(db, arg);
-  await ctx.reply(formatTodayList(rows.map(toRenderCandidate)), {
-    parse_mode: 'MarkdownV2',
-  });
+  await sendInChunks(ctx, formatTodayList(rows.map(toRenderCandidate)));
+}
+
+/** Reply with one message per chunk. Sequential so Telegram's per-chat
+ *  ordering matches the rendered order — bursting in parallel could
+ *  interleave with other handlers' messages. */
+async function sendInChunks(ctx: BotContext, body: string): Promise<void> {
+  for (const chunk of chunkForTelegram(body)) {
+    await ctx.reply(chunk, { parse_mode: 'MarkdownV2' });
+  }
 }
 
 async function loadActiveCandidates(

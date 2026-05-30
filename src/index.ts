@@ -10,30 +10,25 @@ import process from 'node:process';
 
 import type { Bot } from 'grammy';
 
-import { sql } from 'drizzle-orm';
-
 import { buildApp } from './app.js';
 import { env } from './config/env.js';
 import { createDb } from './db/client.js';
 import { buildBot } from './telegram/bot.js';
 
 async function main(): Promise<void> {
-  const { db, close } = createDb();
+  const { db, raw, close } = createDb();
 
-  // Orphaned-runs cleanup. A SIGKILL / OOM / container restart while a
-  // scoring run was mid-flight (an MCP run_now that didn't complete,
-  // or a cron-triggered run hit by deploy) leaves runs.status='running'
-  // forever — /status would show the stale row indefinitely. One
-  // UPDATE before app.listen() reconciles the state.
-  await db.execute(sql`
-    UPDATE runs
-    SET status = 'failed',
-        error = COALESCE(error || '; ', '') || 'process_restart',
-        completed_at = NOW()
-    WHERE status = 'running'
-  `);
+  // Orphaned-runs reaper used to live here. As of Phase 2.b it moved
+  // to src/workers/ingestion.ts where the orchestrator cron + watchdog
+  // also live — the ingestion worker is the only process that runs
+  // scoring on a cron tick, so a restart of THAT process is the actual
+  // orphan-creating event. The app process restarting (this file) used
+  // to wipe runs that the still-running ingestion worker owned.
 
-  const app = buildApp(db);
+  // `raw` is threaded to buildApp so MCP run_now can acquire the
+  // orchestrator advisory lock on a pinned connection — see
+  // src/orchestrator/lock.ts. Other Fastify routes don't use raw.
+  const app = buildApp(db, raw);
 
   const port = Number(process.env.PORT ?? '3000');
   const host = process.env.HOST ?? '0.0.0.0';

@@ -30,7 +30,7 @@ export const EMBEDDING_DIM = 1536;
 
 export const sources = pgTable('sources', {
   id: uuid('id').primaryKey(),
-  kind: text('kind').notNull(), // CHECK: 'rss'|'youtube_channel'|'gdelt'|'arxiv'|'email_bridge'
+  kind: text('kind').notNull(), // CHECK: 'rss'|'arxiv'|'email_bridge' (see migration 016)
   url: text('url').notNull(),
   name: text('name').notNull(),
   language: text('language'),

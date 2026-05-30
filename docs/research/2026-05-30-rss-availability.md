@@ -13,14 +13,12 @@ query that just renders the section page) are treated as "no public RSS."
 
 ## Summary
 
-7 of 10 confirmed available; 4 unavailable (1 of which is `BLOCKED`, where a
-feed may exist but Cloudflare gates fetches).
-
 | # | Outlet | Status | URL | Notes |
 |---|---|---|---|---|
 | 1 | **Globe & Mail** (politics, business) | ❌ NO PUBLIC RSS | — | `theglobeandmail.com/about/rss/` 404; `/politics/feed/`, `/business/feed/`, `/feeds/`, `/rss`, `feed.theglobeandmail.com` all 404 or return HTML. Homepage `<head>` declares no `application/rss+xml`. Site appears to have dropped RSS support. |
 | 2 | **The Times UK** | ❌ NO PUBLIC RSS | — | `thetimes.com/?service=rss`, `/uk/feed`, `/help/rss`, legacy `thetimes.co.uk` all return HTML (200 OK but body is the section page, not RSS). |
-| 3 | **ABC News** (politics) | ✅ AVAILABLE | `https://abcnews.com/abcnews/politicsheadlines` | RSS 2.0, ~25 items, fresh. Pattern generalises: `abcnews/<section>headlines` works for `us`, `international`, `technology`. Original `abcnews.go.com` URL 301s to the `abcnews.com` host. |
+| 3 | **ABC News (Australian)** politics | ⚠ NO POLITICS-SPECIFIC FEED | (proxies only — see notes) | **Corrected after PR #106 review:** SPEC §6.5 / migration 010 groups this with The Australian + Crikey — the AUSTRALIAN ABC (`abc.net.au`), NOT the US `abcnews.com`. Probed extensively: `/news/feed/politics` → 500; `/news/rss` → 404; numeric-id feed pattern (`/news/feed/<id>/rss.xml`) exposes only `45910=Top Stories`, `51120=Just In`, `45924=Sport`. The `/news/politics` HTML page declares no `application/rss+xml` link. **No politics-specific feed.** Closest proxies: `Top Stories` (`https://www.abc.net.au/news/feed/45910/rss.xml`) or `Just In` (`https://www.abc.net.au/news/feed/51120/rss.xml`) — both surface political coverage inline but mix with other beats. See "Outlets we cannot ingest" for the email-bridge alternative. |
+| 3b | _(incidental finding — different geography)_ US ABC News politics | ✅ AVAILABLE | `https://abcnews.com/abcnews/politicsheadlines` | RSS 2.0, ~25 items, fresh. Pattern generalises: `abcnews/<section>headlines` works for `us`, `international`, `technology`. **NOT what the audit asked for** (§6.5 = Australia); listed only because the probe surfaced it and it may be a useful source under a different SPEC bucket (e.g. US-national). NOT in the recommendation table below. |
 | 4 | **The Australian** | ⚠ BLOCKED | — | Cloudflare bot-detection gates all probed paths (`/feed`, `/business/feed`, `/help/rss`). May exist behind News Corp's auth wall; not practical to ingest via the standard adapter. |
 | 5 | **Crikey** | ✅ AVAILABLE | `https://www.crikey.com.au/feed/` | RSS, 10 items, last build < 24h. Paywalled long-form, but the feed exposes headline + intro of every story — usable for clustering signal. |
 | 6 | **The Bulwark** | ✅ AVAILABLE | `https://www.thebulwark.com/feed` | RSS, 10 items, very fresh (< 1h). Mix of articles + podcast episodes. |
@@ -30,14 +28,19 @@ feed may exist but Cloudflare gates fetches).
 | 10 | **IEA** | ⚠ BLOCKED | — | Cloudflare blocks all probed paths (`/news/rss`, `/rss/news`, `/news/index.rss`, `/reports.rss`). Even the news landing page itself 403s. No practical fetch path via the standard adapter. |
 | 11 | **BloombergNEF** (bonus, was flagged "deferred — no RSS confirmed" in migration 010) | ✅ AVAILABLE | `https://about.bnef.com/feed/` | RSS, 10 items, last build 2026-05-27. Slow cadence (~weekly), useful editorial for energy/cleantech. The `/blog/feed/` and `/shorts/feed/` paths return HTML, not RSS — only the root `/feed/` works. |
 
+**Tally:** 6 outlets with confirmed targeted feeds, 1 with a usable proxy feed
+(ABC AU general "Just In"), 1 incidental US finding listed for transparency,
+3 unavailable (Globe & Mail, Times UK, Australian + IEA Cloudflare-gated).
+
 ## Recommendation — what to ingest
 
-Suggest **7 new sources** for the next seed migration (`017_seed_audit_outlets.sql`
-or similar). All confirmed RSS, all relevant to existing editorial domains.
+Suggest **6 new sources + 1 proxy** for the next seed migration
+(`017_seed_audit_outlets.sql` or similar). All confirmed RSS, all relevant to
+existing editorial domains.
 
 | Source | Domain tag | URL | Authority seed | Cadence (min) |
 |---|---|---|---|---|
-| ABC News (politics) | `national` + `geopolitics` | `https://abcnews.com/abcnews/politicsheadlines` | 70 | 60 |
+| ABC News AU (Just In — politics proxy) | `national` (AU-focused) | `https://www.abc.net.au/news/feed/51120/rss.xml` | 65 | 60 |
 | Crikey | `national` (AU-focused) | `https://www.crikey.com.au/feed/` | 65 | 60 |
 | The Bulwark | `national` (US political) | `https://www.thebulwark.com/feed` | 65 | 60 |
 | The Dispatch | `national` (US political) | `https://thedispatch.com/feed/` | 70 | 60 |
@@ -47,6 +50,12 @@ or similar). All confirmed RSS, all relevant to existing editorial domains.
 
 Authority seeds are first-pass — the daily Bayesian recalibration (ADR-013)
 will adjust each from real pick / pass / defer signal within ~20 decisions.
+
+The ABC AU "Just In" entry is recommended at slightly lower authority (65)
+than a politics-specific feed would warrant — it pulls in non-political stories
+too, so per-item clustering signal-to-noise is lower than a targeted feed
+would give. If the email-bridge alternative below ends up wired, this row
+can be dropped.
 
 ## Outlets we cannot ingest — what to do
 
@@ -59,6 +68,13 @@ will adjust each from real pick / pass / defer signal within ~20 decisions.
     email-bridge (`kind = 'email_bridge'`). The bridge already handles the
     boilerplate strip path (see `email-worker/src/parse.ts`).
   - Defer until the email bridge has spare capacity.
+- **ABC News AU politics specifically.** No politics-only public RSS.
+  - **Recommended:** subscribe to one of ABC AU's politics newsletters (e.g.
+    "Australia Votes" or "The Brief") and route via the email-bridge — same
+    pattern as Times UK / Australian.
+  - **Stopgap:** ingest the general `Just In` feed (51120) per the
+    recommendation table above. Authority seed 65 reflects the
+    politics-vs-other-beat signal dilution.
 - **IEA.** Cloudflare gates all RSS paths. Same email-bridge workaround would
   work for the press-release newsletter; alternatively the public reports
   page could be polled via a future scraper exception — but that would
@@ -74,8 +90,15 @@ will adjust each from real pick / pass / defer signal within ~20 decisions.
   retrying through an authenticated HTTP fetch if a feed is suspected to
   exist behind the gate, but the standard ingestion adapter won't get
   through.
+- **Watch for outlet-name geography ambiguity.** "ABC News" can mean either
+  the US (`abcnews.com`) or the Australian (`abc.net.au`) network. Always
+  resolve from the SPEC section context (in our case §6.5 = Australia). The
+  initial probe in this audit got this wrong; PR #106 review caught it.
 - For Substack-hosted newsletters, `/<author>.substack.com/feed` is the
   universal pattern and always available — those don't need a manual probe.
 - For WordPress-based publishers (common in independent journalism), the
   `/feed/` and `/<section>/feed/` paths are the de-facto convention and worth
   always probing first.
+- ABC AU's RSS scheme is `/news/feed/<numeric-id>/rss.xml`. Brute-forcing
+  small ID ranges (within ±20 of a known ID) finds available feeds quickly;
+  there's no published per-section index page.

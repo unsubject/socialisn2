@@ -138,7 +138,16 @@ jobs:
           # restart. `--force-recreate --no-deps` tears down + starts
           # litellm WITHOUT cascading to postgres/redis (which are
           # already healthy from the previous up command).
-          docker compose up -d --force-recreate --no-deps --wait litellm
+          #
+          # `--wait-timeout 120` bounds the structural gate: if
+          # litellm can't reach healthy in 120s (malformed
+          # config/litellm.yaml, revoked provider key blocking startup,
+          # image pull failure), this step exits non-zero instead of
+          # hanging until the GH Actions job timeout. 120s comfortably
+          # exceeds the compose-level start_period: 30s plus a couple
+          # of healthcheck retries. The smoke probe downstream is the
+          # functional gate; this is the structural one.
+          docker compose up -d --force-recreate --no-deps --wait --wait-timeout 120 litellm
           # --no-deps bypasses depends_on for the one-shot container so
           # we don't accidentally tear down healthy postgres/redis on
           # `--rm`. Postgres is already up-and-healthy from the

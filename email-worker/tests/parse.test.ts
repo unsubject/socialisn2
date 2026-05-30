@@ -344,4 +344,55 @@ View this email in your browser
 …`;
     expect(stripBoilerplate(text)).toBe('Headline');
   });
+
+  it('does NOT cut on a multi-marker preamble (e.g. Unsubscribe then View this email)', () => {
+    // PR #102 review surfaced this. A newsletter whose preamble is two
+    // (or more) consecutive boilerplate-marker lines before the real
+    // body had its body truncated to the first preamble line — the
+    // first marker was skipped by the lead-line guard, but its line
+    // was counted as content toward the SECOND marker's guard, which
+    // then honored and cut. The fix excludes marker lines from the
+    // content-line count entirely.
+    const text = `Unsubscribe
+View this email in your browser
+
+Real story headline
+Real story body line one.
+Real story body line two.`;
+    const out = stripBoilerplate(text);
+    expect(out).toContain('Real story headline');
+    expect(out).toContain('Real story body line one.');
+    expect(out).toContain('Real story body line two.');
+  });
+
+  it('handles three consecutive preamble markers before the body', () => {
+    // Defensive: just because two markers don't fool the guard, make
+    // sure three (or more) don't either. Real Substack/ConvertKit emails
+    // routinely stack: view-in-browser + unsubscribe + © notices.
+    const text = `View this email in your browser
+© 2026 Publisher Inc.
+Unsubscribe | Manage preferences
+
+Story headline here.
+Body.`;
+    const out = stripBoilerplate(text);
+    expect(out).toContain('Story headline here.');
+    expect(out).toContain('Body.');
+  });
+
+  it('still cuts when a real content line precedes a preamble marker AND a later footer marker', () => {
+    // Mixed preamble + content + footer: the guard must not over-fire.
+    // Here line 1 is content ("Real headline"), line 2 is a marker
+    // (would-skip if alone), and there's a footer at the bottom. The
+    // line-2 marker's guard sees 1 real content line before it ("Real
+    // headline"), so it's honored and cuts there. Pin this so the
+    // multi-marker-preamble fix doesn't over-correct.
+    const text = `Real headline
+View this email in your browser
+
+Body text below the preamble.
+
+© 2026`;
+    expect(stripBoilerplate(text)).toBe('Real headline');
+  });
 });

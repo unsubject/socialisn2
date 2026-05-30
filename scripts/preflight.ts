@@ -94,6 +94,60 @@ function checkNumeric(name: string, getter: () => number): CheckOutcome {
   }
 }
 
+/**
+ * Per-model smoke probe of the LiteLLM proxy. Sends a 1-token completion
+ * so a stale-config / revoked-key / missing-route failure surfaces at
+ * deploy time, not at the next afternoon orchestrator run. Opt-in via
+ * PREFLIGHT_LITELLM_PROBE=1 — the deploy workflow sets this; unit tests
+ * leave it unset to avoid needing a real proxy.
+ *
+ * Catches the 2026-05-30 incident class: `config/litellm.yaml`
+ * gained a route in PR #100 but `litellm-1` was running its 7-day-old
+ * config, so every curate call returned `ProxyModelNotFoundError`.
+ * The HTTP 400 here would fail the deploy in <30s instead of a 3-hour
+ * silent prod outage.
+ */
+async function checkLitellmRoute(modelName: string): Promise<CheckOutcome> {
+  const baseUrl = env.litellmBaseUrl().replace(/\/+$/, '');
+  const apiKey = env.litellmApiKey();
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: modelName,
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1,
+      }),
+      signal: controller.signal,
+    });
+    if (res.ok) {
+      log.info(`litellm route ${modelName} responds`, {
+        check: 'litellm_route',
+        model: modelName,
+      });
+      return { ok: true };
+    }
+    const detail = (await res.text().catch(() => '<no body>')).slice(0, 240);
+    return {
+      ok: false,
+      reason: `litellm route ${modelName} HTTP ${res.status} body=${detail}`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
 async function main(): Promise<void> {
   log.info('starting preflight');
 
@@ -108,6 +162,20 @@ async function main(): Promise<void> {
     { name: 'cost_alert_threshold', run: () => checkNumeric('COST_ALERT_THRESHOLD', env.costAlertThreshold) },
     { name: 'public_host', run: () => checkRequiredString('PUBLIC_HOST', env.publicHost) },
   ];
+
+  // Deploy-time only: smoke-probe each primary routed model. Two
+  // models — gemini-2.5-flash-lite (normalise + Stage 4 summarise) and
+  // gemini-3.5-flash (Stage 6 curate). Cost per deploy: negligible
+  // (2 × 1-token completions). Catches stale-config, revoked-key,
+  // and routing-mismatch in one shot.
+  if (process.env.PREFLIGHT_LITELLM_PROBE === '1') {
+    for (const model of ['gemini-2.5-flash-lite', 'gemini-3.5-flash']) {
+      steps.push({
+        name: `litellm_route_${model.replace(/[.-]/g, '_')}`,
+        run: () => checkLitellmRoute(model),
+      });
+    }
+  }
 
   for (const step of steps) {
     const outcome = await step.run();

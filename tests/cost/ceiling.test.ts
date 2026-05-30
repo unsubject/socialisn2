@@ -129,7 +129,11 @@ describe.skipIf(!DATABASE_URL)('cost ceiling (SPEC §12)', () => {
       caught = err as CostCeilingHitError;
     }
     expect(caught).toBeInstanceOf(CostCeilingHitError);
-    expect(caught?.code).toBe('cost_ceiling_hit');
+    // Phase 3: code is now scope-suffixed so the orchestrator's
+    // `halt.reason = err.code` path carries the tier into runs.error.
+    // Without a bucket arg, scope defaults to 'daily'.
+    expect(caught?.code).toBe('cost_ceiling_hit:daily');
+    expect(caught?.scope).toBe('daily');
     expect(caught?.spent).toBeCloseTo(1.0);
     expect(caught?.projected).toBeCloseTo(0.6);
     expect(caught?.ceiling).toBe(1.5);
@@ -200,6 +204,11 @@ describe.skipIf(!DATABASE_URL)('cost ceiling (SPEC §12)', () => {
     }
     expect(caught).toBeInstanceOf(CostCeilingHitError);
     expect(caught?.scope).toBe(BUCKET_ORCHESTRATOR);
+    // Load-bearing for the operator signal: err.code must include the
+    // scope so the orchestrator's halt.reason = err.code path threads
+    // it into runs.error. Without this, ops only sees the generic
+    // 'cost_ceiling_hit' with no clue WHICH tier ran away.
+    expect(caught?.code).toBe(`cost_ceiling_hit:${BUCKET_ORCHESTRATOR}`);
     expect(caught?.ceiling).toBe(0.3);
     expect(caught?.spent).toBeCloseTo(0.25, 5);
   });

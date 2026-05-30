@@ -13,6 +13,7 @@ import { v7 as uuidv7 } from 'uuid';
 
 import type { Db } from '../db/client.js';
 import { costLedger } from '../db/schema.js';
+import { bucketForStage, type CostBucket } from './buckets.js';
 import { computeCostUsd } from './pricing.js';
 
 export interface CostEntry {
@@ -35,6 +36,11 @@ export interface CostEntry {
 /**
  * Insert a single cost row. Returns the computed USD so callers don't have
  * to recompute for telemetry.
+ *
+ * Phase 3: the row's `bucket` column is derived from `entry.stage` via
+ * `bucketForStage()`. Callers don't need to know about the stage→bucket
+ * mapping. Stages we don't recognise produce a null bucket — the row
+ * still lands but doesn't count against any sub-budget ceiling.
  */
 export async function recordCost(db: Db, entry: CostEntry): Promise<number> {
   const usd =
@@ -47,6 +53,7 @@ export async function recordCost(db: Db, entry: CostEntry): Promise<number> {
     outputTokens: entry.outputTokens,
     usd: usd.toFixed(6),
     stage: entry.stage,
+    bucket: bucketForStage(entry.stage),
   });
   return usd;
 }
@@ -80,6 +87,33 @@ export async function dailyTotalUsd(db: Db): Promise<number> {
     sql`SELECT COALESCE(SUM(usd), 0)::text AS total
         FROM cost_ledger
         WHERE occurred_at >= date_trunc('day', NOW(), 'UTC')`,
+  );
+  const total = rows[0]?.total ?? '0';
+  return Number(total);
+}
+
+/**
+ * Sum USD spent today (UTC) inside a given bucket. Used by Phase 3
+ * per-stage sub-budget enforcement — see `assertWithinCeiling` in
+ * src/cost/ceiling.ts.
+ *
+ * Same boundary semantics as `dailyTotalUsd` — see the comment block
+ * above for why we use the 3-arg `date_trunc(..., 'UTC')`.
+ *
+ * The bucket-filter index (idx_cost_ledger_bucket_occurred_at, partial
+ * `WHERE bucket IS NOT NULL`) makes this a thin index seek. Historical
+ * rows with NULL bucket are excluded from this sum even if they fall
+ * inside the current day window — they predate the bucket column.
+ */
+export async function dailyTotalUsdByBucket(
+  db: Db,
+  bucket: CostBucket,
+): Promise<number> {
+  const rows = await db.execute<{ total: string | null }>(
+    sql`SELECT COALESCE(SUM(usd), 0)::text AS total
+        FROM cost_ledger
+        WHERE bucket = ${bucket}
+          AND occurred_at >= date_trunc('day', NOW(), 'UTC')`,
   );
   const total = rows[0]?.total ?? '0';
   return Number(total);

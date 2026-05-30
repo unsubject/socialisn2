@@ -63,6 +63,7 @@ import { type SQL, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
 
 import type { Db } from '../db/client.js';
+import { BUCKET_NORMALIZE } from '../cost/buckets.js';
 import { CostCeilingHitError, assertWithinCeiling as defaultAssertWithinCeiling } from '../cost/ceiling.js';
 import { recordCost as defaultRecordCost } from '../cost/ledger.js';
 import { EMBEDDING_DIM } from '../db/schema.js';
@@ -162,7 +163,7 @@ export async function processRawItem(
   // attempts counter stays put so the row will be re-tried cleanly once
   // the day rolls over.
   try {
-    await assertCeiling(db, NORMALIZE_PROJECTED_USD);
+    await assertCeiling(db, NORMALIZE_PROJECTED_USD, BUCKET_NORMALIZE);
   } catch (err) {
     if (err instanceof CostCeilingHitError) {
       return { kind: 'ceiling_hit' };

@@ -282,3 +282,66 @@ describe('stripBoilerplate — CRLF', () => {
     expect(stripBoilerplate(text)).toBe('Story body\r\nMore body');
   });
 });
+
+describe('stripBoilerplate — first-line guard', () => {
+  // Regression for the 2026-05-16 audit deferred-list item (3),
+  // originally flagged in PR #33 review. A newsletter whose absolute
+  // first line is a marker (e.g. "View this email in your browser")
+  // previously had its entire body cut to empty. The MIN_LEAD_NONEMPTY_LINES
+  // guard skips a marker that appears with 0 non-empty lines before it,
+  // treating it as preamble rather than the intended footer.
+
+  it('does NOT cut when "view this email" is the absolute first line', () => {
+    const text = `View this email in your browser
+
+Story headline
+Body paragraph one.
+Body paragraph two.`;
+    // 0 non-empty lines before the marker -> skipped. Full body preserved.
+    expect(stripBoilerplate(text)).toBe(text.trimEnd());
+  });
+
+  it('does NOT cut when unsubscribe is the absolute first line', () => {
+    const text = `Unsubscribe
+
+Body of the message goes here.
+More content.`;
+    expect(stripBoilerplate(text)).toBe(text.trimEnd());
+  });
+
+  it('does NOT cut when © copyright is the absolute first line', () => {
+    const text = `© 2026 Publisher Inc.
+
+Real story headline
+Real story body.`;
+    expect(stripBoilerplate(text)).toBe(text.trimEnd());
+  });
+
+  it('does cut when a marker reappears later as a real footer', () => {
+    // The preamble "view this email" on line 1 is skipped by the
+    // guard, but the SECOND occurrence near the bottom is honored —
+    // pin this behavior so a future refactor doesn't drop multi-match
+    // walking.
+    const text = `View this email in your browser
+
+Story headline
+Body line one.
+Body line two.
+
+View this email in your browser online
+Footer line.`;
+    const out = stripBoilerplate(text);
+    expect(out).toContain('Story headline');
+    expect(out).toContain('Body line two.');
+    expect(out).not.toContain('Footer line.');
+  });
+
+  it('still cuts when a marker is on line 2 after a real headline (existing behavior preserved)', () => {
+    // The original test at line 26-31 of this file pinned this shape.
+    // Threshold=1 keeps the cut here: 1 non-empty line ("Headline") >= 1.
+    const text = `Headline
+View this email in your browser
+…`;
+    expect(stripBoilerplate(text)).toBe('Headline');
+  });
+});

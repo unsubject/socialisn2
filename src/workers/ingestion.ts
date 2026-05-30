@@ -19,6 +19,7 @@ import {
   writeCompetitorVideos,
 } from '../ingestion/competitor-writer.js';
 import { fetchAndParseEmailBridge } from '../ingestion/email-bridge.js';
+import { filterHnIngestion } from '../ingestion/hn-filter.js';
 import { fetchAndParseRss } from '../ingestion/rss.js';
 import { markSourceFetched } from '../ingestion/source-loader.js';
 import type { RawItemInput } from '../ingestion/types.js';
@@ -79,11 +80,16 @@ async function processSourceJob(db: Db, data: SourceJob): Promise<void> {
   }
 
   try {
-    const items = await fetchForSource(row.kind, row.url);
+    const fetchedItems = await fetchForSource(row.kind, row.url);
+    // SPEC §6.3 / migration 010 follow-up: hnrss feeds get a domain
+    // whitelist post-filter; every other source passes through unchanged.
+    // `filterHnIngestion` is a no-op for non-HN sources.
+    const { kept: items, droppedCount } = filterHnIngestion(row.url, fetchedItems);
     const result = await writeRawItems(db, row.id, items);
     await markSourceFetched(db, row.id, `ok:${result.insertedCount}/${result.fetched}`);
+    const filterTag = droppedCount > 0 ? ` whitelist_dropped=${droppedCount}` : '';
     console.log(
-      `[ingestion-worker] ${row.kind} ${row.name} fetched=${result.fetched} inserted=${result.insertedCount} dup=${result.duplicateCount}`,
+      `[ingestion-worker] ${row.kind} ${row.name} fetched=${fetchedItems.length} inserted=${result.insertedCount} dup=${result.duplicateCount}${filterTag}`,
     );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -78,7 +78,7 @@ describe.skipIf(!DATABASE_URL)('mcp integration via POST /mcp', () => {
   beforeEach(async () => {
     await client.unsafe('TRUNCATE TABLE candidates CASCADE');
     process.env.SOCIALISN2_MCP_TOKEN = MCP_TOKEN;
-    app = buildApp(db);
+    app = buildApp(db, client);
     await app.ready();
   });
 

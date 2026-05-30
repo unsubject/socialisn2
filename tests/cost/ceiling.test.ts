@@ -17,6 +17,10 @@ import {
   checkCeiling,
   CostCeilingHitError,
 } from '../../src/cost/ceiling.js';
+import {
+  BUCKET_NORMALIZE,
+  BUCKET_ORCHESTRATOR,
+} from '../../src/cost/buckets.js';
 import { assertDestructiveAllowed } from '../helpers/destructive-guard.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -158,5 +162,85 @@ describe.skipIf(!DATABASE_URL)('cost ceiling (SPEC §12)', () => {
     expect(status.alertThreshold).toBe(0.5);
     expect(status.pctOfCeiling).toBeCloseTo(0.6, 5);
     expect(status.atAlertThreshold).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 3: per-bucket sub-budgets
+  // -------------------------------------------------------------------------
+
+  async function insertSpendInBucket(
+    usd: number,
+    bucket: 'normalize' | 'orchestrator',
+    stage: string,
+  ): Promise<void> {
+    const id = uuidv7();
+    await client`
+      INSERT INTO cost_ledger
+        (id, model, input_tokens, output_tokens, usd, stage, bucket)
+      VALUES
+        (${id}, 'test-model', 100, 50, ${usd.toFixed(6)}, ${stage}, ${bucket})
+    `;
+  }
+
+  it('assertWithinCeiling(bucket) trips the bucket-specific ceiling before the overall daily ceiling', async () => {
+    // Overall ceiling at $1.50. Set the orchestrator sub-budget to a
+    // tight $0.30 absolute so we can drive the bucket-trip path
+    // independently of the default-from-pct calc.
+    process.env.COST_CEILING_ORCHESTRATOR_DAILY_USD = '0.30';
+    await insertSpendInBucket(0.25, BUCKET_ORCHESTRATOR, 'stage6_curate');
+
+    let caught: CostCeilingHitError | null = null;
+    try {
+      // Projected 0.10 → bucket total 0.35 ≥ 0.30 → bucket trips.
+      // Overall total 0.25 + 0.10 = 0.35 ≪ overall 1.50 → would NOT trip
+      // overall. The bucket scope is what catches it.
+      await assertWithinCeiling(db, 0.1, BUCKET_ORCHESTRATOR);
+    } catch (err) {
+      caught = err as CostCeilingHitError;
+    }
+    expect(caught).toBeInstanceOf(CostCeilingHitError);
+    expect(caught?.scope).toBe(BUCKET_ORCHESTRATOR);
+    expect(caught?.ceiling).toBe(0.3);
+    expect(caught?.spent).toBeCloseTo(0.25, 5);
+  });
+
+  it('assertWithinCeiling(bucket) passes through to the daily check when the bucket sub-budget is fine', async () => {
+    process.env.COST_CEILING_NORMALIZE_DAILY_USD = '5.00';
+    // Bucket spend well under 5.00. Daily spend 1.0 + projected 0.6 = 1.6 ≥ 1.5 → daily trips.
+    await insertSpend(1.0);
+    let caught: CostCeilingHitError | null = null;
+    try {
+      await assertWithinCeiling(db, 0.6, BUCKET_NORMALIZE);
+    } catch (err) {
+      caught = err as CostCeilingHitError;
+    }
+    expect(caught).toBeInstanceOf(CostCeilingHitError);
+    expect(caught?.scope).toBe('daily');
+  });
+
+  it('default bucket ceiling = pct of overall when env override is unset', async () => {
+    // No override on COST_CEILING_NORMALIZE_DAILY_USD; default = 60% of
+    // COST_CEILING_DAILY_USD=1.50 → 0.90. Insert 0.85 into normalize +
+    // try to add 0.10 → bucket would land at 0.95 ≥ 0.90.
+    delete process.env.COST_CEILING_NORMALIZE_DAILY_USD;
+    await insertSpendInBucket(0.85, BUCKET_NORMALIZE, 'normalise');
+    let caught: CostCeilingHitError | null = null;
+    try {
+      await assertWithinCeiling(db, 0.10, BUCKET_NORMALIZE);
+    } catch (err) {
+      caught = err as CostCeilingHitError;
+    }
+    expect(caught).toBeInstanceOf(CostCeilingHitError);
+    expect(caught?.scope).toBe(BUCKET_NORMALIZE);
+    expect(caught?.ceiling).toBeCloseTo(0.9, 5);
+  });
+
+  it('no-bucket call preserves pre-Phase-3 behavior (overall ceiling only)', async () => {
+    // Heavy bucket spend in normalize. Without a bucket arg, the call
+    // should ONLY check daily — and pass, since 0.50 + 0.10 < 1.50.
+    process.env.COST_CEILING_NORMALIZE_DAILY_USD = '0.20';
+    await insertSpendInBucket(0.5, BUCKET_NORMALIZE, 'normalise');
+    const status = await assertWithinCeiling(db, 0.1); // no bucket
+    expect(status.spent).toBeCloseTo(0.5);
   });
 });

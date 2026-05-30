@@ -16,10 +16,11 @@ import process from 'node:process';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { v7 as uuidv7 } from 'uuid';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import * as schema from '../../src/db/schema.js';
 import { runNow, systemStatus } from '../../src/mcp/tools/runs.js';
+import { RUN_LOCK_KEY } from '../../src/orchestrator/lock.js';
 import { assertDestructiveAllowed } from '../helpers/destructive-guard.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -54,6 +55,34 @@ describe.skipIf(!DATABASE_URL)('mcp tools/runs', () => {
     delete process.env.RSS_PATH;
     delete process.env.TELEGRAM_BOT_TOKEN;
     delete process.env.TELEGRAM_CHAT_ID;
+  });
+
+  // runNow fires runScoring background-only and releases the advisory
+  // lock in `.finally`. If the next test calls runNow before that
+  // finally has run, it sees lock-held → returns {skipped_locked} →
+  // the test polls a null run_id and times out. TRUNCATE does NOT
+  // release advisory locks (they're session-scoped), so we wait for
+  // the lock to free explicitly between tests. Bounded retry so a true
+  // lock-leak fails loud rather than hanging the suite indefinitely.
+  afterEach(async () => {
+    for (let i = 0; i < 100; i++) {
+      const probe = await client.reserve();
+      try {
+        const rows = await probe<{ locked: boolean }[]>`
+          SELECT pg_try_advisory_lock(${RUN_LOCK_KEY}) AS locked
+        `;
+        if (rows[0]?.locked === true) {
+          await probe`SELECT pg_advisory_unlock(${RUN_LOCK_KEY})`;
+          return;
+        }
+      } finally {
+        probe.release();
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error(
+      'tests/mcp/runs.test.ts: prior test never released the run lock within 5s',
+    );
   });
 
   // -------------------------------------------------------------------------

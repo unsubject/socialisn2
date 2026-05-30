@@ -679,6 +679,15 @@ async function finaliseRun(
     clusters_advanced_to_stage4: stats.clustersAdvancedToStage4,
     clusters_failed_at_curate: stats.clustersFailedAtCurate,
   };
+  // Phase 2.b: gate the UPDATE on `status='running'` so a legitimate
+  // long-running pass that the watchdog already flipped to 'failed'
+  // (because it exceeded the 90-min stuck-runs threshold) can't be
+  // overwritten back to 'completed' here. The watchdog's audit signal
+  // — the operator's only way to see "this run took longer than the
+  // agreed ceiling" — would otherwise be silently lost. With the
+  // predicate, finaliseRun becomes a no-op in the race case and the
+  // watchdog's verdict stands. The common (non-racing) path is
+  // unchanged: the row still has status='running' when we update it.
   await db.execute(sql`
     UPDATE runs
     SET completed_at   = NOW(),
@@ -689,6 +698,7 @@ async function finaliseRun(
         error          = ${error ?? null},
         metadata       = ${sql.raw("'" + JSON.stringify(metadata).replace(/'/g, "''") + "'")}::jsonb
     WHERE id = ${runId}
+      AND status = 'running'
   `);
 }
 

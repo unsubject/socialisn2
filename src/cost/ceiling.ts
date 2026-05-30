@@ -50,8 +50,13 @@ export interface CeilingStatus {
 }
 
 export class CostCeilingHitError extends Error {
-  /** SPEC §12 reason code, used for logging and runs.error. */
-  readonly code = 'cost_ceiling_hit';
+  /** SPEC §12 reason code, scope-suffixed so the orchestrator's
+   *  `halt.reason = err.code` path (src/orchestrator/run.ts) carries
+   *  the scope into `runs.error`. Pre-Phase-3 the code was just the
+   *  constant `'cost_ceiling_hit'`; that meant a per-bucket trip
+   *  surfaced as a generic `cost_ceiling_hit` in runs.error with no
+   *  signal as to which tier ran away. */
+  readonly code: 'cost_ceiling_hit' | `cost_ceiling_hit:${'daily' | CostBucket}`;
   constructor(
     public readonly spent: number,
     public readonly projected: number,
@@ -64,17 +69,26 @@ export class CostCeilingHitError extends Error {
       `Cost ceiling hit (${scope}): spent=$${spent.toFixed(4)} + projected=$${projected.toFixed(4)} >= ceiling=$${ceiling.toFixed(2)}`,
     );
     this.name = 'CostCeilingHitError';
+    this.code = `cost_ceiling_hit:${scope}`;
   }
 }
 
 /** Resolve the per-bucket ceiling from env. Used by assertWithinCeiling
- *  when a bucket is provided. */
+ *  when a bucket is provided. The `never` branch is an exhaustiveness
+ *  check — adding a third bucket without updating this switch becomes a
+ *  TS compile error rather than a runtime silent-pass (where bucketCap
+ *  would be `undefined`, then NaN >= NaN === false → the gate would
+ *  silently let the call through). */
 function bucketCeiling(bucket: CostBucket): number {
   switch (bucket) {
     case BUCKET_NORMALIZE:
       return env.costCeilingNormalizeDailyUsd();
     case BUCKET_ORCHESTRATOR:
       return env.costCeilingOrchestratorDailyUsd();
+    default: {
+      const _exhaustive: never = bucket;
+      throw new Error(`bucketCeiling: unhandled bucket ${String(_exhaustive)}`);
+    }
   }
 }
 

@@ -154,6 +154,21 @@ services:
         condition: service_healthy
     env_file: .env
     command: ["node", "dist/src/workers/ingestion.js"]
+    # Phase 2.c heartbeat-file healthcheck. The worker process touches
+    # /tmp/socialisn2-ingestion.heartbeat every 30s via
+    # startHeartbeat() in src/workers/ingestion.ts. This CLI invocation
+    # exits non-zero once the mtime is more than 120s stale → docker
+    # marks the container unhealthy. With restart: unless-stopped,
+    # docker recreates on a stale heartbeat — covering the case where
+    # the Node process is alive but the BullMQ / cron loop has silently
+    # wedged. A `pgrep`-style "is process alive" check wouldn't catch
+    # that class.
+    healthcheck:
+      test: ["CMD", "node", "dist/scripts/worker-healthcheck.js", "ingestion"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   scoring-worker:
     build: .
@@ -175,6 +190,13 @@ services:
       # → defaultRegenerateFeeds → generateAllFeeds). Same mount as app
       # so either container can be the writer.
       - feeds_data:/var/www/socialisn2/feeds
+    # Same heartbeat pattern as ingestion-worker; see comment there.
+    healthcheck:
+      test: ["CMD", "node", "dist/scripts/worker-healthcheck.js", "scoring"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   whisper-worker:
     build: .
@@ -186,6 +208,9 @@ services:
         condition: service_healthy
     env_file: .env
     # Phase 2 PR 1 (ADR-006 — Whisper model size for Cantonese) replaces this stub.
+    # NO healthcheck — the placeholder command isn't a real worker, so a
+    # heartbeat would just produce noise. Add a real healthcheck when the
+    # worker is implemented.
     command: ["node", "-e", "console.log('whisper-worker placeholder'); setInterval(()=>{}, 1<<30)"]
 
 volumes:

@@ -39,6 +39,32 @@ const BOILERPLATE_MARKERS: RegExp[] = [
  */
 const MIN_LEAD_NONEMPTY_LINES = 1;
 
+/** Cached single-line variants of BOILERPLATE_MARKERS — the originals use
+ *  the 'm' flag so `^` anchors to start-of-line. When testing a single
+ *  line in isolation we want `^` to anchor at start-of-string; strip 'm'
+ *  but keep 'i' for case-insensitivity. Computed once at module init
+ *  since the marker set is fixed. */
+const SINGLE_LINE_MARKERS: RegExp[] = BOILERPLATE_MARKERS.map(
+  (re) => new RegExp(re.source, re.flags.replace(/m/g, '')),
+);
+
+function lineIsBoilerplateMarker(line: string): boolean {
+  for (const re of SINGLE_LINE_MARKERS) {
+    if (re.test(line)) return true;
+  }
+  return false;
+}
+
+/**
+ * Count non-empty content lines that appear strictly before `idx`. Lines
+ * that are themselves boilerplate markers (and would therefore be skipped
+ * by the guard) do NOT count as content — otherwise a multi-marker
+ * preamble (e.g. `Unsubscribe` followed by `View this email in your
+ * browser` on the next line, before the real body) would skip the FIRST
+ * marker via the guard but treat its line as a satisfied lead line for
+ * the SECOND, so the body would still get truncated to the first
+ * preamble line. Caught in PR #102 review.
+ */
 function nonEmptyLinesBefore(text: string, idx: number): number {
   let count = 0;
   let pos = 0;
@@ -46,7 +72,9 @@ function nonEmptyLinesBefore(text: string, idx: number): number {
     let nl = text.indexOf('\n', pos);
     if (nl === -1 || nl > idx) nl = idx;
     const line = text.slice(pos, nl);
-    if (line.trim().length > 0) count += 1;
+    if (line.trim().length > 0 && !lineIsBoilerplateMarker(line)) {
+      count += 1;
+    }
     if (nl === idx) break;
     pos = nl + 1;
   }

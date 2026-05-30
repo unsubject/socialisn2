@@ -16,7 +16,12 @@
 // dailyTotalUsd lives in ledger.ts — this module composes on top of it
 // rather than duplicating the per-day SUM query.
 
-import { dailyTotalUsd } from './ledger.js';
+import { dailyTotalUsd, dailyTotalUsdByBucket } from './ledger.js';
+import {
+  BUCKET_NORMALIZE,
+  BUCKET_ORCHESTRATOR,
+  type CostBucket,
+} from './buckets.js';
 import { env } from '../config/env.js';
 import type { Db } from '../db/client.js';
 
@@ -51,11 +56,25 @@ export class CostCeilingHitError extends Error {
     public readonly spent: number,
     public readonly projected: number,
     public readonly ceiling: number,
+    /** Phase 3: which budget tripped — 'daily', 'normalize', or
+     *  'orchestrator'. 'daily' for the overall ceiling. */
+    public readonly scope: 'daily' | CostBucket = 'daily',
   ) {
     super(
-      `Cost ceiling hit: spent=$${spent.toFixed(4)} + projected=$${projected.toFixed(4)} >= ceiling=$${ceiling.toFixed(2)}`,
+      `Cost ceiling hit (${scope}): spent=$${spent.toFixed(4)} + projected=$${projected.toFixed(4)} >= ceiling=$${ceiling.toFixed(2)}`,
     );
     this.name = 'CostCeilingHitError';
+  }
+}
+
+/** Resolve the per-bucket ceiling from env. Used by assertWithinCeiling
+ *  when a bucket is provided. */
+function bucketCeiling(bucket: CostBucket): number {
+  switch (bucket) {
+    case BUCKET_NORMALIZE:
+      return env.costCeilingNormalizeDailyUsd();
+    case BUCKET_ORCHESTRATOR:
+      return env.costCeilingOrchestratorDailyUsd();
   }
 }
 
@@ -79,20 +98,48 @@ export async function checkCeiling(db: Db): Promise<CeilingStatus> {
  * cent that takes us across. COMPARISON_EPSILON folds FP slack into the
  * same direction — a sum that's mathematically at the ceiling but lands
  * one ulp below in floats still trips.
+ *
+ * Phase 3: when `bucket` is provided, checks BOTH the per-bucket daily
+ * ceiling (from env.costCeilingNormalizeDailyUsd / OrchestratorDailyUsd)
+ * AND the overall daily ceiling. Either tripping throws CostCeilingHitError
+ * with the corresponding scope. Without a bucket, behavior is unchanged
+ * from pre-Phase 3 — overall daily ceiling only. The returned status
+ * always describes the OVERALL ceiling (the bucket sub-budget is a
+ * runtime check, not user-facing telemetry surface — for now).
  */
 export async function assertWithinCeiling(
   db: Db,
   projectedCostUsd: number,
+  bucket?: CostBucket,
 ): Promise<CeilingStatus> {
   if (!Number.isFinite(projectedCostUsd) || projectedCostUsd < 0) {
     throw new Error(
       `assertWithinCeiling: projectedCostUsd must be a non-negative finite number (got ${projectedCostUsd})`,
     );
   }
+
+  // Phase 3: bucket check FIRST when provided. A normalize run that
+  // blew its sub-budget should fail loud with scope='normalize' even if
+  // the overall daily ceiling is still under — the operator wants to
+  // see WHICH stage went runaway, not just "we hit the ceiling".
+  if (bucket) {
+    const bucketCap = bucketCeiling(bucket);
+    const bucketSpent = await dailyTotalUsdByBucket(db, bucket);
+    if (bucketSpent + projectedCostUsd + COMPARISON_EPSILON >= bucketCap) {
+      throw new CostCeilingHitError(
+        bucketSpent,
+        projectedCostUsd,
+        bucketCap,
+        bucket,
+      );
+    }
+  }
+
+  // Overall daily ceiling — always checked.
   const ceiling = env.costCeilingDailyUsd();
   const spent = await dailyTotalUsd(db);
   if (spent + projectedCostUsd + COMPARISON_EPSILON >= ceiling) {
-    throw new CostCeilingHitError(spent, projectedCostUsd, ceiling);
+    throw new CostCeilingHitError(spent, projectedCostUsd, ceiling, 'daily');
   }
   return buildStatus(spent);
 }

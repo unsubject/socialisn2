@@ -67,7 +67,7 @@ describe.skipIf(!DATABASE_URL)('Fastify app (src/app.ts)', () => {
       VALUES (${clusterId}, ${zeroVec}::vector(1536),
               NOW(), NOW(), 1, ARRAY['economy']::text[], 'economy', 'active')
     `;
-    app = buildApp(db);
+    app = buildApp(db, client);
     await app.ready();
   });
 

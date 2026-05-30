@@ -98,7 +98,16 @@ export async function runNow(
       } catch {
         // ignored — connection-end auto-releases anyway
       }
-      reserved.release();
+      try {
+        reserved.release();
+      } catch {
+        // reserved.release() can throw if the underlying connection
+        // ended (SIGTERM teardown closes raw via close(); the
+        // background runScoring's finally races that). Swallow so the
+        // fire-and-forget chain doesn't emit an unhandled rejection.
+        // The connection is already gone; release() throwing means
+        // there's nothing to release.
+      }
     });
 
   return { run_id: runId, status: 'started' };

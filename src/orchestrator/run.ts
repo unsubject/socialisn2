@@ -151,6 +151,11 @@ export interface RunResult {
   clustersDroppedByArchive: number;
   clustersFlaggedRelatedToRecentWork: number;
   clustersBelowCutoff: number;
+  /** Per-cluster curate-stage exceptions caught and skipped — usually
+   *  malformed-JSON parses from the curate LLM. The run continues with
+   *  the next cluster instead of aborting; the count surfaces via
+   *  /status so a spike is visible without a log dive. */
+  clustersFailedAtCurate: number;
   candidatesPersisted: number;
   totalCostUsd: number;
   status: 'completed' | 'failed';
@@ -209,6 +214,7 @@ export async function runScoring(
     clustersDroppedByArchive: 0,
     clustersFlaggedRelatedToRecentWork: 0,
     clustersBelowCutoff: 0,
+    clustersFailedAtCurate: 0,
     candidatesPersisted: 0,
     totalCostUsd: 0,
   };
@@ -321,24 +327,50 @@ export async function runScoring(
       // Obs-2 — see note above the Stage-4 assertWithinCeiling block.
       await safeMaybeFireCostAlert(db, notifyCostAlert);
 
-      const curation = await curate({
-        headline: summary.output.headline,
-        contextSummary: summary.output.contextSummary,
-        keywords: summary.output.keywords,
-        tags: summary.output.tags,
-        primaryDomain: cluster.primary_domain as Domain,
-        sources: dedupeSources(summariseItems),
-        temperature: cluster.temperature.temperature,
-        trajectory: cluster.trajectory.trajectory,
-        archiveOverlap: overlap.overlap,
-        archiveOverlapLinks: overlap.links.map((l) => ({
-          title: l.title,
-          url: l.url,
-          similarity: l.similarity,
-          type: l.type,
-        })),
-        isExclusive: cluster.exclusive.isExclusive,
-      });
+      // Curate is the only point in the loop where a parse-time
+      // exception from the LLM (malformed JSON, missing required
+      // field) used to abort the entire run via the outer catch.
+      // Post-2026-05-30 Gemini swap, that meant one bad cluster's
+      // output killed every other cluster's progress — see the
+      // production incident on that date. Wrap the call so we skip
+      // the offending cluster, surface it via clustersFailedAtCurate
+      // / log, and continue. Network / ceiling errors still propagate.
+      let curation: Awaited<ReturnType<typeof curate>>;
+      try {
+        curation = await curate({
+          headline: summary.output.headline,
+          contextSummary: summary.output.contextSummary,
+          keywords: summary.output.keywords,
+          tags: summary.output.tags,
+          primaryDomain: cluster.primary_domain as Domain,
+          sources: dedupeSources(summariseItems),
+          temperature: cluster.temperature.temperature,
+          trajectory: cluster.trajectory.trajectory,
+          archiveOverlap: overlap.overlap,
+          archiveOverlapLinks: overlap.links.map((l) => ({
+            title: l.title,
+            url: l.url,
+            similarity: l.similarity,
+            type: l.type,
+          })),
+          isExclusive: cluster.exclusive.isExclusive,
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Only swallow parse/validation errors — the
+        // `curate: LLM did not return valid JSON` and `curate:
+        // curation_score ...` family. Anything else (network, 5xx
+        // post-retry, ceiling) is propagated to the outer catch so
+        // the run fails loudly.
+        if (msg.startsWith('curate:')) {
+          stats.clustersFailedAtCurate += 1;
+          console.warn(
+            `[orchestrator] skipped cluster ${cluster.id} at Stage 6: ${msg.slice(0, 240)}`,
+          );
+          continue;
+        }
+        throw err;
+      }
       stats.totalCostUsd += await recordCost(db, {
         runId,
         model: curation.llm.model,
@@ -634,6 +666,7 @@ async function finaliseRun(
     clustersDroppedByArchive: number;
     clustersFlaggedRelatedToRecentWork: number;
     clustersBelowCutoff: number;
+    clustersFailedAtCurate: number;
     candidatesPersisted: number;
     totalCostUsd: number;
   },
@@ -644,6 +677,7 @@ async function finaliseRun(
     clusters_flagged_related_to_recent_work: stats.clustersFlaggedRelatedToRecentWork,
     clusters_below_cutoff: stats.clustersBelowCutoff,
     clusters_advanced_to_stage4: stats.clustersAdvancedToStage4,
+    clusters_failed_at_curate: stats.clustersFailedAtCurate,
   };
   await db.execute(sql`
     UPDATE runs

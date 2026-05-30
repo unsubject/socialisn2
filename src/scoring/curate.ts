@@ -160,6 +160,24 @@ function toWireShape(input: CurateInput): Record<string, unknown> {
 }
 
 /**
+ * Strip trailing commas inside { } and [ ] blocks. Strict JSON forbids
+ * them but Gemini 3.5 Flash routinely emits JS-object-literal-style
+ * output with `{"k": 1,}` and `["a","b",]`. Sonnet didn't do this so
+ * the production parser was strict pre-2026-05-30. This fallback runs
+ * only if the initial strict parse failed — strict-JSON-clean inputs
+ * are unaffected.
+ *
+ * Scope: handles the simple case `,<whitespace>[}\]]`. Does NOT attempt
+ * to be a full JSON5 parser — a string literal containing a literal
+ * `,` followed by `}` is the only edge case that could false-positive,
+ * and our prompt's expected output (a 1-2 sentence rationale) makes
+ * that extremely unlikely.
+ */
+function stripTrailingCommas(s: string): string {
+  return s.replace(/,(\s*[}\]])/g, '$1');
+}
+
+/**
  * Parse the LLM response into a validated CurationOutput. Exposed for
  * unit tests; production callers should call `curateCluster`.
  */
@@ -169,11 +187,19 @@ export function parseAndValidate(rawText: string): CurationOutput {
   let json: unknown;
   try {
     json = JSON.parse(cleaned);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `curate: LLM did not return valid JSON: ${msg}. Raw (first 200c): ${cleaned.slice(0, 200)}`,
-    );
+  } catch (firstErr: unknown) {
+    // Fallback: tolerate trailing commas (Gemini 3.5 Flash quirk).
+    // If THIS also fails, throw with the ORIGINAL error so debug
+    // output points at the actual syntax issue rather than at our
+    // sanitised string.
+    try {
+      json = JSON.parse(stripTrailingCommas(cleaned));
+    } catch {
+      const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      throw new Error(
+        `curate: LLM did not return valid JSON: ${msg}. Raw (first 200c): ${cleaned.slice(0, 200)}`,
+      );
+    }
   }
   if (!isObject(json)) {
     throw new Error('curate: LLM response was not a JSON object');

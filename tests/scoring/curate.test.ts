@@ -98,6 +98,27 @@ describe('parseAndValidate', () => {
     expect(out.curationScore).toBe(80);
   });
 
+  it('tolerates a trailing comma before the closing brace (Gemini 3.5 Flash quirk)', () => {
+    // Production incident 2026-05-30: Gemini occasionally emits
+    // `{"curation_score": 45, "curation_rationale": "...",}` — strict
+    // JSON.parse rejects with "Expected double-quoted property name".
+    // The fallback path strips the trailing comma and re-parses.
+    const out = parseAndValidate(
+      '{"curation_score": 45, "curation_rationale": "ok-enough story",}',
+    );
+    expect(out).toEqual({
+      curationScore: 45,
+      curationRationale: 'ok-enough story',
+    });
+  });
+
+  it('tolerates a trailing comma inside a code fence', () => {
+    const out = parseAndValidate(
+      '```json\n{"curation_score": 70, "curation_rationale": "x",}\n```',
+    );
+    expect(out.curationScore).toBe(70);
+  });
+
   it('throws when the response is not valid JSON', () => {
     expect(() => parseAndValidate('not json at all')).toThrow(/valid JSON/);
   });

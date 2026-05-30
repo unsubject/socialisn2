@@ -308,6 +308,94 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     expect(result.candidatesPersisted).toBe(0);
   });
 
+  it('skips cluster + continues run when curate throws a parse error (Gemini 3.5 Flash bad JSON)', async () => {
+    // Regression for the 2026-05-30 production incident: Gemini emitted
+    // malformed JSON; the strict parser threw `curate: LLM did not return
+    // valid JSON: ...`; the outer catch then aborted the WHOLE run on
+    // the first bad cluster. Now: the parse error is caught, the
+    // cluster is counted in clustersFailedAtCurate, and the run
+    // continues with the next cluster.
+    const c1 = await makeCluster();
+    const c2 = await makeCluster();
+    await attachItem(c1, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(c1, sourceB, new Date(Date.now() - 1 * 3_600_000));
+    await attachItem(c2, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(c2, sourceB, new Date(Date.now() - 1 * 3_600_000));
+
+    // First call: throw the exact shape parseAndValidate raises.
+    // Second call: normal happy-path curation that should land a candidate.
+    let curateCalls = 0;
+    const curate: import('../../src/orchestrator/run.js').RunDependencies['curate'] =
+      async () => {
+        curateCalls += 1;
+        if (curateCalls === 1) {
+          throw new Error(
+            'curate: LLM did not return valid JSON: synthetic. Raw (first 200c): {bad,}',
+          );
+        }
+        return {
+          output: { curationScore: 75, curationRationale: 'good story' },
+          llm: {
+            text: '',
+            inputTokens: 500,
+            outputTokens: 80,
+            usd: 0.007,
+            model: 'gemini-3.5-flash',
+          },
+        };
+      };
+
+    const result = await runScoring(
+      db,
+      { kind: 'manual' },
+      {
+        summarise: makeStubSummarise(),
+        curate,
+        archiveSearcher: makeStubArchive([]),
+      },
+    );
+
+    expect(result.status).toBe('completed');
+    expect(result.error).toBeUndefined();
+    expect(result.clustersFailedAtCurate).toBe(1);
+    expect(result.candidatesPersisted).toBe(1);
+    expect(curateCalls).toBe(2);
+
+    const runRow = await client<{ status: string; metadata: { clusters_failed_at_curate?: number } }[]>`
+      SELECT status, metadata FROM runs
+    `;
+    expect(runRow[0]!.status).toBe('completed');
+    expect(runRow[0]!.metadata.clusters_failed_at_curate).toBe(1);
+  });
+
+  it('still propagates non-parse errors from curate (network, rate limit, etc.) to abort the run', async () => {
+    // The skip-on-error guard is scoped to messages starting with
+    // `curate:` — the parse/validation family. Network or upstream-5xx
+    // failures must STILL abort the run so they're not masked.
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+
+    const curate: import('../../src/orchestrator/run.js').RunDependencies['curate'] =
+      async () => {
+        throw new Error('LiteLLM call failed: HTTP 503');
+      };
+
+    const result = await runScoring(
+      db,
+      { kind: 'manual' },
+      {
+        summarise: makeStubSummarise(),
+        curate,
+        archiveSearcher: makeStubArchive([]),
+      },
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('HTTP 503');
+    expect(result.clustersFailedAtCurate).toBe(0);
+  });
+
   it('halts mid-run with status=completed + error=cost_ceiling_hit when ceiling fires', async () => {
     // Sized so cluster 1 fully processes ($0.0076 spent: $0.0006 summarise +
     // $0.007 curate stub) and cluster 2's pre-curate gate trips. The gate

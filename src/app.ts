@@ -15,6 +15,7 @@
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { sql } from 'drizzle-orm';
+import type { Sql } from 'postgres';
 
 import { env } from './config/env.js';
 import type { Db } from './db/client.js';
@@ -55,7 +56,14 @@ type ClusterSourceRow = {
   published_at: string;
 };
 
-export function buildApp(db: Db): FastifyInstance {
+/**
+ * `raw` is the postgres-js client behind drizzle. Required so the MCP
+ * `run_now` tool can acquire the orchestrator advisory lock on a pinned
+ * connection (see src/orchestrator/lock.ts). Tests that don't exercise
+ * MCP can pass any postgres-js client — the lock is only touched by the
+ * run_now path.
+ */
+export function buildApp(db: Db, raw: Sql): FastifyInstance {
   const app = Fastify({
     // Disable Fastify's default JSON-line logger — workers in this repo
     // log via console.* and we want a single log shape per process. Ops
@@ -151,7 +159,7 @@ export function buildApp(db: Db): FastifyInstance {
     void app.register(mcpPlugin, {
       prefix: '/mcp',
       token: mcpToken,
-      buildServer: () => buildMcpServer(db),
+      buildServer: () => buildMcpServer(db, raw),
     });
   }
 

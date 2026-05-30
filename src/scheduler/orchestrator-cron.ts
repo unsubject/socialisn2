@@ -19,10 +19,12 @@
 // runScoring's concern; we do NOT plumb them through this layer.
 
 import cron, { type ScheduledTask } from 'node-cron';
+import type { Sql } from 'postgres';
 
 import { env } from '../config/env.js';
 import type { Db } from '../db/client.js';
 import { createLogger, type Logger } from '../lib/logger.js';
+import { withRunLock } from '../orchestrator/lock.js';
 import {
   runScoring as defaultRunScoring,
   type RunKind,
@@ -70,6 +72,7 @@ export interface OrchestratorCronHandle {
  */
 export function startOrchestratorCron(
   db: Db,
+  raw: Sql,
   deps: OrchestratorCronDependencies = {},
 ): OrchestratorCronHandle {
   const runScoring = deps.runScoring ?? defaultRunScoring;
@@ -81,8 +84,21 @@ export function startOrchestratorCron(
     schedule(
       pattern,
       () => {
-        runScoring(db, { kind })
-          .then((result) => {
+        // withRunLock wraps the entire run in pg_try_advisory_lock on a
+        // reserved connection. If another tick / MCP run_now is already
+        // mid-flight, the lock acquire fails and the work callback
+        // doesn't run — we log + skip + keep the cron alive for the
+        // next slot. No runs row is inserted on the skipped path
+        // because runScoring (which owns the INSERT) never runs.
+        withRunLock(raw, () => runScoring(db, { kind }))
+          .then((outcome) => {
+            if (!outcome.acquired) {
+              log.warn('orchestrator cron tick skipped: lock held by another run', {
+                kind,
+              });
+              return;
+            }
+            const result = outcome.result;
             log.info('orchestrator run complete', {
               kind,
               run_id: result.runId,

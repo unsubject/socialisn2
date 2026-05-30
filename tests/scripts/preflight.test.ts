@@ -202,4 +202,45 @@ describe('preflight CLI', () => {
     expect(out.stderr).toMatch(/::error::/);
     expect(out.stderr).toMatch(/COST_CEILING_DAILY_USD/);
   });
+
+  it('skips the LiteLLM smoke probe when PREFLIGHT_LITELLM_PROBE is unset (test default)', () => {
+    // Without PREFLIGHT_LITELLM_PROBE, the litellm_route_* steps are
+    // not appended — proving the probe is strictly opt-in. The env
+    // here would otherwise fail at the probe step since
+    // litellm.test:4000 is unreachable.
+    const out = runPreflight({
+      LITELLM_BASE_URL: 'http://litellm.test:4000/',
+      LITELLM_API_KEY: 'stub',
+      OPENAI_API_KEY: 'stub',
+      COST_CEILING_DAILY_USD: '2.20',
+      COST_ALERT_THRESHOLD: '0.80',
+      PUBLIC_HOST: 'example.test',
+      PREFLIGHT_LITELLM_PROBE: undefined,
+    });
+    expect(out.status).toBe(0);
+    expect(out.stderr).not.toMatch(/litellm_route_/);
+    expect(out.stdout + out.stderr).toMatch(/preflight OK/);
+  });
+
+  it('runs the LiteLLM smoke probe and fails non-zero when PREFLIGHT_LITELLM_PROBE=1 and the proxy is unreachable', () => {
+    // The probe attempts a real HTTP request to LITELLM_BASE_URL; a
+    // closed port surfaces as a fetch network error, which the
+    // probe converts into a non-ok CheckOutcome and the preflight
+    // exits 1 with a litellm_route_* annotation. Pin the failure
+    // shape so a future refactor doesn't silently no-op the probe.
+    const out = runPreflight({
+      // 127.0.0.1:1 is reliably closed/refused — matches the pattern
+      // already used in connectWithRedactedErrors tests above.
+      LITELLM_BASE_URL: 'http://127.0.0.1:1/',
+      LITELLM_API_KEY: 'stub',
+      OPENAI_API_KEY: 'stub',
+      COST_CEILING_DAILY_USD: '2.20',
+      COST_ALERT_THRESHOLD: '0.80',
+      PUBLIC_HOST: 'example.test',
+      PREFLIGHT_LITELLM_PROBE: '1',
+    });
+    expect(out.status).not.toBe(0);
+    expect(out.stderr).toMatch(/::error::/);
+    expect(out.stderr).toMatch(/litellm_route_/);
+  }, 30_000);
 });

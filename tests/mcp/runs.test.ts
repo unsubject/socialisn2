@@ -61,7 +61,7 @@ describe.skipIf(!DATABASE_URL)('mcp tools/runs', () => {
   // -------------------------------------------------------------------------
 
   it('run_now: returns run_id synchronously + row exists with status=running', async () => {
-    const result = await runNow(db, {});
+    const result = await runNow(db, client, {});
     expect(result.status).toBe('started');
     expect(result.run_id).toMatch(/^[0-9a-f-]{36}$/);
 
@@ -79,7 +79,7 @@ describe.skipIf(!DATABASE_URL)('mcp tools/runs', () => {
   });
 
   it('run_now: background runScoring drives the row to completed when there are no clusters', async () => {
-    const result = await runNow(db, {});
+    const result = await runNow(db, client, {});
     // Poll for transition — bounded retry so the test fails loud if
     // background never completes (rather than hanging forever).
     let status = 'running';

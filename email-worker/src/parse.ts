@@ -23,13 +23,58 @@ const BOILERPLATE_MARKERS: RegExp[] = [
  * Cut the body at the FIRST boilerplate marker we recognise. Returns the
  * prefix as a trimmed string. If no marker fires, returns the input
  * trimmed. Empty input → empty string.
+ *
+ * First-line guard: a marker that appears with fewer than
+ * MIN_LEAD_NONEMPTY_LINES content lines before it is treated as preamble
+ * (e.g. an issue's "View this email in your browser" header) rather than
+ * the footer it was designed to detect. Without this, a newsletter whose
+ * first line IS the marker had its entire body cut to empty. PR #33
+ * review surfaced this; tracked in the 2026-05-16 Phase 0-2 audit
+ * deferred list. Threshold=1 fixes the absolute-first-line case without
+ * changing behavior for any other shape we have a test for.
+ *
+ * When a marker appears BOTH as preamble (skipped) AND later as a real
+ * footer, the later occurrence is honored — see `findFirstHonoredMatch`
+ * walking matchAll, not stopping at the first match.
  */
+const MIN_LEAD_NONEMPTY_LINES = 1;
+
+function nonEmptyLinesBefore(text: string, idx: number): number {
+  let count = 0;
+  let pos = 0;
+  while (pos < idx) {
+    let nl = text.indexOf('\n', pos);
+    if (nl === -1 || nl > idx) nl = idx;
+    const line = text.slice(pos, nl);
+    if (line.trim().length > 0) count += 1;
+    if (nl === idx) break;
+    pos = nl + 1;
+  }
+  return count;
+}
+
+function findFirstHonoredMatch(re: RegExp, text: string): number | null {
+  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
+  const globalRe = new RegExp(re.source, flags);
+  let m: RegExpExecArray | null;
+  while ((m = globalRe.exec(text)) !== null) {
+    if (nonEmptyLinesBefore(text, m.index) >= MIN_LEAD_NONEMPTY_LINES) {
+      return m.index;
+    }
+    // Zero-length match would infinite-loop on lastIndex; the markers
+    // here always consume at least one char ("u" in "unsubscribe"
+    // etc.) so this is defensive only.
+    if (m.index === globalRe.lastIndex) globalRe.lastIndex += 1;
+  }
+  return null;
+}
+
 export function stripBoilerplate(text: string): string {
   if (!text) return '';
   let cutAt = text.length;
   for (const re of BOILERPLATE_MARKERS) {
-    const m = re.exec(text);
-    if (m && m.index < cutAt) cutAt = m.index;
+    const idx = findFirstHonoredMatch(re, text);
+    if (idx !== null && idx < cutAt) cutAt = idx;
   }
   return text.slice(0, cutAt).trimEnd();
 }

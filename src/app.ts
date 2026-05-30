@@ -19,6 +19,7 @@ import type { Sql } from 'postgres';
 
 import { env } from './config/env.js';
 import type { Db } from './db/client.js';
+import { pingDatabase } from './lib/healthcheck.js';
 import { buildStatus } from './lib/status.js';
 import { UUID_RE } from './lib/uuid.js';
 import { buildMcpServer } from './mcp/server.js';
@@ -74,7 +75,26 @@ export function buildApp(db: Db, raw: Sql): FastifyInstance {
     disableRequestLogging: true,
   });
 
-  app.get('/healthz', async () => ({ ok: true }));
+  // Liveness + DB-reachability probe. Pre-Phase 2.c this returned a
+  // hardcoded {ok:true} the moment Fastify booted — making docker
+  // healthcheck + Traefik probe both flip green even when the DB was
+  // unreachable. Now does a `SELECT 1` with a 2s timeout. On DB-side
+  // failure: 503 + a redacted reason. The Traefik label
+  // (`loadbalancer.healthcheck.path=/healthz`) flips the router to 503
+  // until the next probe is green, which is the friendlier signal to
+  // CF and clients than serving requests against a broken pool.
+  app.get('/healthz', async (_req, reply) => {
+    const result = await pingDatabase(db);
+    if (!result.ok) {
+      return reply.code(503).send({
+        ok: false,
+        db: 'unreachable',
+        latency_ms: result.latencyMs,
+        error: result.error,
+      });
+    }
+    return reply.send({ ok: true, db: 'reachable', latency_ms: result.latencyMs });
+  });
 
   // Open by design — see ADR-001/PR Obs-1 discussion. Surface is
   // observability-only (no mutators, no secrets). ops-digest polls

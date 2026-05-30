@@ -41,17 +41,24 @@ litellm_settings:
   # throwing — keeps src/lib/llm.ts provider-agnostic.
   drop_params: true
 
-  # Per-model fallback chain. When the named model returns a 5xx /
-  # rate-limit / timeout, LiteLLM tries the next entry in the list
-  # before surfacing failure to the caller. Added 2026-05-30 to
-  # contain Gemini outages — pre-fix, a Google 5xx burst translated
-  # 1:1 to scoring-run failures.
+  # Per-model fallback chain. LiteLLM engages this on 5xx /
+  # RateLimitError / Timeout / APIError-family failures. It DOES NOT
+  # engage on BadRequestError (4xx), including:
+  #   - provider-side content-policy 400 (e.g. Gemini safety filter
+  #     refusing the prompt)
+  #   - provider-side "model deprecated" 400
+  #   - the missing-route 400 emitted by THIS proxy when the requested
+  #     model_name isn't in `model_list` above (a class the
+  #     always-recycle-litellm step in deploy-vps.yml + the smoke
+  #     probe in scripts/preflight.ts is what catches)
+  # See https://github.com/BerriAI/litellm/issues/12503 for the
+  # currently-open behavior gap on 4xx pass-through.
   #
-  # NOT a substitute for routing fidelity: if the requested model
-  # name itself isn't in `model_list` above, the proxy returns 400
-  # at the routing layer BEFORE these fallbacks engage. The
-  # always-recycle-litellm step in deploy-vps.yml + the smoke probe
-  # in scripts/preflight.ts is what catches that class.
+  # Practical effect: 5xx outages and rate limits degrade gracefully;
+  # 4xx-class refusals propagate unmasked to the caller (where
+  # src/scoring/curate.ts already has skip-on-error wrapping for the
+  # parse-error class, and src/orchestrator/run.ts halts on
+  # CostCeilingHitError).
   #
   # Curate (Gemini 3.5 Flash) falls back to a cheaper Gemini, then
   # to Claude Haiku — even a full Google outage degrades to

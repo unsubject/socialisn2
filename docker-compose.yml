@@ -95,6 +95,11 @@ services:
       retries: 3
       start_period: 20s
     labels:
+      # Phase 2.c #1 fix — opt this container into autoheal's restart-
+      # on-unhealthy watch (see the autoheal service below). The label
+      # MUST be exactly `autoheal=true` (no `:` prefix); willfarrell/
+      # autoheal greps the docker event stream for that string.
+      - "autoheal=true"
       - "traefik.enable=true"
       # Catch-all on mcp.socialisn.com → app, lower priority than the
       # nginx PathPrefix(/feeds) router below. Handles /healthz,
@@ -158,17 +163,19 @@ services:
     # /tmp/socialisn2-ingestion.heartbeat every 30s via
     # startHeartbeat() in src/workers/ingestion.ts. This CLI invocation
     # exits non-zero once the mtime is more than 120s stale → docker
-    # marks the container unhealthy. With restart: unless-stopped,
-    # docker recreates on a stale heartbeat — covering the case where
-    # the Node process is alive but the BullMQ / cron loop has silently
-    # wedged. A `pgrep`-style "is process alive" check wouldn't catch
-    # that class.
+    # marks the container unhealthy. The autoheal sidecar (Phase 2.c #1
+    # fix) watches for that transition and `docker restart`s the
+    # container — covering the case where the Node process is alive but
+    # the BullMQ / cron loop has silently wedged. A `pgrep`-style
+    # "is process alive" check wouldn't catch that class.
     healthcheck:
       test: ["CMD", "node", "dist/scripts/worker-healthcheck.js", "ingestion"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 60s
+    labels:
+      - "autoheal=true"
 
   scoring-worker:
     build: .
@@ -197,6 +204,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
+    labels:
+      - "autoheal=true"
 
   whisper-worker:
     build: .
@@ -209,9 +218,57 @@ services:
     env_file: .env
     # Phase 2 PR 1 (ADR-006 — Whisper model size for Cantonese) replaces this stub.
     # NO healthcheck — the placeholder command isn't a real worker, so a
-    # heartbeat would just produce noise. Add a real healthcheck when the
-    # worker is implemented.
+    # heartbeat would just produce noise. autoheal (below) only watches
+    # services that opt in via the `autoheal=true` label, so this
+    # placeholder is invisible to it. Add both a real healthcheck AND
+    # the label when the worker is implemented.
     command: ["node", "-e", "console.log('whisper-worker placeholder'); setInterval(()=>{}, 1<<30)"]
+
+  autoheal:
+    # Phase 2.c #1 fix. Plain docker-compose's `restart: unless-stopped`
+    # only fires on container EXIT, not on healthcheck transitions to
+    # unhealthy. Without something watching health events, a wedged-
+    # but-process-alive worker (BullMQ loop crashed, DB pool jammed,
+    # /tmp filesystem went read-only) gets flagged `(unhealthy)` in
+    # `docker compose ps` but never recreated — operator sees the
+    # signal but no recovery happens.
+    #
+    # willfarrell/autoheal watches the docker event stream for
+    # health-status transitions and `docker restart`s any container
+    # whose label `autoheal=true` is set AND whose status flips to
+    # unhealthy. Opt-in via the label so we don't accidentally start
+    # restarting third-party sidecars (the Traefik project on the
+    # same host, etc).
+    #
+    # Containers carrying `autoheal=true` in this project:
+    #   - app (Fastify + /healthz DB roundtrip; Phase 2.c)
+    #   - ingestion-worker (heartbeat-mtime; Phase 2.c)
+    #   - scoring-worker (heartbeat-mtime; Phase 2.c)
+    # NOT carrying the label:
+    #   - postgres / redis / litellm — these have their own
+    #     health/restart semantics; autoheal would race with them
+    #   - nginx, whisper-worker — no real healthcheck to react to
+    #   - autoheal itself
+    image: willfarrell/autoheal:latest
+    restart: unless-stopped
+    environment:
+      # `label` mode = act only on containers with autoheal=true. The
+      # alternative (`AUTOHEAL_CONTAINER_LABEL=all`) is too broad for a
+      # shared-host VPS where other compose projects also run.
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      # Default behavior is to restart on first unhealthy; this gives
+      # the container ~30s of unhealthiness (3 healthcheck retries) to
+      # self-recover before autoheal acts. Mirrors typical k8s liveness
+      # restart latency.
+      AUTOHEAL_INTERVAL: 10
+      AUTOHEAL_START_PERIOD: 0
+      AUTOHEAL_DEFAULT_STOP_TIMEOUT: 30
+    volumes:
+      # autoheal needs the docker socket to issue restart commands.
+      # Read-write because `docker restart` is a write op; the
+      # container is the standard upstream image, not custom code,
+      # so the trust surface is bounded.
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   postgres_data:

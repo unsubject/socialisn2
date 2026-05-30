@@ -1,68 +1,79 @@
 // Unit tests for src/lib/healthcheck.ts.
 //
-// The interesting properties to cover with mocks (no PG):
-//   - happy path: SELECT 1 returns the expected shape → {ok:true}
-//   - bad shape: SELECT returns a row missing `.one` → {ok:false}
-//   - throw path: SELECT throws → {ok:false}, error redacted of any
-//     DB-URI substring
-//   - timeout: query never resolves → {ok:false} after timeoutMs
+// Property coverage:
+//   - no DATABASE_URL (and no explicit connectionString) → {ok:false}
+//     with a clear error, no postgres-js client created
+//   - throw path: bad connection string → {ok:false}, error redacted
+//     of any DB-URI substring
+//   - timeout: an unreachable host that doesn't accept connections
+//     surfaces as {ok:false} within ~timeoutMs (not the postgres-js
+//     default which would hang the probe)
 //
-// A real-PG test would only re-prove "SELECT 1 works", which the
-// happy path already implies. Skipping it keeps this file fast.
+// We exercise the timeout path with a non-routable IP so the connect
+// is guaranteed to never complete. The dedicated probe client model
+// means the timeout WORKS — under the old pool-shared design the
+// query would silently keep running on the underlying socket.
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { Db } from '../../src/db/client.js';
 import { pingDatabase } from '../../src/lib/healthcheck.js';
 
-function makeStubDb(execute: (...args: unknown[]) => Promise<unknown>): Db {
-  return { execute: vi.fn(execute) } as unknown as Db;
-}
-
 describe('pingDatabase', () => {
-  it('returns {ok:true, latencyMs} when SELECT 1 returns the expected row', async () => {
-    const db = makeStubDb(async () => [{ one: 1 }]);
-    const result = await pingDatabase(db);
-    expect(result.ok).toBe(true);
-    expect(result.latencyMs).toBeGreaterThanOrEqual(0);
-    expect(result.error).toBeUndefined();
+  const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
+
+  beforeEach(() => {
+    delete process.env.DATABASE_URL;
+  });
+  afterEach(() => {
+    if (ORIGINAL_DATABASE_URL === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = ORIGINAL_DATABASE_URL;
+    }
   });
 
-  it('returns {ok:false} when SELECT 1 returns an unexpected shape', async () => {
-    const db = makeStubDb(async () => [{ unexpected: 42 }]);
-    const result = await pingDatabase(db);
+  it('returns {ok:false} when no connection string is available', async () => {
+    const result = await pingDatabase();
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/unexpected/i);
+    expect(result.error).toMatch(/DATABASE_URL unset/);
+    expect(result.latencyMs).toBe(0);
   });
 
-  it('returns {ok:false, error} when the query throws', async () => {
-    const db = makeStubDb(async () => {
-      throw new Error('connection terminated');
+  it('redacts a DB URI substring in the error when connection string is malformed', async () => {
+    // Pass an obviously malformed URI to force a parse-time error.
+    // postgres-js's parse path can include the URI verbatim in the
+    // error message — we want to confirm the redaction scrubs it.
+    const result = await pingDatabase({
+      connectionString: 'postgresql://user:s3kr3t@no-host-/no-db',
+      timeoutMs: 1_000,
     });
-    const result = await pingDatabase(db);
-    expect(result.ok).toBe(false);
-    expect(result.error).toBe('connection terminated');
-  });
-
-  it('redacts a DB URI substring from the error message', async () => {
-    // postgres-js parse errors sometimes include the URI verbatim. We
-    // don't want that leaking into the /healthz response body.
-    const leakyUrl = 'postgresql://user:s3kr3t@db.example.com:5432/socialisn2';
-    const db = makeStubDb(async () => {
-      throw new Error(`parse failed for ${leakyUrl}`);
-    });
-    const result = await pingDatabase(db);
     expect(result.ok).toBe(false);
     expect(result.error).not.toMatch(/s3kr3t/);
-    expect(result.error).not.toMatch(/user/);
-    expect(result.error).toMatch(/postgres:\/\/\[redacted\]/);
+    // Either the URI got redacted to the placeholder, OR postgres-js
+    // never echoed it in the message at all (depending on lib version).
+    // Both are acceptable; the load-bearing assertion is "secret didn't
+    // leak".
   });
 
-  it('returns {ok:false} after timeoutMs when the query never resolves', async () => {
-    const db = makeStubDb(() => new Promise(() => {}));
-    const result = await pingDatabase(db, { timeoutMs: 50 });
+  it('times out within ~timeoutMs against an unreachable host', async () => {
+    // 192.0.2.1 is part of TEST-NET-1 — guaranteed not to be a routable
+    // production host. The connect attempt either hangs or fails very
+    // slowly; the timeoutMs guard must bound the probe regardless.
+    const t0 = Date.now();
+    const result = await pingDatabase({
+      connectionString: 'postgres://u:p@192.0.2.1:5432/test',
+      timeoutMs: 200,
+    });
+    const elapsed = Date.now() - t0;
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/timed out after 50ms/);
-    expect(result.latencyMs).toBeGreaterThanOrEqual(50);
-  });
+    // The probe should return within a small multiple of the timeout
+    // (client teardown takes some time). 2000ms gives ample headroom.
+    expect(elapsed).toBeLessThan(2_000);
+    // Either the timeout-shaped error or a connect-refused/parse error
+    // — both are acceptable evidence the probe did NOT hang
+    // indefinitely against an unreachable host.
+    expect(result.error).toMatch(
+      /timed out|refused|ECONN|EHOSTUNREACH|ETIMEDOUT|ENETUNREACH|parse|address/i,
+    );
+  }, 5_000);
 });

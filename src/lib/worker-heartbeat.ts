@@ -48,7 +48,7 @@ export function startHeartbeat(
   const dir = opts.dir ?? tmpdir();
   const path = join(dir, `${FILE_PREFIX}-${name}.heartbeat`);
 
-  const touch = (): void => {
+  const touch = (initial: boolean): void => {
     try {
       // Create the file if missing (O_CREAT semantics via openSync 'a'),
       // then futimes to NOW. fs.utimesSync would also work but the
@@ -62,10 +62,22 @@ export function startHeartbeat(
         closeSync(fd);
       }
     } catch (err) {
-      // Don't crash the worker on a transient /tmp filesystem error —
-      // docker healthcheck failing N consecutive times will recreate
-      // the container, which is the right escalation.
       console.error(`[heartbeat ${name}] touch failed:`, err);
+      // Initial vs steady-state error policy:
+      //   - Initial touch failures (read-only /tmp, EPERM, missing dir)
+      //     are non-recoverable — every subsequent touch will fail the
+      //     same way and the healthcheck CLI will see ENOENT forever.
+      //     Re-throw so the process exits and docker's `restart: ...`
+      //     policy applies. With autoheal absent (Phase 2.c #1 follow-
+      //     up), this is the ONLY way the worker can recover from a
+      //     mounted-volume / perms misconfiguration.
+      //   - Steady-state touch failures (transient ENOSPC, EBUSY) are
+      //     swallowed: a healthy worker shouldn't crash on a flake; if
+      //     it persists for N consecutive ticks the healthcheck will
+      //     mark the container unhealthy.
+      if (initial) {
+        throw err;
+      }
     }
   };
 
@@ -74,8 +86,8 @@ export function startHeartbeat(
   // this, a container with start_period=30s and intervalMs=30000 has a
   // race where the first healthcheck probe runs at ~30s but the
   // heartbeat hasn't fired yet → unhealthy → restart → loop.
-  touch();
-  const timer = setInterval(touch, intervalMs);
+  touch(true);
+  const timer = setInterval(() => touch(false), intervalMs);
   // Don't keep the Node event loop alive just for the heartbeat
   // interval. `setInterval(...).unref()` so SIGTERM can shut the
   // process down even without an explicit stop() call.

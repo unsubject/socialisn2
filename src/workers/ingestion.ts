@@ -169,6 +169,18 @@ async function main(): Promise<void> {
   const { db, raw, close } = createDb();
   const queue = createIngestionQueue(connection);
 
+  // Phase 2.c: start the heartbeat FIRST, before any DB work that
+  // could hang. Reviewer flagged that boot reaper / Redis-connect /
+  // scheduler-register can all stall on a first deploy (unmigrated
+  // DB, network blip, etc.). Without an early heartbeat the
+  // start_period=60s elapses with no file → healthcheck CLI sees
+  // ENOENT → container marked unhealthy → and since `restart:
+  // unless-stopped` doesn't recover on health transitions, the
+  // container is stuck. By touching the heartbeat before any awaits,
+  // we guarantee the file exists from t=0, and the autoheal sidecar
+  // can later recover from a stale file.
+  const heartbeat = startHeartbeat('ingestion');
+
   // Phase 2.b: boot-time orphan-runs reaper, relocated from
   // src/index.ts where it used to incorrectly nuke runs the
   // ingestion-worker process was actively running. The ingestion
@@ -176,8 +188,22 @@ async function main(): Promise<void> {
   // tick, so a restart of THIS process is the actual orphan-creating
   // event. Runs before scheduler/orchestrator-cron come up so a stale
   // 'running' row can't survive into the next tick.
+  //
+  // Wrapped in a timeout so a hung reaper (unmigrated DB on first
+  // deploy, lock contention, network blip) can't gate the schedulers.
+  // 30s is comfortably above a real reaper SQL roundtrip; the watchdog
+  // cron will catch any stuck rows on its next tick even if this
+  // timeout fires.
   try {
-    const { reaped } = await reapOrphanedRunsOnBoot(db);
+    const reaperPromise = reapOrphanedRunsOnBoot(db);
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      const t = setTimeout(
+        () => reject(new Error('boot reaper timed out after 30s')),
+        30_000,
+      );
+      t.unref();
+    });
+    const { reaped } = await Promise.race([reaperPromise, timeoutPromise]);
     if (reaped > 0) {
       console.log(`[ingestion-worker] reaped ${reaped} orphaned run(s) at boot`);
     }
@@ -222,10 +248,8 @@ async function main(): Promise<void> {
   // block, OR where some future change reorders the finalise path.
   // Complements (does not replace) the boot reaper above.
   const stuckRunsWatchdog = startStuckRunsWatchdog(db);
-  // Phase 2.c: heartbeat for the docker-compose healthcheck. Touches
-  // /tmp/socialisn2-ingestion.heartbeat every 30s; the worker-
-  // healthcheck CLI script checks the mtime is within 120s.
-  const heartbeat = startHeartbeat('ingestion');
+  // (heartbeat is started at the top of main() before any awaits —
+  // see comment there.)
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[ingestion-worker] ${signal} received; shutting down`);

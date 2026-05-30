@@ -84,7 +84,11 @@ export function buildApp(db: Db, raw: Sql): FastifyInstance {
   // until the next probe is green, which is the friendlier signal to
   // CF and clients than serving requests against a broken pool.
   app.get('/healthz', async (_req, reply) => {
-    const result = await pingDatabase(db);
+    // pingDatabase opens a dedicated 1-connection client per probe so
+    // a hanging probe doesn't pin a slot in the app's request-serving
+    // pool. Connection string comes from env.databaseUrl() — same
+    // source the pool uses.
+    const result = await pingDatabase();
     if (!result.ok) {
       return reply.code(503).send({
         ok: false,

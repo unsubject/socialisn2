@@ -25,6 +25,7 @@ import { markSourceFetched } from '../ingestion/source-loader.js';
 import type { RawItemInput } from '../ingestion/types.js';
 import { writeRawItems } from '../ingestion/writer.js';
 import { fetchAndParseYouTube } from '../ingestion/youtube.js';
+import { startHeartbeat } from '../lib/worker-heartbeat.js';
 import { createRedis } from '../queue/connection.js';
 import {
   INGESTION_QUEUE,
@@ -221,9 +222,14 @@ async function main(): Promise<void> {
   // block, OR where some future change reorders the finalise path.
   // Complements (does not replace) the boot reaper above.
   const stuckRunsWatchdog = startStuckRunsWatchdog(db);
+  // Phase 2.c: heartbeat for the docker-compose healthcheck. Touches
+  // /tmp/socialisn2-ingestion.heartbeat every 30s; the worker-
+  // healthcheck CLI script checks the mtime is within 120s.
+  const heartbeat = startHeartbeat('ingestion');
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[ingestion-worker] ${signal} received; shutting down`);
+    heartbeat.stop();
     scheduler.stop();
     recalibrationCron.stop();
     orchestratorCron.stop();

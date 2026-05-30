@@ -41,5 +41,27 @@ litellm_settings:
   # throwing — keeps src/lib/llm.ts provider-agnostic.
   drop_params: true
 
+  # Per-model fallback chain. When the named model returns a 5xx /
+  # rate-limit / timeout, LiteLLM tries the next entry in the list
+  # before surfacing failure to the caller. Added 2026-05-30 to
+  # contain Gemini outages — pre-fix, a Google 5xx burst translated
+  # 1:1 to scoring-run failures.
+  #
+  # NOT a substitute for routing fidelity: if the requested model
+  # name itself isn't in `model_list` above, the proxy returns 400
+  # at the routing layer BEFORE these fallbacks engage. The
+  # always-recycle-litellm step in deploy-vps.yml + the smoke probe
+  # in scripts/preflight.ts is what catches that class.
+  #
+  # Curate (Gemini 3.5 Flash) falls back to a cheaper Gemini, then
+  # to Claude Haiku — even a full Google outage degrades to
+  # Haiku-at-Anthropic rather than zero candidates. Pricing in
+  # src/cost/pricing.ts has entries for all three; cost_ledger
+  # records the model that actually served, so post-hoc accounting
+  # surfaces the fall-through.
+  fallbacks:
+    - { "gemini-3.5-flash": ["gemini-2.5-flash-lite", "claude-haiku-4.5"] }
+    - { "gemini-2.5-flash-lite": ["claude-haiku-4.5"] }
+
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

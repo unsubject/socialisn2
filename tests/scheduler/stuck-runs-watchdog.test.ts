@@ -184,31 +184,48 @@ describe.skipIf(!DATABASE_URL)('stuck-runs-watchdog (real PG)', () => {
     handle.stop();
   });
 
-  it('reapOrphanedRunsOnBoot flips ALL running rows regardless of age', async () => {
-    // The boot reaper is unconditional — restart is the signal, so age
-    // doesn't matter. Even a 5-second-old running row is orphaned if
-    // the only process that could touch it just restarted.
-    const a = uuidv7();
-    const b = uuidv7();
-    const c = uuidv7();
+  it('reapOrphanedRunsOnBoot flips morning/afternoon running rows regardless of age, leaves manual + recalibrate alone', async () => {
+    // The boot reaper runs in the ingestion-worker process, which owns
+    // the orchestrator-cron 'morning'/'afternoon' runs. 'manual'
+    // (MCP run_now) runs in the app process — a separate container
+    // with an independent lifecycle, so reaping them here would race
+    // a still-running app-process run. Same logic for 'recalibrate'
+    // (which runs ON the ingestion-worker but is fast — let the
+    // 90-min watchdog handle it if it ever gets stuck).
+    //
+    // Restart is the signal for the cron-owned runs, so age doesn't
+    // matter for them: even a 5-second-old morning/afternoon row gets
+    // reaped on restart.
+    const morningRecent = uuidv7();
+    const afternoonOld = uuidv7();
+    const manualInFlight = uuidv7();
+    const recalibrateInFlight = uuidv7();
+    const completedRun = uuidv7();
     await client`
       INSERT INTO runs (id, kind, status, started_at)
       VALUES
-        (${a}, 'morning', 'running',   NOW() - INTERVAL '1 second'),
-        (${b}, 'manual',  'running',   NOW() - INTERVAL '2 hours'),
-        (${c}, 'morning', 'completed', NOW() - INTERVAL '10 minutes')
+        (${morningRecent},      'morning',     'running',   NOW() - INTERVAL '1 second'),
+        (${afternoonOld},       'afternoon',   'running',   NOW() - INTERVAL '2 hours'),
+        (${manualInFlight},     'manual',      'running',   NOW() - INTERVAL '10 minutes'),
+        (${recalibrateInFlight},'recalibrate', 'running',   NOW() - INTERVAL '10 minutes'),
+        (${completedRun},       'morning',     'completed', NOW() - INTERVAL '10 minutes')
     `;
 
     const result = await reapOrphanedRunsOnBoot(db);
     expect(result.reaped).toBe(2);
 
     const rows = await client<{ id: string; status: string; error: string | null }[]>`
-      SELECT id, status, error FROM runs ORDER BY id
+      SELECT id, status, error FROM runs
     `;
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
-    expect(byId[a]!.status).toBe('failed');
-    expect(byId[a]!.error).toContain('process_restart');
-    expect(byId[b]!.status).toBe('failed');
-    expect(byId[c]!.status).toBe('completed');
+    // Reaped:
+    expect(byId[morningRecent]!.status).toBe('failed');
+    expect(byId[morningRecent]!.error).toContain('process_restart');
+    expect(byId[afternoonOld]!.status).toBe('failed');
+    expect(byId[afternoonOld]!.error).toContain('process_restart');
+    // Untouched — owned by a different process / different cadence:
+    expect(byId[manualInFlight]!.status).toBe('running');
+    expect(byId[recalibrateInFlight]!.status).toBe('running');
+    expect(byId[completedRun]!.status).toBe('completed');
   });
 });

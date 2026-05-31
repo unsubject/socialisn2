@@ -108,12 +108,28 @@ export function startStuckRunsWatchdog(
 }
 
 /**
- * Boot-time orphan reaper. Marks any `runs.status='running'` row as
- * failed with reason 'process_restart'. Distinguished from the watchdog
- * reason ('stuck_run_watchdog') so an operator scanning runs.error can
- * tell "we restarted while a run was in flight" from "a run hung past
- * the threshold". Runs unconditionally at boot — there's no time
- * window check because the restart itself IS the signal.
+ * Boot-time orphan reaper. Marks `runs.status='running'` rows OWNED BY
+ * THIS PROCESS as failed with reason 'process_restart'. Distinguished
+ * from the watchdog reason ('stuck_run_watchdog') so an operator
+ * scanning runs.error can tell "we restarted while a run was in flight"
+ * from "a run hung past the threshold". Runs unconditionally at boot —
+ * there's no time window check because the restart itself IS the signal.
+ *
+ * Kind-scoped: this reaper runs in the ingestion-worker process, which
+ * owns 'morning' + 'afternoon' (orchestrator-cron) runs only. MCP
+ * `run_now` produces 'manual' runs and lives in the *app* process — a
+ * separate container with an independent lifecycle. If we reaped
+ * 'manual' rows here, an ingestion-worker restart (deploy, OOM)
+ * mid-MCP-run would mark the in-flight app-process run as
+ * 'failed/process_restart' while the lock is still held + candidates
+ * keep being inserted; the eventual finaliseRun no-ops (predicate
+ * `AND status='running'`) and the row ends as a phantom failure even
+ * though candidates shipped.
+ *
+ * The 'manual' run's process — the app — does its own orphan handling
+ * via the stuck-runs watchdog cron, which also runs in this process
+ * but waits the 90-min threshold rather than reaping unconditionally.
+ * That's the right cadence for cross-process orphans.
  */
 export async function reapOrphanedRunsOnBoot(db: Db): Promise<{ reaped: number }> {
   const rows = await db.execute<{ id: string }>(sql`
@@ -122,6 +138,7 @@ export async function reapOrphanedRunsOnBoot(db: Db): Promise<{ reaped: number }
         error = COALESCE(error || '; ', '') || 'process_restart',
         completed_at = NOW()
     WHERE status = 'running'
+      AND kind IN ('morning', 'afternoon')
     RETURNING id
   `);
   return { reaped: rows.length };

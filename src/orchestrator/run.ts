@@ -55,6 +55,7 @@ import {
 } from '../scoring/archive.js';
 import {
   curateCluster,
+  CurateParseError,
   type CurateInput,
   type CurateResult,
 } from '../scoring/curate.js';
@@ -356,16 +357,39 @@ export async function runScoring(
           isExclusive: cluster.exclusive.isExclusive,
         });
       } catch (err: unknown) {
+        // Codex review on PR #107 caught: the skip path discarded the
+        // LLM usage on every parse failure. During a malformed-response
+        // outage (the exact case this skip exists to tolerate), every
+        // failed curate call consumed tokens but cost_ledger and
+        // runs.total_cost_usd undercounted spend — the run kept making
+        // LLM calls believing it was under budget when it wasn't.
+        //
+        // CurateParseError now carries the LlmCallResult; record the
+        // cost BEFORE skipping so the ledger reflects actual spend.
+        if (err instanceof CurateParseError) {
+          stats.totalCostUsd += await recordCost(db, {
+            runId,
+            model: err.llm.model,
+            inputTokens: err.llm.inputTokens,
+            outputTokens: err.llm.outputTokens,
+            usd: err.llm.usd,
+            stage: 'stage6_curate',
+          });
+          stats.clustersFailedAtCurate += 1;
+          console.warn(
+            `[orchestrator] skipped cluster ${cluster.id} at Stage 6: ${err.message.slice(0, 240)} (cost recorded: $${err.llm.usd.toFixed(6)})`,
+          );
+          continue;
+        }
+        // Legacy text-predicate fallback for any future thrower that
+        // forgets to wrap in CurateParseError. Preserves the original
+        // skip semantics but without cost recovery — log loudly so the
+        // gap is operator-visible.
         const msg = err instanceof Error ? err.message : String(err);
-        // Only swallow parse/validation errors — the
-        // `curate: LLM did not return valid JSON` and `curate:
-        // curation_score ...` family. Anything else (network, 5xx
-        // post-retry, ceiling) is propagated to the outer catch so
-        // the run fails loudly.
         if (msg.startsWith('curate:')) {
           stats.clustersFailedAtCurate += 1;
           console.warn(
-            `[orchestrator] skipped cluster ${cluster.id} at Stage 6: ${msg.slice(0, 240)}`,
+            `[orchestrator] skipped cluster ${cluster.id} at Stage 6 (UNWRAPPED, cost LOST): ${msg.slice(0, 240)}`,
           );
           continue;
         }

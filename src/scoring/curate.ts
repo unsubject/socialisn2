@@ -131,7 +131,48 @@ export async function curateCluster(
     timeoutMs: opts.timeoutMs,
   });
 
-  return { output: parseAndValidate(llm.text), llm };
+  // Codex review on PR #107 flagged: the skip-on-parse-error path in
+  // src/orchestrator/run.ts was discarding the LLM usage on every parse
+  // failure, so `cost_ledger` and `runs.total_cost_usd` undercounted
+  // spend during the exact malformed-response outage that path exists
+  // to tolerate. The thrown error from parseAndValidate carried only a
+  // message — the caller had no way to recover the `llm` info.
+  //
+  // Wrap the parse so a thrown CurateParseError carries the LlmCallResult.
+  // The orchestrator's `msg.startsWith('curate:')` predicate keeps
+  // working (we preserve the original error message verbatim), and the
+  // catch path can now `if (err instanceof CurateParseError) recordCost(err.llm)`
+  // before skipping.
+  try {
+    return { output: parseAndValidate(llm.text), llm };
+  } catch (err) {
+    throw new CurateParseError(err instanceof Error ? err : new Error(String(err)), llm);
+  }
+}
+
+/**
+ * Error class for curate-stage parse / validation failures that carries
+ * the LlmCallResult so the orchestrator can record the spend on the
+ * skip-on-error path. The `code` discriminator + the `llm` field make
+ * the cost-accounting fix from Codex's PR #107 review possible.
+ *
+ * The `message` is forwarded verbatim from the underlying
+ * `parseAndValidate` throw so the existing `msg.startsWith('curate:')`
+ * predicate in `src/orchestrator/run.ts` continues to match.
+ */
+export class CurateParseError extends Error {
+  readonly code = 'curate_parse_error' as const;
+  constructor(
+    cause: Error,
+    public readonly llm: LlmCallResult,
+  ) {
+    super(cause.message);
+    this.name = 'CurateParseError';
+    // Preserve the original stack for debugging.
+    if (cause.stack) {
+      this.stack = cause.stack;
+    }
+  }
 }
 
 /**

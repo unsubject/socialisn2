@@ -22,6 +22,7 @@ import {
 
 import * as schema from '../../src/db/schema.js';
 import { EMBEDDING_DIM } from '../../src/db/schema.js';
+import { CurateParseError } from '../../src/scoring/curate.js';
 import {
   runScoring,
   type DigestPushInput,
@@ -322,15 +323,28 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     await attachItem(c2, sourceA, new Date(Date.now() - 6 * 3_600_000));
     await attachItem(c2, sourceB, new Date(Date.now() - 1 * 3_600_000));
 
-    // First call: throw the exact shape parseAndValidate raises.
+    // First call: throw a CurateParseError carrying the LLM usage (the
+    // shape the real curateCluster now throws — Codex review on PR
+    // #107 caught that the previous "raw Error" throw was leaking the
+    // already-paid-for token cost on the skip path).
     // Second call: normal happy-path curation that should land a candidate.
+    const parseFailLlmUsage = {
+      text: '',
+      inputTokens: 500,
+      outputTokens: 80,
+      usd: 0.0042,
+      model: 'gemini-3.5-flash',
+    };
     let curateCalls = 0;
     const curate: import('../../src/orchestrator/run.js').RunDependencies['curate'] =
       async () => {
         curateCalls += 1;
         if (curateCalls === 1) {
-          throw new Error(
-            'curate: LLM did not return valid JSON: synthetic. Raw (first 200c): {bad,}',
+          throw new CurateParseError(
+            new Error(
+              'curate: LLM did not return valid JSON: synthetic. Raw (first 200c): {bad,}',
+            ),
+            parseFailLlmUsage,
           );
         }
         return {
@@ -361,11 +375,26 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     expect(result.candidatesPersisted).toBe(1);
     expect(curateCalls).toBe(2);
 
-    const runRow = await client<{ status: string; metadata: { clusters_failed_at_curate?: number } }[]>`
-      SELECT status, metadata FROM runs
+    // Codex PR #107 fix: cost from the parse-failed call MUST be in
+    // the ledger. Without this, runs.total_cost_usd undercounts and
+    // assertWithinCeiling lets the run keep spending past the cap.
+    // Expected total: stage4 summarise + stage6 curate (parse-fail
+    // 0.0042) + stage6 curate (success 0.007).
+    const costRows = await client<{ stage: string | null; usd: string }[]>`
+      SELECT stage, usd::text FROM cost_ledger ORDER BY occurred_at
+    `;
+    const stage6Total = costRows
+      .filter((r) => r.stage === 'stage6_curate')
+      .reduce((acc, r) => acc + Number(r.usd), 0);
+    expect(stage6Total).toBeCloseTo(0.0042 + 0.007, 6);
+
+    const runRow = await client<{ status: string; total_cost_usd: string | null; metadata: { clusters_failed_at_curate?: number } }[]>`
+      SELECT status, total_cost_usd::text, metadata FROM runs
     `;
     expect(runRow[0]!.status).toBe('completed');
     expect(runRow[0]!.metadata.clusters_failed_at_curate).toBe(1);
+    // Run-level cost must reflect the parse-failed cost too.
+    expect(Number(runRow[0]!.total_cost_usd)).toBeGreaterThanOrEqual(0.0042 + 0.007);
   });
 
   it('still propagates non-parse errors from curate (network, rate limit, etc.) to abort the run', async () => {

@@ -424,11 +424,15 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     );
 
     expect(result.status).toBe('completed');
-    expect(result.error).toBe('cost_ceiling_hit');
+    // Phase 3: err.code is scope-suffixed so runs.error carries the
+    // tier that tripped — orchestrator-stage gates pass BUCKET_ORCHESTRATOR
+    // so the scope here is the 'orchestrator' bucket, which trips before
+    // the overall daily ceiling at the projected $0.010 cap.
+    expect(result.error).toBe('cost_ceiling_hit:orchestrator');
     expect(result.candidatesPersisted).toBe(1);
     const runs = await client`SELECT status, error FROM runs`;
     expect(runs[0]!.status).toBe('completed');
-    expect(runs[0]!.error).toBe('cost_ceiling_hit');
+    expect(runs[0]!.error).toBe('cost_ceiling_hit:orchestrator');
   });
 
   it('short-circuits cleanly when no active clusters exist', async () => {

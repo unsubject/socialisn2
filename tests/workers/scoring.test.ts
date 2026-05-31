@@ -270,9 +270,14 @@ describe.skipIf(!DATABASE_URL)('scoring-worker tickOnce / compactOnce', () => {
   });
 
   it('tickOnce short-circuits on ceiling_hit; remaining rows untouched', async () => {
-    // Seed AT the default $1.50 ceiling so the +$0.001 projection
-    // unambiguously trips. Avoids dancing around FP precision near the
-    // boundary; the test cares about behaviour, not threshold arithmetic.
+    // Pin COST_CEILING_DAILY_USD explicitly so this test is
+    // independent of the default (raised 1.50→2.20 on 2026-05-30).
+    const prev = process.env.COST_CEILING_DAILY_USD;
+    process.env.COST_CEILING_DAILY_USD = '1.50';
+    try {
+    // Seed AT the ceiling so the +$0.001 projection unambiguously
+    // trips. Avoids dancing around FP precision near the boundary;
+    // the test cares about behaviour, not threshold arithmetic.
     await seedCostLedger(1.5);
     const r1 = await insertRawItem({
       fetchedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
@@ -304,6 +309,13 @@ describe.skipIf(!DATABASE_URL)('scoring-worker tickOnce / compactOnce', () => {
     for (const r of rows) {
       expect(r.processed_at).toBeNull();
       expect(r.processing_attempts).toBe(0);
+    }
+    } finally {
+      if (prev === undefined) {
+        delete process.env.COST_CEILING_DAILY_USD;
+      } else {
+        process.env.COST_CEILING_DAILY_USD = prev;
+      }
     }
   });
 

@@ -323,9 +323,16 @@ describe.skipIf(!DATABASE_URL)('processRawItem (Phase 2 per-item orchestrator)',
   // -------------------------------------------------------------------------
 
   it('ceiling-hit: short-circuits before normalise, leaves raw_item untouched', async () => {
-    // Default COST_CEILING_DAILY_USD is 1.50. Seed today's ledger AT the
-    // ceiling so the +$0.001 projection unambiguously trips it without
-    // dancing around FP precision at the boundary.
+    // Pin COST_CEILING_DAILY_USD explicitly so this test is
+    // independent of the default (which was raised 1.50→2.20 on
+    // 2026-05-30). Restore the previous value in finally so other
+    // tests in this file don't see leakage.
+    const prev = process.env.COST_CEILING_DAILY_USD;
+    process.env.COST_CEILING_DAILY_USD = '1.50';
+    try {
+    // Seed today's ledger AT the ceiling so the +$0.001 projection
+    // unambiguously trips it without dancing around FP precision at the
+    // boundary.
     await seedCostLedger(1.5);
 
     const rawId = await insertRawItem();
@@ -364,6 +371,13 @@ describe.skipIf(!DATABASE_URL)('processRawItem (Phase 2 per-item orchestrator)',
     expect(raw.dedup_cluster_id).toBeNull();
     expect(await countItems(rawId)).toBe(0);
     expect(await countCostRows()).toBe(1); // only the fixture
+    } finally {
+      if (prev === undefined) {
+        delete process.env.COST_CEILING_DAILY_USD;
+      } else {
+        process.env.COST_CEILING_DAILY_USD = prev;
+      }
+    }
   });
 
   // -------------------------------------------------------------------------

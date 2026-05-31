@@ -94,7 +94,15 @@ export async function generateAllFeeds(
   // older-than-fresh master rather than the inverse (which would
   // confuse a subscriber that sees a master pointing at items absent
   // from per-domain feeds).
-  const written: string[] = [];
+  // Two separate concerns:
+  //   - WRITE order is per-domain first, master last (rationale above).
+  //   - RETURN order is master first, per-domain after — the documented
+  //     contract (`[all.xml, economy.xml, ...]`) that callers + the
+  //     existing tests pin. Codex review on PR #114 caught the regression
+  //     where I'd let return order follow write order; fixing here by
+  //     keying paths into a dict and rebuilding the returned array in the
+  //     documented order regardless of write timing.
+  const writtenByFeed = new Map<string, string>();
   const failures: Array<{ feed: string; error: Error }> = [];
 
   const writeOne = async (
@@ -105,7 +113,7 @@ export async function generateAllFeeds(
       const items = await fetchFeedItems(db, domain, limit);
       const filePath = join(outputDir, `${slug}.xml`);
       await atomicWriteXml(filePath, renderFeed(slug, items, publicHost));
-      written.push(filePath);
+      writtenByFeed.set(slug, filePath);
     } catch (err) {
       failures.push({
         feed: slug,
@@ -114,12 +122,13 @@ export async function generateAllFeeds(
     }
   };
 
-  // Per-domain feeds. Order from DOMAIN_CONFIGS keys (matches SPEC §3
-  // table order — economy, economics, scitech, geopolitics, national).
+  // Per-domain feeds FIRST. Order from DOMAIN_CONFIGS keys (matches
+  // SPEC §3 table order — economy, economics, scitech, geopolitics,
+  // national).
   for (const domain of Object.keys(DOMAIN_CONFIGS) as Array<keyof typeof DOMAIN_CONFIGS>) {
     await writeOne(domain, domain);
   }
-  // Master feed last, per the rationale in the header comment above.
+  // Master 'all' feed last, per the write-order rationale above.
   await writeOne('all', null);
 
   if (failures.length > 0) {
@@ -128,11 +137,18 @@ export async function generateAllFeeds(
       .join('; ');
     throw new Error(
       `generateAllFeeds: ${failures.length}/${
-        failures.length + written.length
+        failures.length + writtenByFeed.size
       } feeds failed: ${summary}`,
     );
   }
-  return written;
+
+  // Documented return order: master first, then domains in SPEC §3
+  // table order. Tests pin this; external callers may also.
+  const orderedSlugs = [
+    'all',
+    ...(Object.keys(DOMAIN_CONFIGS) as string[]),
+  ];
+  return orderedSlugs.map((s) => writtenByFeed.get(s)!).filter(Boolean);
 }
 
 /**

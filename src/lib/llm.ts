@@ -68,6 +68,25 @@ export interface LlmCallOptions {
   timeoutMs?: number;
   /** Number of retries on 429 / 5xx-transient (default 2 = 3 total attempts). */
   maxRetries?: number;
+  /**
+   * Reasoning/thinking effort for reasoning-capable models. LiteLLM maps
+   * this to the provider-native control (Gemini `thinking_level`, Anthropic
+   * extended thinking, OpenAI `reasoning.effort`). `'minimal'` keeps a
+   * Gemini 3.x model from spending its output-token budget on hidden
+   * reasoning and truncating the visible JSON mid-token — the 2026-05-31
+   * curate outage. Omitted by default so existing non-reasoning callers are
+   * unaffected. NOTE: with `drop_params: true` in litellm.yaml an unmapped
+   * value is silently DROPPED, so callers that rely on it must verify the
+   * effect (output completes / token usage drops), not assume it took.
+   */
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  /**
+   * Structured-output hint. `{ type: 'json_object' }` asks the provider to
+   * emit syntactically valid JSON (LiteLLM → Gemini `response_mime_type:
+   * application/json`, OpenAI JSON mode, etc.). Belt-and-suspenders against
+   * malformed-but-complete output; does NOT rescue truncated output.
+   */
+  responseFormat?: { type: 'json_object' };
 }
 
 export interface LlmCallResult {
@@ -105,6 +124,11 @@ async function attemptLlmCall(opts: LlmCallOptions): Promise<AttemptOutcome> {
     messages: opts.messages,
     temperature: opts.temperature ?? 0.2,
     max_tokens: opts.maxTokens ?? 1024,
+    // Only include the optional reasoning/format params when set so the
+    // request shape is unchanged for existing callers. LiteLLM's
+    // drop_params drops anything a given provider doesn't understand.
+    ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),
+    ...(opts.responseFormat ? { response_format: opts.responseFormat } : {}),
   };
 
   const doFetch = opts.fetchFn ?? fetch;

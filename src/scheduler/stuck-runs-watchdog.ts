@@ -40,6 +40,13 @@ export interface StuckRunsWatchdogDependencies {
   pattern?: string;
   /** Threshold in minutes. Default: 90. */
   maxAgeMinutes?: number;
+  /**
+   * Issue #122: called at the end of every cron tick (success OR
+   * thrown). Fires every 5 min by default, so it's a complementary
+   * (not primary) progress signal for the heartbeat — the per-minute
+   * scheduler tick is the dominant one.
+   */
+  onTick?: () => void;
 }
 
 export interface StuckRunsWatchdogHandle {
@@ -61,6 +68,7 @@ export function startStuckRunsWatchdog(
   const log = deps.logger ?? createLogger('stuck-runs-watchdog');
   const pattern = deps.pattern ?? '*/5 * * * *';
   const maxAgeMinutes = deps.maxAgeMinutes ?? 90;
+  const onTick = deps.onTick;
 
   const reapNow = async (): Promise<{ reaped: number }> => {
     // Returns the count of rows we actually flipped so the log line
@@ -95,7 +103,8 @@ export function startStuckRunsWatchdog(
           log.error('stuck runs watchdog tick threw', {
             error: err instanceof Error ? err.message : String(err),
           });
-        });
+        })
+        .finally(() => onTick?.());
     },
     { scheduled: true },
   );

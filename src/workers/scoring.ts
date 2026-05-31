@@ -17,9 +17,13 @@ import { startCrons } from './scoring-core.js';
 
 async function main(): Promise<void> {
   const { db, close } = createDb();
-  const handles = startCrons(db);
   // Phase 2.c heartbeat for the docker-compose healthcheck.
+  // Issue #122: started BEFORE startCrons so we can hand markProgress
+  // to the tick callbacks. Without this wiring, a wedged tickOnce()
+  // (deadlocked DB, hung LLM call) would leave the standalone timer
+  // touching the file forever and the wedge would never escalate.
   const heartbeat = startHeartbeat('scoring');
+  const handles = startCrons(db, { onTick: heartbeat.markProgress });
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[scoring-worker] ${signal} received; shutting down`);

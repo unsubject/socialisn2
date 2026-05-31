@@ -220,6 +220,17 @@ export interface RecalibrationCronHandle {
   stop: () => void;
 }
 
+export interface StartRecalibrationCronOptions {
+  /**
+   * Issue #122: called at the end of every cron tick (success OR
+   * thrown). Recalibration is daily and quick — it adds little value
+   * as a progress signal vs. the per-minute scheduler tick — but
+   * wiring it for symmetry means a future change to the cron cadence
+   * doesn't silently lose coverage.
+   */
+  onTick?: () => void;
+}
+
 /**
  * Register the daily recalibration cron. The schedule is read at call time
  * (default '0 4 * * *') and pinned to UTC explicitly — node-cron defaults
@@ -228,21 +239,27 @@ export interface RecalibrationCronHandle {
  * Use the returned handle's `.stop()` from the worker shutdown path so the
  * cron tick stops firing before the DB connection closes.
  */
-export function startRecalibrationCron(db: Db): RecalibrationCronHandle {
+export function startRecalibrationCron(
+  db: Db,
+  opts: StartRecalibrationCronOptions = {},
+): RecalibrationCronHandle {
   const log = createLogger('recalibrate');
+  const onTick = opts.onTick;
   const runOnce = (): Promise<RecalibrationResult> => runRecalibration(db, { logger: log });
 
   const task = cron.schedule(
     env.recalibrateCron(),
     () => {
-      runOnce().catch((err: unknown) => {
-        // runRecalibration already logged + persisted the failure via the
-        // runs row. Swallow here so an unhandled rejection doesn't take
-        // down the host process; the next tick will retry on schedule.
-        log.error('cron tick threw', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
+      runOnce()
+        .catch((err: unknown) => {
+          // runRecalibration already logged + persisted the failure via the
+          // runs row. Swallow here so an unhandled rejection doesn't take
+          // down the host process; the next tick will retry on schedule.
+          log.error('cron tick threw', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => onTick?.());
     },
     {
       timezone: 'UTC',

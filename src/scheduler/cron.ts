@@ -31,10 +31,23 @@ export interface SchedulerHandle {
   stop: () => void;
 }
 
+export interface StartSchedulerOptions {
+  /**
+   * Issue #122: called at the end of every cron tick (success OR
+   * thrown). The ingestion-worker wires this to the heartbeat's
+   * `markProgress()` so a wedged tickOnce body (hung loadDueSources,
+   * hung BullMQ addBulk on a dead Redis) eventually stops touching the
+   * heartbeat → docker healthcheck → restart.
+   */
+  onTick?: () => void;
+}
+
 export function startScheduler(
   db: Db,
   queue: Queue<IngestionJobData>,
+  opts: StartSchedulerOptions = {},
 ): SchedulerHandle {
+  const onTick = opts.onTick;
   const tickOnce = async (): Promise<number> => {
     const [dueSources, dueCompetitors] = await Promise.all([
       loadDueSources(db, ENQUEUED_SOURCE_KINDS),
@@ -75,9 +88,16 @@ export function startScheduler(
   const task = cron.schedule(
     env.schedulerTickCron(),
     () => {
-      tickOnce().catch((err: unknown) => {
-        console.error('[scheduler] tick failed', err);
-      });
+      tickOnce()
+        .catch((err: unknown) => {
+          console.error('[scheduler] tick failed', err);
+        })
+        .finally(() => {
+          // Issue #122: progress signal fires even on a throw — a
+          // failing tick is still the cron wheel turning. What we're
+          // gating against is a tickOnce body that never settles.
+          onTick?.();
+        });
     },
     {},
   );

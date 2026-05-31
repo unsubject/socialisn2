@@ -34,6 +34,10 @@ import {
 import { startScheduler } from '../scheduler/cron.js';
 import { startOrchestratorCron } from '../scheduler/orchestrator-cron.js';
 import { startRecalibrationCron } from '../scheduler/recalibrate.js';
+import {
+  reapOrphanedRunsOnBoot,
+  startStuckRunsWatchdog,
+} from '../scheduler/stuck-runs-watchdog.js';
 
 type SourceJob = Extract<IngestionJobData, { target: 'source' }>;
 type CompetitorJob = Extract<IngestionJobData, { target: 'competitor' }>;
@@ -161,8 +165,26 @@ async function processJob(db: Db, job: Job<IngestionJobData>): Promise<void> {
 
 async function main(): Promise<void> {
   const connection = createRedis();
-  const { db, close } = createDb();
+  const { db, raw, close } = createDb();
   const queue = createIngestionQueue(connection);
+
+  // Phase 2.b: boot-time orphan-runs reaper, relocated from
+  // src/index.ts where it used to incorrectly nuke runs the
+  // ingestion-worker process was actively running. The ingestion
+  // worker is the only process that fires orchestrator runs on cron
+  // tick, so a restart of THIS process is the actual orphan-creating
+  // event. Runs before scheduler/orchestrator-cron come up so a stale
+  // 'running' row can't survive into the next tick.
+  try {
+    const { reaped } = await reapOrphanedRunsOnBoot(db);
+    if (reaped > 0) {
+      console.log(`[ingestion-worker] reaped ${reaped} orphaned run(s) at boot`);
+    }
+  } catch (err) {
+    // Don't crash boot on reaper failure — the watchdog cron will
+    // catch any stuck rows on its next tick.
+    console.error('[ingestion-worker] boot reaper failed (continuing):', err);
+  }
 
   const worker = new Worker<IngestionJobData>(
     INGESTION_QUEUE,
@@ -188,14 +210,24 @@ async function main(): Promise<void> {
   // orchestrator runs. Same rationale for colocation — shares the DB
   // handle and the cron-host process with the schedulers above. The
   // run itself dispatches to the scoring stack (Stages 3-7); this layer
-  // only handles the schedule.
-  const orchestratorCron = startOrchestratorCron(db);
+  // only handles the schedule. `raw` flows through to the lock layer
+  // (src/orchestrator/lock.ts) so a tick that races a concurrent run
+  // (the other tick or an MCP run_now) skips cleanly instead of
+  // double-spending the cost ceiling on the same clusters.
+  const orchestratorCron = startOrchestratorCron(db, raw);
+  // Phase 2.b: stuck-runs watchdog. Every 5 min, fails any
+  // runs.status='running' older than 90 min — catches the case where a
+  // process is SIGKILL'd between runs.INSERT and the runScoring try
+  // block, OR where some future change reorders the finalise path.
+  // Complements (does not replace) the boot reaper above.
+  const stuckRunsWatchdog = startStuckRunsWatchdog(db);
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[ingestion-worker] ${signal} received; shutting down`);
     scheduler.stop();
     recalibrationCron.stop();
     orchestratorCron.stop();
+    stuckRunsWatchdog.stop();
     await worker.close();
     await queue.close();
     await connection.quit();

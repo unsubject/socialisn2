@@ -10,30 +10,46 @@ import process from 'node:process';
 
 import type { Bot } from 'grammy';
 
-import { sql } from 'drizzle-orm';
-
 import { buildApp } from './app.js';
 import { env } from './config/env.js';
 import { createDb } from './db/client.js';
+import { reapOrphanedManualRunsOnBoot } from './scheduler/stuck-runs-watchdog.js';
 import { buildBot } from './telegram/bot.js';
 
 async function main(): Promise<void> {
-  const { db, close } = createDb();
+  const { db, raw, close } = createDb();
 
-  // Orphaned-runs cleanup. A SIGKILL / OOM / container restart while a
-  // scoring run was mid-flight (an MCP run_now that didn't complete,
-  // or a cron-triggered run hit by deploy) leaves runs.status='running'
-  // forever — /status would show the stale row indefinitely. One
-  // UPDATE before app.listen() reconciles the state.
-  await db.execute(sql`
-    UPDATE runs
-    SET status = 'failed',
-        error = COALESCE(error || '; ', '') || 'process_restart',
-        completed_at = NOW()
-    WHERE status = 'running'
-  `);
+  // App-process boot reaper. Codex review on PR #110 pointed out that
+  // removing the unconditional reaper (which used to live here) left
+  // MCP `run_now` (`kind='manual'`) runs stranded after an app crash —
+  // the ingestion-worker's reaper is kind-scoped to morning/afternoon
+  // and won't touch them, and the 90-min watchdog cron also runs in
+  // the ingestion-worker (so it only fires if that worker is up). Add
+  // a sibling reaper here scoped to kind='manual'. Wrapped in
+  // try/catch + a 30s race so a hung reaper at boot (unmigrated DB,
+  // network blip) can't gate Fastify startup — same pattern the
+  // ingestion-worker uses for its own boot reaper.
+  try {
+    const reaperPromise = reapOrphanedManualRunsOnBoot(db);
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      const t = setTimeout(
+        () => reject(new Error('boot reaper timed out after 30s')),
+        30_000,
+      );
+      t.unref();
+    });
+    const { reaped } = await Promise.race([reaperPromise, timeoutPromise]);
+    if (reaped > 0) {
+      console.log(`[app] reaped ${reaped} orphaned manual run(s) at boot`);
+    }
+  } catch (err) {
+    console.error('[app] boot reaper failed (continuing):', err);
+  }
 
-  const app = buildApp(db);
+  // `raw` is threaded to buildApp so MCP run_now can acquire the
+  // orchestrator advisory lock on a pinned connection — see
+  // src/orchestrator/lock.ts. Other Fastify routes don't use raw.
+  const app = buildApp(db, raw);
 
   const port = Number(process.env.PORT ?? '3000');
   const host = process.env.HOST ?? '0.0.0.0';

@@ -15,6 +15,7 @@
 // nothing in this test resolves those patterns against wall-clock time.
 
 import type { ScheduledTask } from 'node-cron';
+import type { Sql } from 'postgres';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Db } from '../../src/db/client.js';
@@ -24,6 +25,42 @@ import {
   startOrchestratorCron,
   type ScheduleFn,
 } from '../../src/scheduler/orchestrator-cron.js';
+
+/**
+ * Minimal mock of postgres-js's `raw` client surface used by
+ * src/orchestrator/lock.ts:
+ *   - raw.reserve()                                          → reserved
+ *   - await reserved`SELECT pg_try_advisory_lock(${k})`      → [{ locked }]
+ *   - await reserved`SELECT pg_advisory_unlock(${k})`        → []
+ *   - reserved.release()                                     → void
+ *
+ * Default: lock always acquires, so existing tests see no behavior
+ * change. The skipped-lock test passes `{ lockAcquires: false }`.
+ */
+function makeFakeRaw(
+  opts: { lockAcquires?: boolean } = {},
+): { raw: Sql; reservedRelease: ReturnType<typeof vi.fn> } {
+  const lockAcquires = opts.lockAcquires ?? true;
+  const release = vi.fn();
+  // `reserved` is a function (tagged-template callable) WITH a
+  // `.release` method. Build it as a Vitest mock so we can also inspect
+  // calls if needed.
+  const reserved = vi
+    .fn<(...args: unknown[]) => Promise<unknown[]>>()
+    .mockImplementation((tpl: unknown) => {
+      const text = Array.isArray(tpl) ? tpl.join('') : String(tpl);
+      if (text.includes('pg_try_advisory_lock')) {
+        return Promise.resolve([{ locked: lockAcquires }]);
+      }
+      // unlock + anything else: resolve empty array
+      return Promise.resolve([]);
+    });
+  (reserved as unknown as { release: typeof release }).release = release;
+  const raw = {
+    reserve: () => Promise.resolve(reserved),
+  } as unknown as Sql;
+  return { raw, reservedRelease: release };
+}
 
 /** Minimal stand-in for node-cron's ScheduledTask. Cast via `as unknown as
  *  ScheduledTask` at the boundary — we only ever read `stop`. */
@@ -84,7 +121,7 @@ describe('startOrchestratorCron', () => {
       .mockReturnValueOnce(morning as unknown as ScheduledTask)
       .mockReturnValueOnce(afternoon as unknown as ScheduledTask);
 
-    const handle = startOrchestratorCron(fakeDb, {
+    const handle = startOrchestratorCron(fakeDb, makeFakeRaw().raw, {
       runScoring: vi.fn(),
       scheduleFn,
       logger: makeLogger(),
@@ -116,7 +153,7 @@ describe('startOrchestratorCron', () => {
       .mockReturnValueOnce(morning as unknown as ScheduledTask)
       .mockReturnValueOnce(afternoon as unknown as ScheduledTask);
 
-    const handle = startOrchestratorCron(fakeDb, {
+    const handle = startOrchestratorCron(fakeDb, makeFakeRaw().raw, {
       runScoring: vi.fn(),
       scheduleFn,
       logger: makeLogger(),
@@ -141,7 +178,7 @@ describe('startOrchestratorCron', () => {
       .fn<(db: Db, opts: RunOptions) => Promise<RunResult>>()
       .mockImplementation((_db, opts) => Promise.resolve(okResult(opts.kind)));
 
-    startOrchestratorCron(fakeDb, {
+    startOrchestratorCron(fakeDb, makeFakeRaw().raw, {
       runScoring,
       scheduleFn,
       logger: makeLogger(),
@@ -177,7 +214,7 @@ describe('startOrchestratorCron', () => {
       .mockRejectedValue(boom);
     const logger = makeLogger();
 
-    startOrchestratorCron(fakeDb, {
+    startOrchestratorCron(fakeDb, makeFakeRaw().raw, {
       runScoring,
       scheduleFn,
       logger,
@@ -217,7 +254,7 @@ describe('startOrchestratorCron', () => {
         .mockReturnValueOnce(fakeTask() as unknown as ScheduledTask)
         .mockReturnValueOnce(fakeTask() as unknown as ScheduledTask);
 
-      startOrchestratorCron(fakeDb, {
+      startOrchestratorCron(fakeDb, makeFakeRaw().raw, {
         runScoring: vi.fn(),
         scheduleFn,
         logger: makeLogger(),
@@ -238,5 +275,50 @@ describe('startOrchestratorCron', () => {
       if (previousTz === undefined) delete process.env.ORCHESTRATOR_TIMEZONE;
       else process.env.ORCHESTRATOR_TIMEZONE = previousTz;
     }
+  });
+
+  it('skips the tick (no runScoring call, warn log) when the advisory lock is held', async () => {
+    // Models the race: a cron tick fires while another run (the other
+    // tick that overran, or an MCP run_now) already holds the lock.
+    // withRunLock should return {acquired:false}, runScoring should NOT
+    // be called, the tick should not throw, and the logger should
+    // capture a 'skipped' warn so an operator can see lock contention.
+    const callbacks: Array<() => void> = [];
+    const scheduleFn: ScheduleFn = vi.fn(
+      (_pattern: string, func: () => void) => {
+        callbacks.push(func);
+        return fakeTask() as unknown as ScheduledTask;
+      },
+    );
+
+    const runScoring = vi
+      .fn<(db: Db, opts: RunOptions) => Promise<RunResult>>()
+      .mockImplementation((_db, opts) => Promise.resolve(okResult(opts.kind)));
+    const logger = makeLogger();
+    const { raw, reservedRelease } = makeFakeRaw({ lockAcquires: false });
+
+    startOrchestratorCron(fakeDb, raw, {
+      runScoring,
+      scheduleFn,
+      logger,
+    });
+
+    callbacks[0]!();
+
+    await vi.waitFor(() => {
+      expect(logger.warn).toHaveBeenCalled();
+    });
+
+    expect(runScoring).not.toHaveBeenCalled();
+    // The reserved connection must be released even on the skipped
+    // path — otherwise repeated lock contention would leak connections.
+    expect(reservedRelease).toHaveBeenCalled();
+
+    const warnCall = logger.warn.mock.calls.find(
+      ([msg]) =>
+        typeof msg === 'string' && msg.includes('skipped: lock held'),
+    );
+    expect(warnCall).toBeDefined();
+    expect(warnCall![1]).toMatchObject({ kind: 'morning' });
   });
 });

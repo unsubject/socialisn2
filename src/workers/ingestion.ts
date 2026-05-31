@@ -222,17 +222,37 @@ async function main(): Promise<void> {
     },
   );
 
+  // Issue #122: hook BullMQ lifecycle events to the heartbeat's
+  // progress signal. Three events cover every relevant case:
+  //   - 'completed' — a job's processJob() returned; the worker loop is
+  //     pulling and processing.
+  //   - 'failed'    — a job threw; the worker loop is still pulling and
+  //     processing, the work just isn't succeeding (network issue,
+  //     adapter regression). That's a different signal than "wedged."
+  //   - 'drained'   — the queue went empty after a batch; even an idle
+  //     queue produces this signal, so a worker that's caught up but
+  //     correctly polling still gets credit.
+  // A wedged-INSIDE-processJob handler (deadlocked DB call, hung HTTP)
+  // would not fire 'completed' or 'failed' on that job, but the
+  // sibling scheduler tick (per-minute) keeps marking progress unless
+  // it's wedged on the SAME shared dependency — which is what we want
+  // to catch.
+  worker.on('completed', () => heartbeat.markProgress());
+  worker.on('drained', () => heartbeat.markProgress());
   worker.on('failed', (job, err) => {
     console.error(`[ingestion-worker] job ${job?.id} failed:`, err);
+    heartbeat.markProgress();
   });
 
-  const scheduler = startScheduler(db, queue);
+  const scheduler = startScheduler(db, queue, { onTick: heartbeat.markProgress });
   // ADR-013: daily 04:00 UTC Bayesian recalibration of source authority.
   // Lives on the ingestion worker process for two reasons: (1) it needs
   // the same DB handle as the scheduler, (2) the scoring worker already
   // owns the compaction cron — keeping recalibration here colocates it
   // with the schedule-only side, not the compute-heavy side.
-  const recalibrationCron = startRecalibrationCron(db);
+  const recalibrationCron = startRecalibrationCron(db, {
+    onTick: heartbeat.markProgress,
+  });
   // SPEC §9: twice-daily morning (05:00 ET) + afternoon (14:00 ET)
   // orchestrator runs. Same rationale for colocation — shares the DB
   // handle and the cron-host process with the schedulers above. The
@@ -241,13 +261,17 @@ async function main(): Promise<void> {
   // (src/orchestrator/lock.ts) so a tick that races a concurrent run
   // (the other tick or an MCP run_now) skips cleanly instead of
   // double-spending the cost ceiling on the same clusters.
-  const orchestratorCron = startOrchestratorCron(db, raw);
+  const orchestratorCron = startOrchestratorCron(db, raw, {
+    onTick: heartbeat.markProgress,
+  });
   // Phase 2.b: stuck-runs watchdog. Every 5 min, fails any
   // runs.status='running' older than 90 min — catches the case where a
   // process is SIGKILL'd between runs.INSERT and the runScoring try
   // block, OR where some future change reorders the finalise path.
   // Complements (does not replace) the boot reaper above.
-  const stuckRunsWatchdog = startStuckRunsWatchdog(db);
+  const stuckRunsWatchdog = startStuckRunsWatchdog(db, {
+    onTick: heartbeat.markProgress,
+  });
   // (heartbeat is started at the top of main() before any awaits —
   // see comment there.)
 

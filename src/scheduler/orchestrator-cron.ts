@@ -51,6 +51,15 @@ export interface OrchestratorCronDependencies {
   scheduleFn?: ScheduleFn;
   /** Bound-injected logger; defaults to the module logger. */
   logger?: Logger;
+  /**
+   * Issue #122: called BEFORE the runScoring promise starts and AFTER
+   * it settles. The "before" call covers long-running runs (5-30 min)
+   * that exceed `progressStaleMs` — the heartbeat would otherwise
+   * stall mid-run despite work actively happening. Both ends signal
+   * because withRunLock can also reject the lock acquisition (skip),
+   * and we want that path to mark progress too.
+   */
+  onTick?: () => void;
 }
 
 export interface OrchestratorCronHandle {
@@ -78,12 +87,21 @@ export function startOrchestratorCron(
   const runScoring = deps.runScoring ?? defaultRunScoring;
   const schedule = deps.scheduleFn ?? cron.schedule;
   const log = deps.logger ?? createLogger('orchestrator-cron');
+  const onTick = deps.onTick;
   const timezone = env.orchestratorTimezone();
 
   const register = (pattern: string, kind: RunKind): ScheduledTask =>
     schedule(
       pattern,
       () => {
+        // Issue #122: mark progress BEFORE withRunLock starts. A real
+        // orchestrator run can take 5-30 min — longer than the default
+        // progressStaleMs (120s) — so the cron firing IS the "I'm alive"
+        // signal for this scheduler. Inside-run progress comes from the
+        // sibling scheduler cron (`scheduler/cron.ts`) which fires every
+        // minute on the same process. Marking again on settle below is
+        // belt-and-braces for the lock-skipped path.
+        onTick?.();
         // withRunLock wraps the entire run in pg_try_advisory_lock on a
         // reserved connection. If another tick / MCP run_now is already
         // mid-flight, the lock acquire fails and the work callback
@@ -117,6 +135,11 @@ export function startOrchestratorCron(
               kind,
               error: err instanceof Error ? err.message : String(err),
             });
+          })
+          .finally(() => {
+            // Settled signal — covers a fast-completing run + the lock-
+            // skipped path. The pre-call above covers long-running runs.
+            onTick?.();
           });
       },
       {

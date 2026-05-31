@@ -151,6 +151,19 @@ async function loadBatch(
   }));
 }
 
+export interface StartCronsOptions {
+  /**
+   * Issue #122: called at the end of every tick (success OR failure,
+   * including no-op ticks where the pending queue was empty) and at the
+   * end of every compaction. The caller wires this to the worker
+   * heartbeat's `markProgress()` so the heartbeat file stops advancing
+   * when the cron callback is wedged. Skipped ticks (chainDepth>0) do
+   * NOT call onTick — a skipped tick is itself a wedge signal we want
+   * to surface, not paper over.
+   */
+  onTick?: () => void;
+}
+
 export interface WorkerHandles {
   tickTask: ScheduledTask;
   compactionTask: ScheduledTask;
@@ -163,7 +176,8 @@ export interface WorkerHandles {
  * SIG handlers and awaits `drain()` on shutdown. Splitting boot vs cron
  * registration keeps tests free of `process` global mutation.
  */
-export function startCrons(db: Db): WorkerHandles {
+export function startCrons(db: Db, opts: StartCronsOptions = {}): WorkerHandles {
+  const onTick = opts.onTick;
   const batchSize = env.scoringWorkerBatchSize();
   const maxAttempts = env.scoringWorkerMaxAttempts();
   // Both crons append onto the same in-flight chain so shutdown can await
@@ -209,13 +223,23 @@ export function startCrons(db: Db): WorkerHandles {
   const tickTask = cron.schedule(env.scoringWorkerTickCron(), () => {
     // Pass allowQueueing=false: skip if previous tick still running.
     chain(async () => {
-      const stats = await tickOnce(db, { batchSize, maxAttempts });
-      // Quiet ticks (nothing pulled) don't log — avoids minute-by-minute
-      // noise in journalctl. Anything with work or a halt does log.
-      if (stats.pulled > 0 || stats.failures > 0 || stats.ceilingHit) {
-        console.log(
-          `[scoring-worker] tick pulled=${stats.pulled} normal=${stats.normalProcessed} dedup=${stats.dedupProcessed} failed=${stats.failures} cost=$${stats.costUsd.toFixed(6)}${stats.ceilingHit ? ' CEILING_HIT' : ''}`,
-        );
+      try {
+        const stats = await tickOnce(db, { batchSize, maxAttempts });
+        // Quiet ticks (nothing pulled) don't log — avoids minute-by-minute
+        // noise in journalctl. Anything with work or a halt does log.
+        if (stats.pulled > 0 || stats.failures > 0 || stats.ceilingHit) {
+          console.log(
+            `[scoring-worker] tick pulled=${stats.pulled} normal=${stats.normalProcessed} dedup=${stats.dedupProcessed} failed=${stats.failures} cost=$${stats.costUsd.toFixed(6)}${stats.ceilingHit ? ' CEILING_HIT' : ''}`,
+          );
+        }
+      } finally {
+        // Issue #122: mark progress AFTER the tick body settles
+        // (success OR thrown). A throwing tick is still "the cron
+        // wheels are turning" — what we're guarding against is the
+        // body never returning at all (deadlocked DB, hung Redis,
+        // infinite loop). Skipped ticks (chain() short-circuits with
+        // chainDepth>0) don't get here, which is intentional.
+        onTick?.();
       }
     }, false);
   });
@@ -226,8 +250,12 @@ export function startCrons(db: Db): WorkerHandles {
       // Pass allowQueueing=true: compaction is once-a-day; the operator
       // would rather have it queue behind a slow tick than skip outright.
       chain(async () => {
-        const result = await compactOnce(db);
-        console.log(`[scoring-worker] compaction merges=${result.merges}`);
+        try {
+          const result = await compactOnce(db);
+          console.log(`[scoring-worker] compaction merges=${result.merges}`);
+        } finally {
+          onTick?.();
+        }
       }, true);
     },
   );

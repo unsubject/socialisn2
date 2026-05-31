@@ -12,14 +12,18 @@ import process from 'node:process';
 
 import { createDb } from '../db/client.js';
 import { env } from '../config/env.js';
+import { startHeartbeat } from '../lib/worker-heartbeat.js';
 import { startCrons } from './scoring-core.js';
 
 async function main(): Promise<void> {
   const { db, close } = createDb();
   const handles = startCrons(db);
+  // Phase 2.c heartbeat for the docker-compose healthcheck.
+  const heartbeat = startHeartbeat('scoring');
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[scoring-worker] ${signal} received; shutting down`);
+    heartbeat.stop();
     handles.tickTask.stop();
     handles.compactionTask.stop();
     // Drain whatever's mid-flight (best effort — the chain swallows

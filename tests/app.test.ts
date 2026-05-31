@@ -178,10 +178,14 @@ describe.skipIf(!DATABASE_URL)('Fastify app (src/app.ts)', () => {
   // /healthz
   // -------------------------------------------------------------------------
 
-  it('GET /healthz returns 200 {ok:true}', async () => {
+  it('GET /healthz returns 200 with db:reachable + latency_ms on a healthy DB', async () => {
     const res = await app.inject({ method: 'GET', url: '/healthz' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true });
+    const body = res.json() as Record<string, unknown>;
+    expect(body.ok).toBe(true);
+    expect(body.db).toBe('reachable');
+    expect(typeof body.latency_ms).toBe('number');
+    expect(body.latency_ms).toBeGreaterThanOrEqual(0);
   });
 
   // -------------------------------------------------------------------------

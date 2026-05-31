@@ -40,6 +40,7 @@ import { DOMAIN_CONFIGS, domainWeight } from '../../config/domains.js';
 import { env } from '../config/env.js';
 import type { Db } from '../db/client.js';
 import { maybeFireCostAlert, type CostAlertPusher } from '../cost/alert.js';
+import { BUCKET_ORCHESTRATOR } from '../cost/buckets.js';
 import { assertWithinCeiling, CostCeilingHitError } from '../cost/ceiling.js';
 import { recordCost } from '../cost/ledger.js';
 import { generateAllFeeds } from '../rss/generate.js';
@@ -264,7 +265,7 @@ export async function runScoring(
 
     for (const cluster of top) {
       try {
-        await assertWithinCeiling(db, SUMMARISE_PROJECTED_USD);
+        await assertWithinCeiling(db, SUMMARISE_PROJECTED_USD, BUCKET_ORCHESTRATOR);
       } catch (err) {
         if (err instanceof CostCeilingHitError) {
           halt = { reason: err.code, err };
@@ -316,7 +317,7 @@ export async function runScoring(
       }
 
       try {
-        await assertWithinCeiling(db, CURATE_PROJECTED_USD);
+        await assertWithinCeiling(db, CURATE_PROJECTED_USD, BUCKET_ORCHESTRATOR);
       } catch (err) {
         if (err instanceof CostCeilingHitError) {
           halt = { reason: err.code, err };

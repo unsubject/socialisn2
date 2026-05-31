@@ -309,6 +309,7 @@ export const costLedger = pgTable(
     outputTokens: integer('output_tokens').notNull(),
     usd: numeric('usd', { precision: 10, scale: 6 }).notNull(),
     stage: text('stage'), // optional pipeline-stage tag for cost breakdown
+    bucket: text('bucket'), // Phase 3 sub-budget bucket; see src/cost/buckets.ts
   },
   (t) => ({
     runIdIdx: index('idx_cost_ledger_run_id').on(t.runId),

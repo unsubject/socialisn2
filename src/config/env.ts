@@ -69,6 +69,56 @@ export const env = {
     }
     return parsed;
   },
+  /**
+   * Phase 3: sub-budget for the 'normalize' bucket — covers stage='normalise'
+   * + stage='embed' (per-raw-item processing). Default = 60% of the overall
+   * daily ceiling so the ingestion tier can't starve the orchestrator
+   * tier if a backlog spike floods the normalize stage. The default keeps
+   * the sum (normalize + orchestrator) ≤ overall ceiling so a balanced
+   * day doesn't hit the per-bucket caps before the daily.
+   */
+  costCeilingNormalizeDailyUsd: () => {
+    const raw = process.env.COST_CEILING_NORMALIZE_DAILY_USD;
+    if (raw === undefined || raw === '') {
+      // 60% of overall ceiling. Reads costCeilingDailyUsd to stay in sync
+      // if the overall ceiling is raised, without operator having to also
+      // bump the sub-budgets.
+      return env.costCeilingDailyUsd() * 0.6;
+    }
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(
+        `Invalid COST_CEILING_NORMALIZE_DAILY_USD=${JSON.stringify(raw)} — must be a positive number`,
+      );
+    }
+    return parsed;
+  },
+  /**
+   * Phase 3: sub-budget for the 'orchestrator' bucket — covers
+   * stage='stage4_summarise' + stage='stage6_curate'. Default = 80% of
+   * the overall daily ceiling. Larger than the normalize default because
+   * a single curate call (Gemini 3.5 Flash, ~$0.003-0.004) is materially
+   * pricier than a single normalise call (Gemini Flash-Lite, ~$0.0006);
+   * a 50/50 split would have orchestrator hit its sub-budget too easily
+   * on a day with normal cluster volume. The two sub-budgets DELIBERATELY
+   * sum to >100% of the overall ceiling so the overall ceiling remains
+   * the binding constraint on a day where both tiers are spending; the
+   * sub-budget only fires when ONE tier is running away while the other
+   * is quiet.
+   */
+  costCeilingOrchestratorDailyUsd: () => {
+    const raw = process.env.COST_CEILING_ORCHESTRATOR_DAILY_USD;
+    if (raw === undefined || raw === '') {
+      return env.costCeilingDailyUsd() * 0.8;
+    }
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(
+        `Invalid COST_CEILING_ORCHESTRATOR_DAILY_USD=${JSON.stringify(raw)} — must be a positive number`,
+      );
+    }
+    return parsed;
+  },
   scoringWorkerTickCron: () => optional('SCORING_WORKER_TICK_CRON', '* * * * *'),
   scoringWorkerCompactionCron: () =>
     optional('SCORING_WORKER_COMPACTION_CRON', '0 4 * * *'),

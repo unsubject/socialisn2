@@ -11,7 +11,12 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import * as schema from '../../src/db/schema.js';
-import { dailyTotalUsd, recordCost } from '../../src/cost/ledger.js';
+import {
+  dailyTotalUsd,
+  dailyTotalUsdByBucket,
+  recordCost,
+} from '../../src/cost/ledger.js';
+import { BUCKET_NORMALIZE, BUCKET_ORCHESTRATOR } from '../../src/cost/buckets.js';
 import { assertDestructiveAllowed } from '../helpers/destructive-guard.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -109,6 +114,105 @@ describe.skipIf(!DATABASE_URL)('cost ledger', () => {
 
   it('dailyTotalUsd returns 0 on an empty ledger', async () => {
     expect(await dailyTotalUsd(db)).toBe(0);
+  });
+
+  // Phase 3: bucket column populated from stage via bucketForStage.
+  it('writes bucket=normalize for stage=normalise + stage=embed', async () => {
+    await recordCost(db, {
+      model: 'gemini-2.5-flash-lite',
+      inputTokens: 100,
+      outputTokens: 50,
+      stage: 'normalise',
+    });
+    await recordCost(db, {
+      model: 'text-embedding-3-small',
+      inputTokens: 100,
+      outputTokens: 0,
+      stage: 'embed',
+    });
+    const rows = await client<{ stage: string; bucket: string | null }[]>`
+      SELECT stage, bucket FROM cost_ledger ORDER BY stage
+    `;
+    expect(rows.map((r) => r.bucket)).toEqual([
+      BUCKET_NORMALIZE,
+      BUCKET_NORMALIZE,
+    ]);
+  });
+
+  it('writes bucket=orchestrator for stage4/stage6 + null bucket for unknown stage', async () => {
+    await recordCost(db, {
+      model: 'gemini-2.5-flash-lite',
+      inputTokens: 100,
+      outputTokens: 50,
+      stage: 'stage4_summarise',
+    });
+    await recordCost(db, {
+      model: 'gemini-3.5-flash',
+      inputTokens: 100,
+      outputTokens: 50,
+      stage: 'stage6_curate',
+    });
+    await recordCost(db, {
+      model: 'gemini-2.5-flash-lite',
+      inputTokens: 100,
+      outputTokens: 50,
+      stage: 'unknown_future_stage',
+    });
+    const rows = await client<{ stage: string; bucket: string | null }[]>`
+      SELECT stage, bucket FROM cost_ledger ORDER BY stage
+    `;
+    const byStage = Object.fromEntries(rows.map((r) => [r.stage, r.bucket]));
+    expect(byStage['stage4_summarise']).toBe(BUCKET_ORCHESTRATOR);
+    expect(byStage['stage6_curate']).toBe(BUCKET_ORCHESTRATOR);
+    expect(byStage['unknown_future_stage']).toBeNull();
+  });
+
+  it('dailyTotalUsdByBucket sums only rows in that bucket (today, UTC)', async () => {
+    await recordCost(db, {
+      model: 'gemini-2.5-flash-lite',
+      inputTokens: 100_000,
+      outputTokens: 0,
+      stage: 'normalise',
+    });
+    await recordCost(db, {
+      model: 'gemini-3.5-flash',
+      inputTokens: 100_000,
+      outputTokens: 0,
+      stage: 'stage6_curate',
+    });
+    const normalizeTotal = await dailyTotalUsdByBucket(db, BUCKET_NORMALIZE);
+    const orchestratorTotal = await dailyTotalUsdByBucket(
+      db,
+      BUCKET_ORCHESTRATOR,
+    );
+    expect(normalizeTotal).toBeGreaterThan(0);
+    expect(orchestratorTotal).toBeGreaterThan(0);
+    // Sanity: orchestrator (gemini-3.5-flash @ $1.50/1M) is pricier than
+    // normalize (gemini-2.5-flash-lite @ $0.10/1M) for the same token volume.
+    expect(orchestratorTotal).toBeGreaterThan(normalizeTotal);
+    // And the per-bucket sums together don't exceed the overall sum
+    // (would exceed only if rows were double-counted across buckets).
+    const overall = await dailyTotalUsd(db);
+    expect(normalizeTotal + orchestratorTotal).toBeCloseTo(overall, 6);
+  });
+
+  it('dailyTotalUsdByBucket ignores rows with NULL bucket', async () => {
+    // Historical row that predates the bucket column gets a NULL bucket.
+    // Direct INSERT to simulate; recordCost() always sets bucket via
+    // bucketForStage so we have to bypass it here.
+    await client`
+      INSERT INTO cost_ledger
+        (id, occurred_at, model, input_tokens, output_tokens, usd, stage, bucket)
+      VALUES
+        (gen_random_uuid(), NOW(), 'legacy-model', 100, 50, 0.01, 'curate', NULL)
+    `;
+    const normalizeTotal = await dailyTotalUsdByBucket(db, BUCKET_NORMALIZE);
+    const orchestratorTotal = await dailyTotalUsdByBucket(db, BUCKET_ORCHESTRATOR);
+    expect(normalizeTotal).toBe(0);
+    expect(orchestratorTotal).toBe(0);
+    // But the overall total DOES include the legacy row.
+    const overall = await dailyTotalUsd(db);
+    expect(overall).toBeCloseTo(0.01, 6);
   });
 
   // Regression test for the PG16 3-arg date_trunc fix. With the buggy 2-arg

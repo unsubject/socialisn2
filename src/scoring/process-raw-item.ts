@@ -63,6 +63,7 @@ import { type SQL, sql } from 'drizzle-orm';
 import { v7 as uuidv7 } from 'uuid';
 
 import type { Db } from '../db/client.js';
+import { BUCKET_NORMALIZE } from '../cost/buckets.js';
 import { CostCeilingHitError, assertWithinCeiling as defaultAssertWithinCeiling } from '../cost/ceiling.js';
 import { recordCost as defaultRecordCost } from '../cost/ledger.js';
 import { EMBEDDING_DIM } from '../db/schema.js';
@@ -161,10 +162,22 @@ export async function processRawItem(
   // Pre-normalise ceiling gate. If hit, return without touching the row —
   // attempts counter stays put so the row will be re-tried cleanly once
   // the day rolls over.
+  //
+  // The worker tier has no runs row to write to (runs.* is orchestrator-
+  // owned), so the scope signal that the orchestrator catch path threads
+  // into runs.error doesn't apply here. We log the scope explicitly so
+  // ops-digest (which scrapes worker logs) can surface a "normalize
+  // bucket ceiling tripped" alert with the right tier name. Without this
+  // log, the operator only sees a queue stalling at 'ceiling_hit' with
+  // no signal as to which budget actually tripped (overall daily, or
+  // the normalize sub-budget).
   try {
-    await assertCeiling(db, NORMALIZE_PROJECTED_USD);
+    await assertCeiling(db, NORMALIZE_PROJECTED_USD, BUCKET_NORMALIZE);
   } catch (err) {
     if (err instanceof CostCeilingHitError) {
+      console.warn(
+        `[process-raw-item] cost ceiling hit on raw_item ${row.id}: ${err.code} (scope=${err.scope}, spent=${err.spent.toFixed(4)}, projected=${err.projected.toFixed(4)}, ceiling=${err.ceiling.toFixed(4)})`,
+      );
       return { kind: 'ceiling_hit' };
     }
     throw err;

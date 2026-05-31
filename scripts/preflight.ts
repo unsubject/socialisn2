@@ -163,13 +163,28 @@ async function main(): Promise<void> {
     { name: 'public_host', run: () => checkRequiredString('PUBLIC_HOST', env.publicHost) },
   ];
 
-  // Deploy-time only: smoke-probe each primary routed model. Two
-  // models — gemini-2.5-flash-lite (normalise + Stage 4 summarise) and
-  // gemini-3.5-flash (Stage 6 curate). Cost per deploy: negligible
-  // (2 × 1-token completions). Catches stale-config, revoked-key,
-  // and routing-mismatch in one shot.
+  // Deploy-time only: smoke-probe each routed model the fallback
+  // chain might dispatch to. Three models:
+  //   - gemini-2.5-flash-lite (normalise + Stage 4 summarise)
+  //   - gemini-3.5-flash       (Stage 6 curate)
+  //   - claude-haiku-4.5       (last-resort fallback for both)
+  //
+  // Codex review on PR #109 caught that probing only the two Google
+  // primaries leaves the Haiku fallback ungated — a missing/revoked
+  // ANTHROPIC_API_KEY while Google is healthy lets the deploy pass
+  // and only blows up the first time a Gemini 5xx forces fall-through.
+  // Adding Haiku to the probe deploys the whole reliability chain
+  // atomically.
+  //
+  // Cost per deploy: still negligible — 3 × 1-token completions, ~$0.0001 total.
+  // Catches stale-config, revoked-key, and routing-mismatch on all
+  // three routed models in one shot.
   if (process.env.PREFLIGHT_LITELLM_PROBE === '1') {
-    for (const model of ['gemini-2.5-flash-lite', 'gemini-3.5-flash']) {
+    for (const model of [
+      'gemini-2.5-flash-lite',
+      'gemini-3.5-flash',
+      'claude-haiku-4.5',
+    ]) {
       steps.push({
         name: `litellm_route_${model.replace(/[.-]/g, '_')}`,
         run: () => checkLitellmRoute(model),

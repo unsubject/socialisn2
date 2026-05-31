@@ -125,12 +125,40 @@ jobs:
         run: |
           set -euo pipefail
           cd /opt/socialisn2
-          docker compose up -d --wait postgres redis litellm
+          docker compose up -d --wait postgres redis
+          # ALWAYS recycle the litellm container so a config/litellm.yaml
+          # change (route added / removed / fallback chain edited) takes
+          # effect — `docker compose up -d --wait` alone is a no-op when
+          # only a bind-mounted file changed (compose only recreates on
+          # image SHA or compose-spec changes). The 2026-05-30 production
+          # incident was exactly this class: gemini-3.5-flash was added
+          # to litellm.yaml in PR #100 but the running container was
+          # serving its 7-day-old config, producing
+          # ProxyModelNotFoundError on every curate call until manual
+          # restart. `--force-recreate --no-deps` tears down + starts
+          # litellm WITHOUT cascading to postgres/redis (which are
+          # already healthy from the previous up command).
+          #
+          # `--wait-timeout 120` bounds the structural gate: if
+          # litellm can't reach healthy in 120s (malformed
+          # config/litellm.yaml, revoked provider key blocking startup,
+          # image pull failure), this step exits non-zero instead of
+          # hanging until the GH Actions job timeout. 120s comfortably
+          # exceeds the compose-level start_period: 30s plus a couple
+          # of healthcheck retries. The smoke probe downstream is the
+          # functional gate; this is the structural one.
+          docker compose up -d --force-recreate --no-deps --wait --wait-timeout 120 litellm
           # --no-deps bypasses depends_on for the one-shot container so
           # we don't accidentally tear down healthy postgres/redis on
           # `--rm`. Postgres is already up-and-healthy from the
           # previous step.
-          docker compose run --rm --no-deps app node dist/scripts/preflight.js
+          #
+          # PREFLIGHT_LITELLM_PROBE=1 enables the per-model smoke probe
+          # (one 1-token completion to each routed primary model). The
+          # variable opts in here because the existing preflight unit
+          # tests don't run a real LiteLLM; setting it via -e on the
+          # one-shot keeps test fixtures clean and the deploy strict.
+          docker compose run -e PREFLIGHT_LITELLM_PROBE=1 --rm --no-deps app node dist/scripts/preflight.js
           docker compose run --rm --no-deps app node dist/scripts/migrate.js
 
       - name: Bring up app + workers + nginx

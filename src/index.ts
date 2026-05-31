@@ -13,17 +13,38 @@ import type { Bot } from 'grammy';
 import { buildApp } from './app.js';
 import { env } from './config/env.js';
 import { createDb } from './db/client.js';
+import { reapOrphanedManualRunsOnBoot } from './scheduler/stuck-runs-watchdog.js';
 import { buildBot } from './telegram/bot.js';
 
 async function main(): Promise<void> {
   const { db, raw, close } = createDb();
 
-  // Orphaned-runs reaper used to live here. As of Phase 2.b it moved
-  // to src/workers/ingestion.ts where the orchestrator cron + watchdog
-  // also live — the ingestion worker is the only process that runs
-  // scoring on a cron tick, so a restart of THAT process is the actual
-  // orphan-creating event. The app process restarting (this file) used
-  // to wipe runs that the still-running ingestion worker owned.
+  // App-process boot reaper. Codex review on PR #110 pointed out that
+  // removing the unconditional reaper (which used to live here) left
+  // MCP `run_now` (`kind='manual'`) runs stranded after an app crash —
+  // the ingestion-worker's reaper is kind-scoped to morning/afternoon
+  // and won't touch them, and the 90-min watchdog cron also runs in
+  // the ingestion-worker (so it only fires if that worker is up). Add
+  // a sibling reaper here scoped to kind='manual'. Wrapped in
+  // try/catch + a 30s race so a hung reaper at boot (unmigrated DB,
+  // network blip) can't gate Fastify startup — same pattern the
+  // ingestion-worker uses for its own boot reaper.
+  try {
+    const reaperPromise = reapOrphanedManualRunsOnBoot(db);
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      const t = setTimeout(
+        () => reject(new Error('boot reaper timed out after 30s')),
+        30_000,
+      );
+      t.unref();
+    });
+    const { reaped } = await Promise.race([reaperPromise, timeoutPromise]);
+    if (reaped > 0) {
+      console.log(`[app] reaped ${reaped} orphaned manual run(s) at boot`);
+    }
+  } catch (err) {
+    console.error('[app] boot reaper failed (continuing):', err);
+  }
 
   // `raw` is threaded to buildApp so MCP run_now can acquire the
   // orchestrator advisory lock on a pinned connection — see

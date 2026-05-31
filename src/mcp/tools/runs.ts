@@ -98,7 +98,16 @@ export async function runNow(
       } catch {
         // ignored — connection-end auto-releases anyway
       }
-      reserved.release();
+      try {
+        reserved.release();
+      } catch {
+        // reserved.release() can throw if the underlying connection
+        // ended (SIGTERM teardown closes raw via close(); the
+        // background runScoring's finally races that). Swallow so the
+        // fire-and-forget chain doesn't emit an unhandled rejection.
+        // The connection is already gone; release() throwing means
+        // there's nothing to release.
+      }
     });
 
   return { run_id: runId, status: 'started' };
@@ -125,10 +134,17 @@ export async function systemStatus(
   // Parallel — the three reads are independent, and small enough that
   // the three round trips are noise vs the LLM-touching tools.
   const [lastRunRows, spentUsd, pendingRows, poolRows] = await Promise.all([
+    // Filter to scoring runs only — 'recalibrate' rows from the daily
+    // 04:00 UTC ADR-013 recalibration cron would otherwise mask the
+    // actual last scoring outcome for hours (recalibrate runs near
+    // the daily reset and ORDER BY started_at DESC puts it first).
+    // ops-digest and /status both consume this; both want "did the
+    // last scoring pass succeed", not "did anything succeed".
     db.execute<LastRunRow>(sql`
       SELECT id, kind, status, started_at, completed_at,
              candidates_count, total_cost_usd, error
       FROM runs
+      WHERE kind IN ('morning', 'afternoon', 'manual')
       ORDER BY started_at DESC
       LIMIT 1
     `),

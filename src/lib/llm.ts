@@ -152,8 +152,32 @@ async function attemptLlmCall(opts: LlmCallOptions): Promise<AttemptOutcome> {
     };
   }
 
-  const json = (await res.json()) as OpenAiChatResponse;
-  const rawContent = json.choices[0]?.message.content;
+  // Audit D-P2: tolerate non-JSON 200 bodies (some gateways serve a
+  // maintenance page with text/html on degradation). Without this,
+  // `res.json()` throws a SyntaxError that escapes the retry wrapper
+  // and surfaces as an unretried network-style failure.
+  let json: OpenAiChatResponse;
+  try {
+    json = (await res.json()) as OpenAiChatResponse;
+  } catch (err) {
+    return {
+      kind: 'err',
+      status: null,
+      retryAfter: null,
+      error: new Error(
+        `LLM returned non-JSON 200 body for model=${opts.model}: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    };
+  }
+  // Audit D-P1-1: full optional chain on `.message` too. Operator
+  // precedence parses `?.message.content` as
+  // `(json.choices[0]?.message).content`, so an empty `choices: []`
+  // (some gateways emit this on content-policy blocks) throws
+  // TypeError instead of falling through to the intentional "empty
+  // completion" branch below. `?.message?.content` routes the
+  // empty-choices case to the same null path as a genuinely empty
+  // completion.
+  const rawContent = json.choices[0]?.message?.content;
   if (rawContent === null || rawContent === undefined || rawContent === '') {
     // Anthropic occasionally returns null content on tool-use / refusal paths
     // through the OpenAI-compat shim. Silently returning '' would propagate a

@@ -93,6 +93,12 @@ export async function findSemanticDuplicate(
 
   const nearest = rows[0];
   if (!nearest) return null;
+  // Audit D-P1-2: guard against NaN distance from a zero-vector poison.
+  // pgvector's `<=>` is `1 - cosine_similarity`; cosine between two
+  // zero vectors is 0/0 = NaN, which pgvector surfaces as the distance.
+  // `NaN > threshold` is `false`, so without this guard a bogus
+  // zero-vector items row would steal every incoming item as a "dup".
+  if (!Number.isFinite(nearest.distance)) return null;
   if (nearest.distance > distanceThreshold) return null;
 
   return {

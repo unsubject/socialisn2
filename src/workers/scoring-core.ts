@@ -169,18 +169,45 @@ export function startCrons(db: Db): WorkerHandles {
   // Both crons append onto the same in-flight chain so shutdown can await
   // a single promise. Compaction won't kick in mid-tick; a tick won't
   // overlap a long-running compaction.
+  //
+  // Audit C-P1-1: skip-if-busy guard. Pre-audit, every cron fire
+  // appended a `.then(...)` node to `inFlight` unconditionally. Tick
+  // default is '* * * * *' (every minute); when a tick takes >60s
+  // (LLM 5xx retries, embedding slowdown, large backlog), the next
+  // cron fire still chains. The chain grows unboundedly — memory
+  // leak AND work backlog that falls progressively further behind
+  // real time. Skip if there's already a queued job: the in-flight
+  // tick will resume picking up where it left off on the NEXT real
+  // cron fire after it settles. Compaction is allowed to queue (it's
+  // once-a-day, can't pile up).
   let inFlight: Promise<void> = Promise.resolve();
-  const chain = (job: () => Promise<unknown>) => {
+  let chainDepth = 0;
+  /**
+   * @param allowQueueing - when true (compaction), append even if a
+   *   tick is in flight. When false (tick), skip if anything is
+   *   already running so we don't pile up under slow upstreams.
+   */
+  const chain = (job: () => Promise<unknown>, allowQueueing: boolean): void => {
+    if (!allowQueueing && chainDepth > 0) {
+      console.warn(
+        `[scoring-worker] tick skipped: previous job still in flight (chainDepth=${chainDepth})`,
+      );
+      return;
+    }
+    chainDepth += 1;
     inFlight = inFlight.then(async () => {
       try {
         await job();
       } catch (err) {
         console.error('[scoring-worker] chained job failed:', err);
+      } finally {
+        chainDepth -= 1;
       }
     });
   };
 
   const tickTask = cron.schedule(env.scoringWorkerTickCron(), () => {
+    // Pass allowQueueing=false: skip if previous tick still running.
     chain(async () => {
       const stats = await tickOnce(db, { batchSize, maxAttempts });
       // Quiet ticks (nothing pulled) don't log — avoids minute-by-minute
@@ -190,16 +217,18 @@ export function startCrons(db: Db): WorkerHandles {
           `[scoring-worker] tick pulled=${stats.pulled} normal=${stats.normalProcessed} dedup=${stats.dedupProcessed} failed=${stats.failures} cost=$${stats.costUsd.toFixed(6)}${stats.ceilingHit ? ' CEILING_HIT' : ''}`,
         );
       }
-    });
+    }, false);
   });
 
   const compactionTask = cron.schedule(
     env.scoringWorkerCompactionCron(),
     () => {
+      // Pass allowQueueing=true: compaction is once-a-day; the operator
+      // would rather have it queue behind a slow tick than skip outright.
       chain(async () => {
         const result = await compactOnce(db);
         console.log(`[scoring-worker] compaction merges=${result.merges}`);
-      });
+      }, true);
     },
   );
 

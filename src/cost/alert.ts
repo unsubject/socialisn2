@@ -63,11 +63,20 @@ export async function maybeFireCostAlert(
   // because db.execute(...) over postgres-js doesn't surface it
   // reliably; existing call sites use RETURNING (see
   // src/mcp/tools/sources.ts) and we follow that convention.
+  // Audit A-P1-4: clamp at 9.9999 to fit NUMERIC(5,4) (max 9.9999).
+  // Without this, a runaway $15 call against a $1.50 ceiling produces
+  // pctOfCeiling=10.0 → '10.0000' → INSERT throws `numeric field
+  // overflow`. safeMaybeFireCostAlert in the orchestrator swallows
+  // it, and the alert that exists exactly for the runaway-cost case
+  // is lost. The clamped value loses precision above 9.9999×ceiling
+  // but the alert still fires; widen the column in a follow-up
+  // migration if higher precision matters.
+  const clampedPct = Math.min(status.pctOfCeiling, 9.9999);
   const rows = await db.execute<{ alert_day: string }>(sql`
     INSERT INTO cost_alert_state (alert_day, pct_at_fire)
     VALUES (
       (NOW() AT TIME ZONE 'UTC')::date,
-      ${status.pctOfCeiling.toFixed(4)}
+      ${clampedPct.toFixed(4)}
     )
     ON CONFLICT (alert_day) DO NOTHING
     RETURNING alert_day

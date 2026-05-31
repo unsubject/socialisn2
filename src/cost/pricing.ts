@@ -78,6 +78,22 @@ export function computeCostUsd(
   inputTokens: number,
   outputTokens: number,
 ): number {
+  // Audit A-P1-3: reject negative / non-integer / non-finite token
+  // counts. Without this guard, a vendor or test stub returning -1
+  // produces negative `usd`, which lands in cost_ledger.usd
+  // (numeric(10,6) accepts negatives) and SUBTRACTS from
+  // dailyTotalUsd — could mask real spend or let subsequent calls
+  // escape the ceiling. Treat as programmer error and throw loud.
+  if (
+    !Number.isInteger(inputTokens) ||
+    inputTokens < 0 ||
+    !Number.isInteger(outputTokens) ||
+    outputTokens < 0
+  ) {
+    throw new Error(
+      `computeCostUsd: tokens must be non-negative integers (got inputTokens=${inputTokens}, outputTokens=${outputTokens})`,
+    );
+  }
   const p = pricingFor(model);
   return inputTokens * p.inputUsdPerToken + outputTokens * p.outputUsdPerToken;
 }

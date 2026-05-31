@@ -79,24 +79,76 @@ export async function generateAllFeeds(
   const limit = opts.limit ?? FEED_ITEM_LIMIT;
   await mkdir(outputDir, { recursive: true });
 
-  const written: string[] = [];
+  // Audit G-P1-1: partial-failure-tolerant. Pre-audit, a throw from
+  // any single fetchFeedItems / renderFeed / write call rejected the
+  // whole function — the feeds written so far were fresh, the
+  // remaining ones kept yesterday's bytes on disk, and the
+  // orchestrator's RSS regenerate hook saw a single failure rather
+  // than "5/6 succeeded". Now each feed is written independently;
+  // failures are collected and re-thrown as a joined error at the
+  // end (after every feed has been attempted), so a transient
+  // failure on one feed doesn't gate the other five.
+  //
+  // Order is also flipped: per-domain feeds are written FIRST, master
+  // 'all' is written LAST. That way a partial failure leaves an
+  // older-than-fresh master rather than the inverse (which would
+  // confuse a subscriber that sees a master pointing at items absent
+  // from per-domain feeds).
+  // Two separate concerns:
+  //   - WRITE order is per-domain first, master last (rationale above).
+  //   - RETURN order is master first, per-domain after — the documented
+  //     contract (`[all.xml, economy.xml, ...]`) that callers + the
+  //     existing tests pin. Codex review on PR #114 caught the regression
+  //     where I'd let return order follow write order; fixing here by
+  //     keying paths into a dict and rebuilding the returned array in the
+  //     documented order regardless of write timing.
+  const writtenByFeed = new Map<string, string>();
+  const failures: Array<{ feed: string; error: Error }> = [];
 
-  // Master feed.
-  const allItems = await fetchFeedItems(db, null, limit);
-  const allPath = join(outputDir, 'all.xml');
-  await atomicWriteXml(allPath, renderFeed('all', allItems, publicHost));
-  written.push(allPath);
+  const writeOne = async (
+    slug: string,
+    domain: string | null,
+  ): Promise<void> => {
+    try {
+      const items = await fetchFeedItems(db, domain, limit);
+      const filePath = join(outputDir, `${slug}.xml`);
+      await atomicWriteXml(filePath, renderFeed(slug, items, publicHost));
+      writtenByFeed.set(slug, filePath);
+    } catch (err) {
+      failures.push({
+        feed: slug,
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+    }
+  };
 
-  // Per-domain feeds. Order from DOMAIN_CONFIGS keys (matches SPEC §3
-  // table order — economy, economics, scitech, geopolitics, national).
+  // Per-domain feeds FIRST. Order from DOMAIN_CONFIGS keys (matches
+  // SPEC §3 table order — economy, economics, scitech, geopolitics,
+  // national).
   for (const domain of Object.keys(DOMAIN_CONFIGS) as Array<keyof typeof DOMAIN_CONFIGS>) {
-    const items = await fetchFeedItems(db, domain, limit);
-    const filePath = join(outputDir, `${domain}.xml`);
-    await atomicWriteXml(filePath, renderFeed(domain, items, publicHost));
-    written.push(filePath);
+    await writeOne(domain, domain);
+  }
+  // Master 'all' feed last, per the write-order rationale above.
+  await writeOne('all', null);
+
+  if (failures.length > 0) {
+    const summary = failures
+      .map((f) => `${f.feed}: ${f.error.message.slice(0, 200)}`)
+      .join('; ');
+    throw new Error(
+      `generateAllFeeds: ${failures.length}/${
+        failures.length + writtenByFeed.size
+      } feeds failed: ${summary}`,
+    );
   }
 
-  return written;
+  // Documented return order: master first, then domains in SPEC §3
+  // table order. Tests pin this; external callers may also.
+  const orderedSlugs = [
+    'all',
+    ...(Object.keys(DOMAIN_CONFIGS) as string[]),
+  ];
+  return orderedSlugs.map((s) => writtenByFeed.get(s)!).filter(Boolean);
 }
 
 /**
@@ -162,11 +214,18 @@ function renderFeed(
   // entries but a full channel header. Don't 404 the file or write
   // zero bytes; consumers polling for updates need a valid response.
   const itemsXml = items.map((it) => renderItem(it, baseUrl)).join('\n');
+  // Audit G-P1-2: RSS 2.0 best practice requires <atom:link
+  // rel="self"/> inside <channel> so polling clients can discover
+  // the canonical feed URL. The W3C feed validator warns without
+  // it; some readers also fall back to <link> as identity, which
+  // collides with the human-facing link. Declare the atom namespace
+  // on the root and emit the self-link.
   return `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:socialisn2="${SOCIALISN2_NS}">
+<rss version="2.0" xmlns:socialisn2="${SOCIALISN2_NS}" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>${escapeXml(feedTitle)}</title>
     <link>${escapeXml(feedLink)}</link>
+    <atom:link href="${escapeXml(feedLink)}" rel="self" type="application/rss+xml"/>
     <description>${escapeXml(feedDescription)}</description>
     <lastBuildDate>${new Date().toUTCString()}</lastBuildDate>
 ${itemsXml}

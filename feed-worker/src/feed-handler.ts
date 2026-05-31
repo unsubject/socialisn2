@@ -117,7 +117,17 @@ function snippet(text: string, max = 480): string {
 }
 
 function escapeXml(s: string): string {
-  return s
+  // Audit G-P1-3: strip C0 control characters BEFORE entitising.
+  // XML 1.0 (which Atom/RSS use) explicitly forbids U+0000-U+001F
+  // except for TAB (0x09), LF (0x0A), CR (0x0D). A NUL or 0x01 from a
+  // malformed `=?utf-8?b?...?=` MIME header decode would otherwise
+  // flow through the email-worker → D1 → feed-handler unchanged and
+  // emit invalid XML — every Atom consumer 500s on parse. The
+  // central src/lib/escape.ts does this in the app process; this
+  // worker has a divergent local helper that didn't (audit finding).
+  // eslint-disable-next-line no-control-regex
+  const stripped = s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+  return stripped
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')

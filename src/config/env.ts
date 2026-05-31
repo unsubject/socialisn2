@@ -50,7 +50,12 @@ export const env = {
   twoBrainMcpUrl: () => optional('TWO_BRAIN_MCP_URL', ''),
   twoBrainMcpToken: () => optional('TWO_BRAIN_MCP_TOKEN', ''),
   costCeilingDailyUsd: () => {
-    const raw = process.env.COST_CEILING_DAILY_USD ?? '1.50';
+    // Default raised 1.50 → 2.20 on 2026-05-30 in lockstep with the
+    // .env.example change (sized at μ+1.645σ ≈ 95th one-sided
+    // percentile of expected daily spend; full math in .env.example).
+    // The fallback matters for deployments that don't propagate every
+    // key from .env.example — Codex review on PR #108 flagged this.
+    const raw = process.env.COST_CEILING_DAILY_USD ?? '2.20';
     const parsed = Number(raw);
     if (!Number.isFinite(parsed) || parsed <= 0) {
       throw new Error(
@@ -141,11 +146,16 @@ export const env = {
   // ADR-013: daily Bayesian recalibration of source authority. Default
   // 04:00 UTC (between morning and afternoon scoring runs). Prior strength
   // k controls how much accumulated feedback is needed to meaningfully
-  // move a source away from its seed authority — k=20 means ~20 picks/passes
-  // before the posterior moves materially.
+  // move a source away from its seed authority — k=5 means ~5 picks/passes
+  // before the posterior moves materially. Lowered from 20 → 5 on
+  // 2026-05-30 in lockstep with the .env.example change (rationale:
+  // single-user, 138 seeded sources → ~30-60 day feedback cadence per
+  // source meant k=20 took 2-5 YEARS to correct a wrong seed). Codex
+  // review on PR #108 flagged that the runtime fallback hadn't been
+  // updated alongside .env.example.
   recalibrateCron: () => optional('RECALIBRATE_CRON', '0 4 * * *'),
   recalibratePriorStrength: () =>
-    positiveIntEnv('RECALIBRATE_PRIOR_STRENGTH', 20),
+    positiveIntEnv('RECALIBRATE_PRIOR_STRENGTH', 5),
   // Twice-daily orchestrator cron (Build task U0xDaFVlYkpZVW02aEcwdg,
   // SPEC §9). Defaults match the spec: 05:00 ET morning, 14:00 ET
   // afternoon. Timezone is pinned via the cron-registration options so

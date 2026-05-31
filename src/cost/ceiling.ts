@@ -32,7 +32,7 @@ const COMPARISON_EPSILON = 1e-9;
 export interface CeilingStatus {
   /** USD spent so far in the current UTC day. */
   spent: number;
-  /** COST_CEILING_DAILY_USD (default 1.50). */
+  /** COST_CEILING_DAILY_USD (default 2.20). */
   ceiling: number;
   /** COST_ALERT_THRESHOLD as a fraction (default 0.80). */
   alertThreshold: number;

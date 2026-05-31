@@ -143,3 +143,36 @@ export async function reapOrphanedRunsOnBoot(db: Db): Promise<{ reaped: number }
   `);
   return { reaped: rows.length };
 }
+
+/**
+ * App-process boot reaper for MCP-triggered (`kind='manual'`) runs.
+ * Symmetric to `reapOrphanedRunsOnBoot` but scoped to the rows the app
+ * process owns. Called from `src/index.ts` at boot.
+ *
+ * Codex review on PR #110 pointed out that removing the
+ * unconditional reaper from `src/index.ts` (when the boot reaper was
+ * relocated to the ingestion-worker) left the symmetric gap: an app
+ * process crash during MCP `run_now` strands the manual run as
+ * `status='running'` until the 90-min stuck-runs watchdog cron picks
+ * it up (or, if the ingestion-worker is also down, indefinitely).
+ *
+ * This complements `reapOrphanedRunsOnBoot` which is kind-scoped to
+ * morning/afternoon; together the two reapers cover every kind that
+ * has a single-process owner. 'recalibrate' is reaped by neither
+ * (the watchdog cron handles it at the 90-min threshold; recalibrate
+ * runs are fast so this rarely matters in practice).
+ */
+export async function reapOrphanedManualRunsOnBoot(
+  db: Db,
+): Promise<{ reaped: number }> {
+  const rows = await db.execute<{ id: string }>(sql`
+    UPDATE runs
+    SET status = 'failed',
+        error = COALESCE(error || '; ', '') || 'process_restart',
+        completed_at = NOW()
+    WHERE status = 'running'
+      AND kind = 'manual'
+    RETURNING id
+  `);
+  return { reaped: rows.length };
+}

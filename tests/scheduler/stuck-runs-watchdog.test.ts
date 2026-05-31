@@ -20,6 +20,7 @@ import * as schema from '../../src/db/schema.js';
 import type { Db } from '../../src/db/client.js';
 import type { Logger } from '../../src/lib/logger.js';
 import {
+  reapOrphanedManualRunsOnBoot,
   reapOrphanedRunsOnBoot,
   startStuckRunsWatchdog,
 } from '../../src/scheduler/stuck-runs-watchdog.js';
@@ -227,5 +228,41 @@ describe.skipIf(!DATABASE_URL)('stuck-runs-watchdog (real PG)', () => {
     expect(byId[manualInFlight]!.status).toBe('running');
     expect(byId[recalibrateInFlight]!.status).toBe('running');
     expect(byId[completedRun]!.status).toBe('completed');
+  });
+
+  it("reapOrphanedManualRunsOnBoot flips only kind='manual' rows (symmetric to cron-owned reap)", async () => {
+    // The app-process boot reaper handles MCP run_now ('manual')
+    // rows. It must NOT touch morning/afternoon (owned by the
+    // ingestion-worker reaper) nor recalibrate (owned by the
+    // 90-min watchdog cron).
+    const manualA = uuidv7();
+    const manualB = uuidv7();
+    const morningRun = uuidv7();
+    const recalibrateRun = uuidv7();
+    const completedManual = uuidv7();
+    await client`
+      INSERT INTO runs (id, kind, status, started_at)
+      VALUES
+        (${manualA},          'manual',     'running',   NOW() - INTERVAL '5 minutes'),
+        (${manualB},          'manual',     'running',   NOW() - INTERVAL '2 hours'),
+        (${morningRun},       'morning',    'running',   NOW() - INTERVAL '1 minute'),
+        (${recalibrateRun},   'recalibrate','running',   NOW() - INTERVAL '1 minute'),
+        (${completedManual},  'manual',     'completed', NOW() - INTERVAL '10 minutes')
+    `;
+
+    const result = await reapOrphanedManualRunsOnBoot(db);
+    expect(result.reaped).toBe(2);
+
+    const rows = await client<{ id: string; status: string; error: string | null }[]>`
+      SELECT id, status, error FROM runs
+    `;
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    expect(byId[manualA]!.status).toBe('failed');
+    expect(byId[manualA]!.error).toContain('process_restart');
+    expect(byId[manualB]!.status).toBe('failed');
+    // Cron-owned: untouched by this app-process reaper.
+    expect(byId[morningRun]!.status).toBe('running');
+    expect(byId[recalibrateRun]!.status).toBe('running');
+    expect(byId[completedManual]!.status).toBe('completed');
   });
 });

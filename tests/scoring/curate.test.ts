@@ -64,7 +64,7 @@ function llmEnvelope(content: string): unknown {
   return {
     choices: [{ message: { content } }],
     usage: { prompt_tokens: 100, completion_tokens: 30 },
-    model: 'gemini-3.5-flash',
+    model: 'gemini-3.1-flash-lite',
   };
 }
 
@@ -193,8 +193,30 @@ describe('curateCluster', () => {
     const result = await curateCluster(sampleInput(), { fetchFn });
     expect(result.output.curationScore).toBe(72);
     expect(result.output.curationRationale).toMatch(/economy/i);
-    expect(result.llm.model).toBe('gemini-3.5-flash');
+    expect(result.llm.model).toBe('gemini-3.1-flash-lite');
     expect(result.llm.usd).toBeGreaterThan(0);
+  });
+
+  it('pins thinking minimal + json mode + headroom cap on the curate call', async () => {
+    // Regression guard for the 2026-05-31 truncation outage: the curate
+    // call MUST send reasoning_effort=minimal (so a Gemini 3.x model
+    // doesn't spend its output budget on hidden reasoning and truncate
+    // the JSON) plus a generous max_tokens as headroom, and asks for a
+    // JSON object as belt-and-suspenders.
+    const { fetchFn, captured } = stubFetchReturning(
+      llmEnvelope(
+        JSON.stringify({ curation_score: 50, curation_rationale: 'meh' }),
+      ),
+    );
+    await curateCluster(sampleInput(), { fetchFn });
+    const body = captured.body as {
+      reasoning_effort?: string;
+      response_format?: { type: string };
+      max_tokens?: number;
+    };
+    expect(body.reasoning_effort).toBe('minimal');
+    expect(body.response_format).toEqual({ type: 'json_object' });
+    expect(body.max_tokens).toBeGreaterThanOrEqual(1024);
   });
 
   it('sends the cluster as snake_case in the user message', async () => {
@@ -240,15 +262,27 @@ describe('curateCluster', () => {
     );
   });
 
-  it('uses gemini-3.5-flash by default; honours model override', async () => {
+  it('uses gemini-3.1-flash-lite by default; honours model override', async () => {
     const { fetchFn, captured } = stubFetchReturning(
       llmEnvelope(
         JSON.stringify({ curation_score: 50, curation_rationale: 'meh' }),
       ),
     );
-    await curateCluster(sampleInput(), { fetchFn, model: 'claude-haiku-4.5' });
-    const body = captured.body as { model: string };
-    expect(body.model).toBe('claude-haiku-4.5');
+    await curateCluster(sampleInput(), { fetchFn });
+    expect((captured.body as { model: string }).model).toBe(
+      'gemini-3.1-flash-lite',
+    );
+
+    const { fetchFn: fetchFn2, captured: captured2 } = stubFetchReturning(
+      llmEnvelope(
+        JSON.stringify({ curation_score: 50, curation_rationale: 'meh' }),
+      ),
+    );
+    await curateCluster(sampleInput(), {
+      fetchFn: fetchFn2,
+      model: 'claude-haiku-4.5',
+    });
+    expect((captured2.body as { model: string }).model).toBe('claude-haiku-4.5');
   });
 
   it('honours systemPromptOverride for prompt experiments', async () => {

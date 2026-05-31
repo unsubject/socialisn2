@@ -13,10 +13,18 @@ model_list:
       model: gemini/gemini-2.5-flash-lite
       api_key: os.environ/GOOGLE_AI_API_KEY
 
-  # Curate stage (SPEC §9.4) — Gemini 3.5 Flash. Replaced
-  # claude-sonnet-4.5 on 2026-05-28 to halve curate spend
-  # ($1.50/$9.00 per 1M vs $3/$15) and unblock the $1.50/day
-  # cost ceiling under current queue volume.
+  # Curate stage (SPEC §9.4) — Gemini 3.1 Flash-Lite. Curate default
+  # since 2026-05-31. src/scoring/curate.ts pins reasoning_effort=minimal
+  # (→ Gemini thinking_level=minimal) so the model can't truncate its
+  # JSON by spending the output budget on hidden reasoning — the failure
+  # mode that took down gemini-3.5-flash. $0.25/$1.50 per 1M.
+  - model_name: gemini-3.1-flash-lite
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GOOGLE_AI_API_KEY
+
+  # Gemini 3.5 Flash — was the curate default 2026-05-28 → 2026-05-31.
+  # Kept routed as a fallback target / for ad-hoc A/B. $1.50/$9.00 per 1M.
   - model_name: gemini-3.5-flash
     litellm_params:
       model: gemini/gemini-3.5-flash
@@ -60,13 +68,14 @@ litellm_settings:
   # parse-error class, and src/orchestrator/run.ts halts on
   # CostCeilingHitError).
   #
-  # Curate (Gemini 3.5 Flash) falls back to a cheaper Gemini, then
+  # Curate (Gemini 3.1 Flash-Lite) falls back to the 2.5 Flash-Lite then
   # to Claude Haiku — even a full Google outage degrades to
   # Haiku-at-Anthropic rather than zero candidates. Pricing in
-  # src/cost/pricing.ts has entries for all three; cost_ledger
+  # src/cost/pricing.ts has entries for all of them; cost_ledger
   # records the model that actually served, so post-hoc accounting
   # surfaces the fall-through.
   fallbacks:
+    - { "gemini-3.1-flash-lite": ["gemini-2.5-flash-lite", "claude-haiku-4.5"] }
     - { "gemini-3.5-flash": ["gemini-2.5-flash-lite", "claude-haiku-4.5"] }
     - { "gemini-2.5-flash-lite": ["claude-haiku-4.5"] }
 

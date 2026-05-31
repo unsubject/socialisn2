@@ -13,13 +13,20 @@
 // is preserved for debugging the cutoff decision and for the eventual
 // authority recalibration pass (Phase 5 PR 1).
 //
-// Model: gemini-3.5-flash via LiteLLM. Replaced claude-sonnet-4.5 on
-// 2026-05-28 to halve curate spend ($1.50/$9.00 per 1M vs $3/$15)
-// under the SPEC §12 budget — the prior Sonnet routing was tripping
-// the $1.50/day cost ceiling under current queue volume. Route +
-// pricing entry live in config/litellm.yaml + src/cost/pricing.ts;
-// SPEC.md §12 cost table still references the Sonnet number and
-// is a follow-up.
+// Model: gemini-3.1-flash-lite via LiteLLM, with thinking pinned to
+// `minimal` (reasoning_effort) so the model can't spend its output-token
+// budget on hidden reasoning. History:
+//   - claude-sonnet-4.5 ($3/$15) was the original curate model.
+//   - 2026-05-28 (#100): swapped to gemini-3.5-flash ($1.50/$9) for cost.
+//   - 2026-05-31: gemini-3.5-flash truncated its JSON mid-token on every
+//     run (0 candidates twice daily). Gemini 3.x defaults thinking_level
+//     to HIGH, so reasoning ate the 400-token cap before the JSON closed.
+//     Moved to the Flash-Lite tier ($0.25/$1.50 — ~6× cheaper than 3.5
+//     Flash AND cheaper than Haiku 4.5) AND pinned thinking minimal +
+//     raised the cap for headroom + JSON mode. GPT-5 Nano was rejected:
+//     documented schema-unreliability on the nano size for structured
+//     output. Route + pricing live in config/litellm.yaml +
+//     src/cost/pricing.ts; SPEC.md §12 cost table is a follow-up.
 //
 // This module is PURE TRANSFORMATION: it does not read from or write to
 // the database. The caller threads a CurateInput in and gets a
@@ -45,7 +52,7 @@ const POSITIONING_PATH = fileURLToPath(
 const SYSTEM_PROMPT = readFileSync(SYSTEM_PROMPT_PATH, 'utf-8');
 const POSITIONING = readFileSync(POSITIONING_PATH, 'utf-8');
 
-const DEFAULT_MODEL = 'gemini-3.5-flash';
+const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
 
 export type Temperature = 'cold' | 'warm' | 'hot' | 'over_saturated';
 export type Trajectory = 'new' | 'rising' | 'peaking' | 'declining';
@@ -123,9 +130,19 @@ export async function curateCluster(
     // calls and a marginal temperature lets the model break ties
     // sensibly instead of returning the same number for similar clusters.
     temperature: 0.3,
-    // Tight cap; the schema's only string field is a 1-2 sentence
-    // rationale. 400 tokens leaves headroom while keeping cost in check.
-    maxTokens: 400,
+    // Pin thinking to minimal so a Gemini 3.x model doesn't burn the
+    // output-token budget on hidden reasoning (the 2026-05-31 truncation
+    // outage). LiteLLM maps this to Gemini's thinking_level=minimal.
+    reasoningEffort: 'minimal',
+    // Ask for JSON-object output as insurance against malformed-but-
+    // complete responses (LiteLLM → Gemini response_mime_type).
+    responseFormat: { type: 'json_object' },
+    // Raised from 400: the schema is tiny (score + 1-2 sentence rationale,
+    // ~80 tokens), but the higher cap is structural headroom — if the
+    // minimal-thinking pin is ever silently dropped (drop_params) and the
+    // model does emit reasoning, the JSON still completes (a more
+    // expensive but WORKING call) instead of truncating to a parse error.
+    maxTokens: 2048,
     fetchFn: opts.fetchFn,
     signal: opts.signal,
     timeoutMs: opts.timeoutMs,

@@ -89,12 +89,18 @@ import { archiveSearch as defaultArchiveSearch } from '../lib/two_brain_client.j
 // Empirical ~$0.0006/call; projection sits ~1.6× above so the gate
 // can't underestimate a larger prompt.
 const SUMMARISE_PROJECTED_USD = 0.001;
-// Stage 6 curate — gemini-3.5-flash since 2026-05-28 at $1.50/$9.00
-// per 1M (was claude-sonnet-4.5 at $3/$15). A typical bounded call
-// (maxTokens=400 output, ~1.5k prompt input) lands ~$0.003; the
-// projection sits at $0.004 so the gate keeps a safety margin. Was
-// $0.008 under the prior Sonnet routing.
-const CURATE_PROJECTED_USD = 0.004;
+// Stage 6 curate — gemini-3.1-flash-lite since 2026-05-31 ($0.25/$1.50
+// per 1M). A typical call lands ~$0.0006. BUT this gate must bound the
+// WORST case the cap admits, not the typical: curate.ts raised maxTokens
+// to 2048, and the fallback chain can serve the request via
+// claude-haiku-4.5 ($1/$5 per 1M). Haiku at the full 2048-token cap +
+// ~3k prompt input ≈ $0.0135, so the projection sits at $0.015 to keep
+// assertWithinCeiling a true bound on the most expensive admissible
+// curate call (a pathological 2048-token completion on the fallback
+// path). At realistic Flash-Lite spend this never starves the queue —
+// the gate only bites once orchestrator-bucket spend is within $0.015 of
+// the ceiling, which day-to-day spend (~$0.50) never approaches.
+const CURATE_PROJECTED_USD = 0.015;
 const ACTIVE_WINDOW_DAYS = 7;
 const CURATION_CUTOFF = 60;
 

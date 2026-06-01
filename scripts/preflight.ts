@@ -163,10 +163,11 @@ async function main(): Promise<void> {
     { name: 'public_host', run: () => checkRequiredString('PUBLIC_HOST', env.publicHost) },
   ];
 
-  // Deploy-time only: smoke-probe each routed model the fallback
-  // chain might dispatch to. Three models:
-  //   - gemini-2.5-flash-lite (normalise + Stage 4 summarise)
-  //   - gemini-3.5-flash       (Stage 6 curate)
+  // Deploy-time only: smoke-probe each routed model on the live
+  // critical path. Three models:
+  //   - gemini-2.5-flash-lite (normalise + Stage 4 summarise; also a
+  //                            curate fallback)
+  //   - gemini-3.1-flash-lite (Stage 6 curate PRIMARY since 2026-05-31)
   //   - claude-haiku-4.5       (last-resort fallback for both)
   //
   // Codex review on PR #109 caught that probing only the two Google
@@ -176,13 +177,21 @@ async function main(): Promise<void> {
   // Adding Haiku to the probe deploys the whole reliability chain
   // atomically.
   //
+  // gemini-3.1-flash-lite was added when it became the curate default
+  // (PR #125 review): without it a provider-name typo / stale LiteLLM
+  // support / missing access on the NEW curate route would pass deploy
+  // and fail the first production curate call. gemini-3.5-flash was
+  // dropped from the probe — it's no longer on the critical path (not
+  // the curate primary, not in curate's fallback chain), only a
+  // standalone route kept for ad-hoc A/B.
+  //
   // Cost per deploy: still negligible — 3 × 1-token completions, ~$0.0001 total.
   // Catches stale-config, revoked-key, and routing-mismatch on all
-  // three routed models in one shot.
+  // three critical-path models in one shot.
   if (process.env.PREFLIGHT_LITELLM_PROBE === '1') {
     for (const model of [
       'gemini-2.5-flash-lite',
-      'gemini-3.5-flash',
+      'gemini-3.1-flash-lite',
       'claude-haiku-4.5',
     ]) {
       steps.push({

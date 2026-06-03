@@ -100,6 +100,7 @@ function okResult(kind: RunOptions['kind']): RunResult {
     clustersDroppedByArchive: 0,
     clustersFlaggedRelatedToRecentWork: 0,
     clustersBelowCutoff: 0,
+    clustersFailedAtSummarise: 0,
     clustersFailedAtCurate: 0,
     candidatesPersisted: 0,
     totalCostUsd: 0,

@@ -154,30 +154,55 @@ describe('parseAndValidate', () => {
     ).toThrow(/keywords length/);
   });
 
-  it('throws when tags exceed MAX_TAGS (3)', () => {
-    expect(() =>
-      parseAndValidate(
-        JSON.stringify({
-          headline: 'x',
-          context_summary: 'y',
-          keywords: ['a', 'b', 'c', 'd', 'e'],
-          tags: ['monetary-policy', 'inequality', 'climate-policy', 'biosecurity'],
-        }),
-      ),
-    ).toThrow(/tags length/);
+  it('caps tags at MAX_TAGS (3) instead of throwing', () => {
+    const out = parseAndValidate(
+      JSON.stringify({
+        headline: 'x',
+        context_summary: 'y',
+        keywords: ['a', 'b', 'c', 'd', 'e'],
+        tags: ['monetary-policy', 'inequality', 'climate-policy', 'biosecurity'],
+      }),
+    );
+    expect(out.tags).toEqual(['monetary-policy', 'inequality', 'climate-policy']);
   });
 
-  it('throws when a tag is not in STRATEGIC_TAG_SET', () => {
-    expect(() =>
-      parseAndValidate(
-        JSON.stringify({
-          headline: 'x',
-          context_summary: 'y',
-          keywords: ['a', 'b', 'c', 'd', 'e'],
-          tags: ['something-the-model-invented'],
-        }),
-      ),
-    ).toThrow(/STRATEGIC_TAG_SET/);
+  it('drops out-of-vocabulary tags instead of throwing', () => {
+    // Regression for the 2026-06-01/02 outage: gemini-2.5-flash-lite
+    // kept tagging geopolitics clusters with the DOMAIN "geopolitics"
+    // (not a strategic tag), which used to abort the whole run.
+    const out = parseAndValidate(
+      JSON.stringify({
+        headline: 'x',
+        context_summary: 'y',
+        keywords: ['a', 'b', 'c', 'd', 'e'],
+        tags: ['geopolitics', 'monetary-policy', 'something-invented'],
+      }),
+    );
+    expect(out.tags).toEqual(['monetary-policy']);
+  });
+
+  it('drops ALL tags when none are in the vocabulary (-> empty array)', () => {
+    const out = parseAndValidate(
+      JSON.stringify({
+        headline: 'x',
+        context_summary: 'y',
+        keywords: ['a', 'b', 'c', 'd', 'e'],
+        tags: ['geopolitics', 'national'],
+      }),
+    );
+    expect(out.tags).toEqual([]);
+  });
+
+  it('dedupes repeated valid tags', () => {
+    const out = parseAndValidate(
+      JSON.stringify({
+        headline: 'x',
+        context_summary: 'y',
+        keywords: ['a', 'b', 'c', 'd', 'e'],
+        tags: ['monetary-policy', 'monetary-policy', 'inequality'],
+      }),
+    );
+    expect(out.tags).toEqual(['monetary-policy', 'inequality']);
   });
 });
 

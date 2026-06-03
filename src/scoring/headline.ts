@@ -103,7 +103,42 @@ export async function summariseCluster(
     signal: opts.signal,
     timeoutMs: opts.timeoutMs,
   });
-  return { output: parseAndValidate(llm.text), llm };
+  // Wrap the parse so a thrown SummariseParseError carries the
+  // LlmCallResult — mirrors curate.ts/CurateParseError so the
+  // orchestrator's Stage-4 skip path can record the (already-incurred)
+  // LLM cost before skipping the cluster, instead of undercounting spend
+  // during a malformed-response spell. The message is forwarded verbatim
+  // so a `msg.startsWith('headline:')` predicate keeps matching.
+  try {
+    return { output: parseAndValidate(llm.text), llm };
+  } catch (err) {
+    throw new SummariseParseError(
+      err instanceof Error ? err : new Error(String(err)),
+      llm,
+    );
+  }
+}
+
+/**
+ * Error class for Stage-4 summarise parse / validation failures that
+ * carries the LlmCallResult so the orchestrator can record the spend on
+ * the skip-on-error path. Mirrors curate.ts:CurateParseError. The
+ * `message` is forwarded verbatim from the underlying `parseAndValidate`
+ * throw so the orchestrator's `msg.startsWith('headline:')` fallback
+ * predicate continues to match.
+ */
+export class SummariseParseError extends Error {
+  readonly code = 'summarise_parse_error' as const;
+  constructor(
+    cause: Error,
+    public readonly llm: LlmCallResult,
+  ) {
+    super(cause.message);
+    this.name = 'SummariseParseError';
+    if (cause.stack) {
+      this.stack = cause.stack;
+    }
+  }
 }
 
 /**
@@ -156,23 +191,36 @@ export function parseAndValidate(rawText: string): SummariseOutput {
     );
   }
 
-  // Empty tags array is allowed per SPEC §9.2 / prompt rule 6 ("empty
-  // array is acceptable"). Cap at MAX_TAGS to enforce the controlled
-  // vocabulary surface even if the model gets enthusiastic.
-  if (tags.length > MAX_TAGS) {
-    throw new Error(
-      `headline: tags length ${tags.length} exceeds max ${MAX_TAGS} (SPEC §9.2 cap)`,
-    );
-  }
+  // Tags are ADVISORY metadata (0-3 strategic tags, empty allowed per
+  // SPEC §9.2 / prompt rule 6). The model occasionally emits an
+  // off-vocabulary value — most often a DOMAIN name like "geopolitics"
+  // instead of a strategic tag (3 of 4 scoring runs on 2026-06-01/02
+  // aborted on exactly this). Throwing was disproportionate: a stray
+  // advisory tag must never fail an otherwise-good summary. Drop
+  // unknown tags + dedupe + cap at MAX_TAGS — same controlled-vocabulary
+  // surface the throw used to guarantee, but resilient to model
+  // disobedience. Prompt + config stay the source of truth for what's
+  // VALID; this just stops an invalid suggestion from being fatal.
+  const seen = new Set<string>();
+  const validTags: string[] = [];
+  const droppedTags: string[] = [];
   for (const tag of tags) {
     if (!STRATEGIC_TAG_SET.has(tag)) {
-      throw new Error(
-        `headline: tag "${tag}" not in STRATEGIC_TAG_SET (config/tags.ts — keep prompt + config in sync)`,
-      );
+      droppedTags.push(tag);
+    } else if (!seen.has(tag)) {
+      seen.add(tag);
+      validTags.push(tag);
     }
   }
+  const cappedTags = validTags.slice(0, MAX_TAGS);
+  if (droppedTags.length > 0) {
+    // Observable (ops-digest can flag a spike) without being fatal.
+    console.warn(
+      `headline: dropped ${droppedTags.length} off-vocabulary tag(s): ${droppedTags.join(', ')}`,
+    );
+  }
 
-  return { headline, contextSummary, keywords, tags };
+  return { headline, contextSummary, keywords, tags: cappedTags };
 }
 
 function stripCodeFences(s: string): string {

@@ -23,6 +23,7 @@ import {
 import * as schema from '../../src/db/schema.js';
 import { EMBEDDING_DIM } from '../../src/db/schema.js';
 import { CurateParseError } from '../../src/scoring/curate.js';
+import { SummariseParseError } from '../../src/scoring/headline.js';
 import {
   runScoring,
   type DigestPushInput,
@@ -395,6 +396,88 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     expect(runRow[0]!.metadata.clusters_failed_at_curate).toBe(1);
     // Run-level cost must reflect the parse-failed cost too.
     expect(Number(runRow[0]!.total_cost_usd)).toBeGreaterThanOrEqual(0.0042 + 0.007);
+  });
+
+  it('skips cluster + continues run when summarise throws a parse error (Stage 4)', async () => {
+    // Regression for the 2026-06-01/02 outage: gemini-2.5-flash-lite
+    // emitted an off-vocabulary tag, headline.parseAndValidate threw,
+    // and the outer catch aborted the WHOLE run after a handful of
+    // candidates (7-13 vs a healthy ~147). Now: the Stage-4 parse error
+    // is caught, the cluster is counted in clustersFailedAtSummarise,
+    // its already-incurred LLM cost is recorded, and the run continues.
+    const c1 = await makeCluster();
+    const c2 = await makeCluster();
+    await attachItem(c1, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(c1, sourceB, new Date(Date.now() - 1 * 3_600_000));
+    await attachItem(c2, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(c2, sourceB, new Date(Date.now() - 1 * 3_600_000));
+
+    let summariseCalls = 0;
+    const summarise: import('../../src/orchestrator/run.js').RunDependencies['summarise'] =
+      async () => {
+        summariseCalls += 1;
+        if (summariseCalls === 1) {
+          throw new SummariseParseError(
+            new Error(
+              'headline: tag "geopolitics" not in STRATEGIC_TAG_SET (synthetic)',
+            ),
+            {
+              text: '',
+              inputTokens: 200,
+              outputTokens: 50,
+              usd: 0.0004,
+              model: 'gemini-2.5-flash-lite',
+            },
+          );
+        }
+        return {
+          output: {
+            headline: 'Fed holds rates steady',
+            contextSummary: 'The Federal Reserve held rates. Markets reacted.',
+            keywords: ['fed-policy', 'rates', 'inflation', 'pce', 'monetary'],
+            tags: ['monetary-policy'],
+          },
+          llm: {
+            text: '',
+            inputTokens: 200,
+            outputTokens: 50,
+            usd: 0.0006,
+            model: 'gemini-2.5-flash-lite',
+          },
+        };
+      };
+
+    const result = await runScoring(
+      db,
+      { kind: 'manual' },
+      {
+        summarise,
+        curate: makeStubCurate(75),
+        archiveSearcher: makeStubArchive([]),
+      },
+    );
+
+    expect(result.status).toBe('completed');
+    expect(result.error).toBeUndefined();
+    expect(result.clustersFailedAtSummarise).toBe(1);
+    expect(result.candidatesPersisted).toBe(1);
+    expect(summariseCalls).toBe(2);
+
+    // Cost from the parse-failed summarise call MUST be in the ledger
+    // (mirrors the curate skip-path cost-recovery): stage4 = fail
+    // (0.0004) + success (0.0006).
+    const costRows = await client<{ stage: string | null; usd: string }[]>`
+      SELECT stage, usd::text FROM cost_ledger ORDER BY occurred_at
+    `;
+    const stage4Total = costRows
+      .filter((r) => r.stage === 'stage4_summarise')
+      .reduce((acc, r) => acc + Number(r.usd), 0);
+    expect(stage4Total).toBeCloseTo(0.0004 + 0.0006, 6);
+
+    const runRow = await client<{ status: string; metadata: { clusters_failed_at_summarise?: number } }[]>`
+      SELECT status, metadata FROM runs
+    `;
+    expect(runRow[0]!.metadata.clusters_failed_at_summarise).toBe(1);
   });
 
   it('still propagates non-parse errors from curate (network, rate limit, etc.) to abort the run', async () => {

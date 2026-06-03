@@ -71,6 +71,7 @@ import {
 } from '../scoring/heuristic.js';
 import {
   summariseCluster,
+  SummariseParseError,
   type SummariseInput,
   type SummariseResult,
 } from '../scoring/headline.js';
@@ -159,6 +160,11 @@ export interface RunResult {
   clustersDroppedByArchive: number;
   clustersFlaggedRelatedToRecentWork: number;
   clustersBelowCutoff: number;
+  /** Per-cluster summarise-stage (Stage 4) exceptions caught and
+   *  skipped — malformed JSON, out-of-range keyword count, etc. from the
+   *  summarise LLM. Mirrors clustersFailedAtCurate: the run continues
+   *  with the next cluster instead of aborting. */
+  clustersFailedAtSummarise: number;
   /** Per-cluster curate-stage exceptions caught and skipped — usually
    *  malformed-JSON parses from the curate LLM. The run continues with
    *  the next cluster instead of aborting; the count surfaces via
@@ -222,6 +228,7 @@ export async function runScoring(
     clustersDroppedByArchive: 0,
     clustersFlaggedRelatedToRecentWork: 0,
     clustersBelowCutoff: 0,
+    clustersFailedAtSummarise: 0,
     clustersFailedAtCurate: 0,
     candidatesPersisted: 0,
     totalCostUsd: 0,
@@ -290,15 +297,54 @@ export async function runScoring(
       const summariseItems = await loadClusterItems(db, cluster.id);
       if (summariseItems.length === 0) continue;
 
-      const summary = await summarise({
-        primaryDomain: cluster.primary_domain as Domain,
-        items: summariseItems.map((i) => ({
-          summaryEn: i.summary_en,
-          contextEn: i.context_en,
-          source: i.source_name,
-          publishedAt: i.published_at,
-        })),
-      });
+      // Stage 4 summarise — mirror the curate skip-on-error: a single
+      // cluster's malformed/invalid summary (e.g. the 2026-06 recurring
+      // off-vocabulary-tag failure, a bad keyword count, or unparseable
+      // JSON) used to abort the ENTIRE run via the outer catch, capping a
+      // ~147-candidate run at whatever had persisted before the bad
+      // cluster (7-13). Skip the offending cluster, record its already-
+      // incurred LLM cost (SummariseParseError carries the LlmCallResult),
+      // count it, and continue. Network / ceiling errors still propagate.
+      let summary: Awaited<ReturnType<typeof summarise>>;
+      try {
+        summary = await summarise({
+          primaryDomain: cluster.primary_domain as Domain,
+          items: summariseItems.map((i) => ({
+            summaryEn: i.summary_en,
+            contextEn: i.context_en,
+            source: i.source_name,
+            publishedAt: i.published_at,
+          })),
+        });
+      } catch (err: unknown) {
+        if (err instanceof SummariseParseError) {
+          stats.totalCostUsd += await recordCost(db, {
+            runId,
+            model: err.llm.model,
+            inputTokens: err.llm.inputTokens,
+            outputTokens: err.llm.outputTokens,
+            usd: err.llm.usd,
+            stage: 'stage4_summarise',
+          });
+          stats.clustersFailedAtSummarise += 1;
+          console.warn(
+            `[orchestrator] skipped cluster ${cluster.id} at Stage 4: ${err.message.slice(0, 240)} (cost recorded: $${err.llm.usd.toFixed(6)})`,
+          );
+          continue;
+        }
+        // Legacy text-predicate fallback for any future thrower that
+        // forgets to wrap in SummariseParseError — skip without cost
+        // recovery, logged loudly so the gap is operator-visible.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.startsWith('headline:')) {
+          stats.clustersFailedAtSummarise += 1;
+          console.warn(
+            `[orchestrator] skipped cluster ${cluster.id} at Stage 4 (UNWRAPPED, cost LOST): ${msg.slice(0, 240)}`,
+          );
+          continue;
+        }
+        throw err;
+      }
       stats.clustersAdvancedToStage4 += 1;
       stats.totalCostUsd += await recordCost(db, {
         runId,
@@ -697,6 +743,7 @@ async function finaliseRun(
     clustersDroppedByArchive: number;
     clustersFlaggedRelatedToRecentWork: number;
     clustersBelowCutoff: number;
+    clustersFailedAtSummarise: number;
     clustersFailedAtCurate: number;
     candidatesPersisted: number;
     totalCostUsd: number;
@@ -708,6 +755,7 @@ async function finaliseRun(
     clusters_flagged_related_to_recent_work: stats.clustersFlaggedRelatedToRecentWork,
     clusters_below_cutoff: stats.clustersBelowCutoff,
     clusters_advanced_to_stage4: stats.clustersAdvancedToStage4,
+    clusters_failed_at_summarise: stats.clustersFailedAtSummarise,
     clusters_failed_at_curate: stats.clustersFailedAtCurate,
   };
   // Phase 2.b: gate the UPDATE on `status='running'` so a legitimate

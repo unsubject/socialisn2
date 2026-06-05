@@ -653,6 +653,34 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     expect(digestCalls[0]?.runKind).toBe('morning');
     expect(digestCalls[0]?.candidates).toHaveLength(1);
     expect(digestCalls[0]?.candidates[0]?.primaryDomain).toBe('economy');
+    // Morning runs attach the trending board (the just-persisted
+    // candidate is in-window, so the board is non-empty).
+    expect(digestCalls[0]?.trending).toBeDefined();
+    expect(digestCalls[0]?.trending?.cluster_count).toBeGreaterThan(0);
+  });
+
+  it('does not attach the trending board to non-morning digests', async () => {
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+
+    const digestCalls: DigestPushInput[] = [];
+    await runScoring(
+      db,
+      { kind: 'afternoon' },
+      {
+        summarise: makeStubSummarise(),
+        curate: makeStubCurate(75),
+        archiveSearcher: makeStubArchive([]),
+        notifyDigest: async (input) => {
+          digestCalls.push(input);
+        },
+      },
+    );
+
+    expect(digestCalls).toHaveLength(1);
+    expect(digestCalls[0]?.runKind).toBe('afternoon');
+    expect(digestCalls[0]?.trending).toBeUndefined();
   });
 
   it('records telegram_digest_failed in runs.error when notifyDigest throws', async () => {

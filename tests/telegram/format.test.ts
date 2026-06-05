@@ -11,8 +11,31 @@ import {
   formatDigest,
   formatExclusivePush,
   formatTodayList,
+  formatTrendingSection,
   type RenderCandidate,
 } from '../../src/telegram/format.js';
+import type { TrendingBoard, TrendingEntry } from '../../src/scoring/trending.js';
+
+function mkEntry(overrides: Partial<TrendingEntry> = {}): TrendingEntry {
+  return {
+    term: 'supply-chain-realignment',
+    cluster_count: 3,
+    score: 9,
+    mean_heat: 3,
+    domains: ['geopolitics'],
+    top_headline: 'Hormuz disruption',
+    ...overrides,
+  };
+}
+
+function mkBoard(overrides: Partial<TrendingBoard> = {}): TrendingBoard {
+  return {
+    cluster_count: 9,
+    themes: [mkEntry()],
+    keywords: [mkEntry({ term: 'strait-of-hormuz', cluster_count: 2, mean_heat: 3 })],
+    ...overrides,
+  };
+}
 
 function mkCandidate(overrides: Partial<RenderCandidate> = {}): RenderCandidate {
   return {
@@ -166,6 +189,70 @@ describe('formatDigest', () => {
       ],
     });
     expect(twoExcl).toContain('2 exclusives');
+  });
+
+  it('appends the trending board when provided (morning)', () => {
+    const out = formatDigest({
+      runKind: 'morning',
+      candidates: [{ primaryDomain: 'geopolitics', isExclusive: false }],
+      trending: mkBoard(),
+    });
+    expect(out).toContain('Morning run complete');
+    expect(out).toContain('📈 *Trending now*');
+    expect(out).toContain('`supply-chain-realignment`');
+  });
+
+  it('omits the board when trending is absent (afternoon/manual)', () => {
+    const out = formatDigest({
+      runKind: 'afternoon',
+      candidates: [{ primaryDomain: 'economy', isExclusive: false }],
+    });
+    expect(out).not.toContain('Trending now');
+  });
+});
+
+describe('formatTrendingSection', () => {
+  it('renders kebab terms in code spans without literal escape backslashes', () => {
+    // The MarkdownV2 trap: escapeMarkdownV2 would turn `strait-of-hormuz`
+    // into `strait\-of\-hormuz`, and inside a code span those backslashes
+    // render literally. Code spans must carry the raw term.
+    const out = formatTrendingSection(mkBoard());
+    expect(out).toContain('`strait-of-hormuz`');
+    expect(out).not.toContain('\\-');
+  });
+
+  it('maps mean_heat to a heat icon and pluralises cluster count', () => {
+    const hot = formatTrendingSection(
+      mkBoard({ themes: [mkEntry({ mean_heat: 3, cluster_count: 3 })], keywords: [] }),
+    );
+    expect(hot).toContain('🔥 `supply-chain-realignment` · 3 clusters');
+
+    const warmSingle = formatTrendingSection(
+      mkBoard({
+        themes: [mkEntry({ term: 'monetary-policy', mean_heat: 1, cluster_count: 1 })],
+        keywords: [],
+      }),
+    );
+    expect(warmSingle).toContain('☀ `monetary-policy` · 1 cluster');
+    expect(warmSingle).not.toContain('1 clusters');
+  });
+
+  it('returns empty string for an empty board', () => {
+    expect(formatTrendingSection({ cluster_count: 0, themes: [], keywords: [] })).toBe('');
+  });
+
+  it('caps themes and keywords to keep the message tight', () => {
+    const themes = Array.from({ length: 10 }, (_, i) =>
+      mkEntry({ term: `theme-${i}`, cluster_count: 10 - i }),
+    );
+    const keywords = Array.from({ length: 15 }, (_, i) =>
+      mkEntry({ term: `kw-${i}`, cluster_count: 15 - i }),
+    );
+    const out = formatTrendingSection({ cluster_count: 25, themes, keywords });
+    expect(out).toContain('`theme-0`');
+    expect(out).not.toContain('`theme-6`'); // capped at 6 themes
+    expect(out).toContain('`kw-0`');
+    expect(out).not.toContain('`kw-10`'); // capped at 10 keywords
   });
 });
 

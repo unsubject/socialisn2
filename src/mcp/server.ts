@@ -1,5 +1,5 @@
 // MCP Server construction. buildMcpServer(db, raw) returns an SDK Server
-// instance with the 11 SPEC §11.4 tools registered against tools/list
+// instance with the 12 SPEC §11.4 tools registered against tools/list
 // and tools/call. Transport (Fastify ↔ StreamableHTTPServerTransport
 // bridge) lives in transport.ts; this module is pure wiring.
 //
@@ -29,6 +29,7 @@ import {
 import { addInfluencer, expandCompetitorList } from './tools/sources.js';
 import { runNow, systemStatus } from './tools/runs.js';
 import { compareAgainstArchive } from './tools/archive.js';
+import { trendingKeywords } from './tools/trending_keywords.js';
 
 type ToolHandler = (db: Db, args: unknown) => Promise<unknown>;
 
@@ -41,7 +42,7 @@ export function buildMcpServer(db: Db, raw: Sql): Server {
   // run_now needs `raw` to acquire the orchestrator advisory lock on a
   // pinned connection (advisory locks are session-scoped — see
   // src/orchestrator/lock.ts). Bind it via a thin adapter so the
-  // TOOL_HANDLERS map stays `(db, args)` for the other 10 tools.
+  // TOOL_HANDLERS map stays `(db, args)` for the other 11 tools.
   const TOOL_HANDLERS: Record<string, ToolHandler> = {
     list_candidates: listCandidates,
     get_candidate: getCandidate,
@@ -49,6 +50,7 @@ export function buildMcpServer(db: Db, raw: Sql): Server {
     pass: passCandidate,
     defer: deferCandidate,
     search_candidates: searchCandidates,
+    trending_keywords: trendingKeywords,
     expand_competitor_list: expandCompetitorList,
     add_influencer: addInfluencer,
     compare_against_archive: compareAgainstArchive,

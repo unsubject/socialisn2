@@ -172,6 +172,41 @@ describe('computeTrendingFromRows', () => {
     expect(strict.themes.map((t) => t.term)).toContain('post-america');
   });
 
+  it('orders domains by drive, not alphabetically (real lead domain first)', () => {
+    // One theme spanning `national` (1 hot/rising cluster, weight 4.5) and
+    // `economy` (2 warm/rising clusters, weight 3.0 total). Alphabetically
+    // `economy` sorts first, but `national` drives the theme — it must lead.
+    const rows: TrendingRow[] = [
+      row({
+        clusterId: 'c-nat',
+        headline: 'National story',
+        primaryDomain: 'national',
+        temperature: 'hot',
+        trajectory: 'rising',
+        tags: ['cross-theme'],
+      }),
+      row({
+        clusterId: 'c-econ-1',
+        headline: 'Economy story one',
+        primaryDomain: 'economy',
+        temperature: 'warm',
+        trajectory: 'rising',
+        tags: ['cross-theme'],
+      }),
+      row({
+        clusterId: 'c-econ-2',
+        headline: 'Economy story two',
+        primaryDomain: 'economy',
+        temperature: 'warm',
+        trajectory: 'rising',
+        tags: ['cross-theme'],
+      }),
+    ];
+    const board = computeTrendingFromRows(rows);
+    const theme = board.themes.find((t) => t.term === 'cross-theme');
+    expect(theme?.domains).toEqual(['national', 'economy']);
+  });
+
   it('filters by domain', () => {
     const board = computeTrendingFromRows([...newsClusters(), ...floodClusters()], {
       domain: 'scitech',

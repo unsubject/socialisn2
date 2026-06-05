@@ -48,7 +48,9 @@ export interface TrendingEntry {
   score: number;
   /** Mean heat (0=cold, 1=warm, 2=over_saturated, 3=hot) of those clusters. */
   mean_heat: number;
-  /** Primary domains the term spans. */
+  /** Primary domains the term spans, ordered by how much each drives the
+   *  term (descending summed cluster weight; alphabetical tie-break). So
+   *  domains[0] is the real lead domain, not the lexically-first one. */
   domains: string[];
   /** Headline of the highest-scoring (heat×trajectory) cluster carrying this term. */
   top_headline: string;
@@ -127,7 +129,9 @@ interface Agg {
   clusterCount: number;
   score: number;
   heatSum: number;
-  domains: Set<string>;
+  /** primaryDomain → summed cluster weight, so the lead domain is the
+   *  one that most drives the term (not the alphabetically-first). */
+  domainWeights: Map<string, number>;
   topHeadline: string;
   topWeight: number;
 }
@@ -145,7 +149,7 @@ function accumulate(
       clusterCount: 0,
       score: 0,
       heatSum: 0,
-      domains: new Set(),
+      domainWeights: new Map(),
       topHeadline: row.headline,
       topWeight: -Infinity,
     };
@@ -154,7 +158,10 @@ function accumulate(
   agg.clusterCount += 1;
   agg.score += weight;
   agg.heatSum += heat;
-  agg.domains.add(row.primaryDomain);
+  agg.domainWeights.set(
+    row.primaryDomain,
+    (agg.domainWeights.get(row.primaryDomain) ?? 0) + weight,
+  );
   if (weight > agg.topWeight) {
     agg.topWeight = weight;
     agg.topHeadline = row.headline;
@@ -170,7 +177,11 @@ function finalize(map: Map<string, Agg>, minClusters: number, limit: number): Tr
       cluster_count: agg.clusterCount,
       score: Math.round(agg.score * 100) / 100,
       mean_heat: Math.round((agg.heatSum / agg.clusterCount) * 100) / 100,
-      domains: [...agg.domains].sort(),
+      // Lead domain = largest summed weight; alphabetical tie-break for
+      // determinism.
+      domains: [...agg.domainWeights.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([d]) => d),
       top_headline: agg.topHeadline,
     });
   }

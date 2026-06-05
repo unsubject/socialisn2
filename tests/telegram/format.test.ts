@@ -6,6 +6,7 @@ import {
   candidateKeyboard,
   chunkForTelegram,
   escapeMarkdownV2,
+  escapeMarkdownV2Url,
   formatCandidateDetail,
   formatCandidateLine,
   formatDigest,
@@ -72,6 +73,22 @@ describe('escapeMarkdownV2', () => {
   });
 });
 
+describe('escapeMarkdownV2Url', () => {
+  it('escapes only ) and backslash, leaving other reserved chars intact', () => {
+    // A URL with dots, dashes, query (=, &) — none of these are special
+    // inside a MarkdownV2 link (url) and must pass through untouched.
+    expect(escapeMarkdownV2Url('https://a.b-c.com/x_y.html?q=1&z=2')).toBe(
+      'https://a.b-c.com/x_y.html?q=1&z=2',
+    );
+  });
+
+  it('escapes a closing paren so it cannot end the link early', () => {
+    expect(escapeMarkdownV2Url('https://en.wikipedia.org/wiki/Foo_(bar)')).toBe(
+      'https://en.wikipedia.org/wiki/Foo_(bar\\)',
+    );
+  });
+});
+
 describe('formatCandidateLine', () => {
   it('escapes the headline + id in the line', () => {
     const line = formatCandidateLine(
@@ -113,6 +130,19 @@ describe('formatCandidateDetail', () => {
   it('omits sources section when sources is empty/undefined', () => {
     const out = formatCandidateDetail(mkCandidate({ sources: [] }));
     expect(out).not.toContain('*Sources:*');
+  });
+
+  it('does not corrupt source URLs with MarkdownV2 escape backslashes', () => {
+    // The (url) of a MarkdownV2 link must NOT be run through the full
+    // escaper — backslashes before `.` etc. are retained literally and
+    // change the destination. A real URL with a TLD dot is the common case.
+    const out = formatCandidateDetail(
+      mkCandidate({
+        sources: [{ name: 'NYT', url: 'https://www.nytimes.com/2026/06/05/a.html' }],
+      }),
+    );
+    expect(out).toContain('](https://www.nytimes.com/2026/06/05/a.html)');
+    expect(out).not.toContain('www\\.nytimes');
   });
 
   it('shows EXCLUSIVE marker only when flagged', () => {

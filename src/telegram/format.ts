@@ -54,6 +54,18 @@ export function escapeMarkdownV2(s: string): string {
   return s.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
 }
 
+/** Escape a URL for the `(url)` portion of a MarkdownV2 inline link.
+ *  Per the Bot API, inside `(...)` ONLY `)` and `\` are special — running
+ *  the full escapeMarkdownV2 here is wrong: a backslash before any other
+ *  char (e.g. the `.` in a TLD) is retained literally, corrupting the
+ *  destination (`https://www\.nytimes\.com/...`). Escape only `)` and `\`
+ *  so a URL containing a paren (e.g. a Wikipedia `..._(disambiguation)`)
+ *  can't prematurely close the link either.
+ *  Reference: https://core.telegram.org/bots/api#markdownv2-style */
+export function escapeMarkdownV2Url(url: string): string {
+  return url.replace(/([)\\])/g, '\\$1');
+}
+
 /** Below Telegram's hard 4096-char sendMessage limit, with headroom for
  *  invisible MarkdownV2 escape bytes the API may double-count. 3800 is
  *  also what the n8n Summarizer Bot uses, keeping the two surfaces
@@ -167,7 +179,7 @@ export function formatCandidateDetail(c: RenderCandidate): string {
       : `\n\n*Sources:*\n${c.sources
           .map(
             (s) =>
-              `· [${escapeMarkdownV2(s.name)}](${escapeMarkdownV2(s.url)})`,
+              `· [${escapeMarkdownV2(s.name)}](${escapeMarkdownV2Url(s.url)})`,
           )
           .join('\n')}`;
 

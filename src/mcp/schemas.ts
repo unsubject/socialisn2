@@ -1,4 +1,4 @@
-// zod input schemas + tools/list definitions for the 11 SPEC §11.4
+// zod input schemas + tools/list definitions for the 12 SPEC §11.4
 // tools.
 //
 // One source of truth — both:
@@ -41,6 +41,14 @@ export const GetCandidateArgs = z.object({
 export const SearchCandidatesArgs = z.object({
   query: z.string().min(1).max(500),
   limit: z.number().int().positive().max(50).default(20),
+});
+
+export const TrendingKeywordsArgs = z.object({
+  domain: z
+    .enum(['economy', 'economics', 'scitech', 'geopolitics', 'national'])
+    .optional(),
+  limit: z.number().int().positive().max(50).default(15),
+  min_clusters: z.number().int().positive().max(20).default(2),
 });
 
 export const DecisionArgs = z.object({
@@ -170,6 +178,23 @@ export const TOOL_DEFINITIONS = [
         limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 },
       },
       required: ['query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'trending_keywords',
+    description:
+      'Ranked board of trending themes + keywords across the in-window candidate pool, by heat-weighted distinct-cluster count (hot/rising weighted over warm/declining; deduped by cluster). `themes` are curated editorial tags (the de-noised primary axis); `keywords` are secondary detail. NOTE: editorial descriptors for topic timeliness — NOT platform search-volume / SEO terms.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: {
+          type: 'string',
+          enum: ['economy', 'economics', 'scitech', 'geopolitics', 'national'],
+        },
+        limit: { type: 'integer', minimum: 1, maximum: 50, default: 15 },
+        min_clusters: { type: 'integer', minimum: 1, maximum: 20, default: 2 },
+      },
       additionalProperties: false,
     },
   },

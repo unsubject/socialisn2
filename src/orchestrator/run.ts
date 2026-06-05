@@ -552,6 +552,10 @@ async function safeRegenerateFeeds(
  *  call time so a per-run env change is picked up. */
 async function defaultNotifyDigest(input: DigestPushInput): Promise<void> {
   if (!env.telegramBotToken() || !env.telegramChatId()) return;
+  // Sent as a single message — formatDigest does NOT run through
+  // chunkForTelegram. Safe today: the summary line + the capped board
+  // (6 themes / 10 keywords of short kebab terms) stay well under
+  // Telegram's 4096 limit. Revisit if the board grows long fields.
   const text = formatDigest(input);
   const result = await defaultSendTelegram({ text, disableLinkPreview: true });
   if (!result.ok) {

@@ -221,6 +221,16 @@ describe('formatTrendingSection', () => {
     expect(out).not.toContain('\\-');
   });
 
+  it('strips backtick/backslash that would break or leak out of the span', () => {
+    // The whole safety argument rests on this strip — a term with a
+    // stray backtick must not break the code span.
+    const out = formatTrendingSection(
+      mkBoard({ themes: [mkEntry({ term: 'a`b\\c' })], keywords: [] }),
+    );
+    expect(out).toContain('`abc`');
+    expect(out).not.toContain('a`b');
+  });
+
   it('maps mean_heat to a heat icon and pluralises cluster count', () => {
     const hot = formatTrendingSection(
       mkBoard({ themes: [mkEntry({ mean_heat: 3, cluster_count: 3 })], keywords: [] }),
@@ -235,6 +245,14 @@ describe('formatTrendingSection', () => {
     );
     expect(warmSingle).toContain('☀ `monetary-policy` · 1 cluster');
     expect(warmSingle).not.toContain('1 clusters');
+
+    // Index 2 (over_saturated → 💥) is the confusable slot — TEMPERATURE_ICON
+    // lists hot before over_saturated, but the ordinal puts over_saturated
+    // at 2. An off-by-one would hide exactly here.
+    const saturated = formatTrendingSection(
+      mkBoard({ themes: [mkEntry({ term: 'ai-safety', mean_heat: 2 })], keywords: [] }),
+    );
+    expect(saturated).toContain('💥 `ai-safety`');
   });
 
   it('returns empty string for an empty board', () => {

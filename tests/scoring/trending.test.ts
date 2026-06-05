@@ -17,7 +17,6 @@ function row(opts: Partial<TrendingRow> = {}): TrendingRow {
     clusterId: opts.clusterId ?? `cluster-${clusterSeq}`,
     headline: opts.headline ?? `Headline ${clusterSeq}`,
     primaryDomain: opts.primaryDomain ?? 'scitech',
-    domains: opts.domains ?? [opts.primaryDomain ?? 'scitech'],
     temperature: opts.temperature ?? 'warm',
     trajectory: opts.trajectory ?? 'rising',
     keywords: opts.keywords ?? [],
@@ -138,6 +137,10 @@ describe('computeTrendingFromRows', () => {
     expect(board.cluster_count).toBe(7); // 1 persist + 6 flood, not 8
     const theme = board.themes.find((t) => t.term === 'supply-chain-realignment');
     expect(theme?.cluster_count).toBe(1);
+    // Latest-first wins: the re-minted (afternoon) row is first in the
+    // input, so its headline is the one that survives dedup. A "keep
+    // oldest" regression would flip this (both rows share equal weight).
+    expect(theme?.top_headline).toBe('Persisting story (afternoon)');
   });
 
   it('collapses one story split across two cluster_ids by headline', () => {
@@ -158,8 +161,12 @@ describe('computeTrendingFromRows', () => {
   });
 
   it('applies min_clusters to keywords but keeps single-cluster themes', () => {
-    const rows = newsClusters();
-    // `ceasefire` appears in exactly 1 cluster; `energy-security` in 2.
+    // `lone-theme` tags exactly ONE cluster; `ceasefire` is in 1 cluster,
+    // `energy-security` in 2.
+    const rows = [
+      ...newsClusters(),
+      row({ headline: 'A lone single-cluster story', primaryDomain: 'national', tags: ['lone-theme'] }),
+    ];
     const strict = computeTrendingFromRows(rows, { minClusters: 2 });
     expect(strict.keywords.map((k) => k.term)).not.toContain('ceasefire');
     expect(strict.keywords.map((k) => k.term)).toContain('energy-security');
@@ -167,9 +174,12 @@ describe('computeTrendingFromRows', () => {
     const loose = computeTrendingFromRows(rows, { minClusters: 1 });
     expect(loose.keywords.map((k) => k.term)).toContain('ceasefire');
 
-    // `post-america` tags a single cluster but must still surface as a
-    // theme (themes always qualify at ≥1).
-    expect(strict.themes.map((t) => t.term)).toContain('post-america');
+    // `lone-theme` tags exactly ONE cluster but must still surface as a
+    // theme even at minClusters:2 — themes always qualify at ≥1. (Uses a
+    // genuinely single-cluster tag: `post-america` has count 2 and would
+    // pass even if themes wrongly honoured minClusters.)
+    expect(strict.themes.find((t) => t.term === 'lone-theme')?.cluster_count).toBe(1);
+    expect(strict.themes.map((t) => t.term)).toContain('lone-theme');
   });
 
   it('orders domains by drive, not alphabetically (real lead domain first)', () => {

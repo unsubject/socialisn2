@@ -27,12 +27,13 @@ import { sql } from 'drizzle-orm';
 
 import type { Db } from '../db/client.js';
 
-/** Minimal candidate shape the aggregation needs. */
+/** Minimal candidate shape the aggregation needs. Domain attribution is
+ *  by primaryDomain only (the candidate's full `domains` array is not
+ *  read), so it is deliberately absent here. */
 export interface TrendingRow {
   clusterId: string;
   headline: string;
   primaryDomain: string;
-  domains: string[];
   temperature: string;
   trajectory: string;
   keywords: string[];
@@ -251,7 +252,6 @@ type TrendingDbRow = {
   cluster_id: string;
   headline: string;
   primary_domain: string;
-  domains: string[];
   temperature: string;
   trajectory: string;
   keywords: string[];
@@ -271,7 +271,7 @@ export async function computeTrending(db: Db, opts: TrendingOpts = {}): Promise<
   // with active-pool size; the WHERE hits idx_candidates_status /
   // idx_candidates_primary_domain_status so the scan stays indexed.
   const rows = await db.execute<TrendingDbRow>(sql`
-    SELECT cluster_id, headline, primary_domain, domains,
+    SELECT cluster_id, headline, primary_domain,
            temperature, trajectory, keywords, tags
     FROM candidates
     WHERE ${whereSql}
@@ -282,7 +282,6 @@ export async function computeTrending(db: Db, opts: TrendingOpts = {}): Promise<
       clusterId: r.cluster_id,
       headline: r.headline,
       primaryDomain: r.primary_domain,
-      domains: r.domains,
       temperature: r.temperature,
       trajectory: r.trajectory,
       keywords: r.keywords,

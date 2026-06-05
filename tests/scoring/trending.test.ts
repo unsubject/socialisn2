@@ -86,6 +86,16 @@ function floodClusters(): TrendingRow[] {
 }
 
 describe('computeTrendingFromRows', () => {
+  // The two "ranks above" assertions below are coupled to the
+  // HEAT_WEIGHT / TRAJ_WEIGHT constants in src/scoring/trending.ts —
+  // tuning those weights may require re-checking these orderings. That
+  // coupling is intentional: the weights are the ranking contract.
+
+  it('returns an empty board for no rows', () => {
+    const board = computeTrendingFromRows([]);
+    expect(board).toEqual({ cluster_count: 0, themes: [], keywords: [] });
+  });
+
   it('ranks news-grade themes above the warm arXiv flood', () => {
     const board = computeTrendingFromRows([...newsClusters(), ...floodClusters()]);
 

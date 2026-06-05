@@ -50,7 +50,7 @@ export interface TrendingEntry {
   mean_heat: number;
   /** Primary domains the term spans. */
   domains: string[];
-  /** Headline of the single hottest cluster carrying this term. */
+  /** Headline of the highest-scoring (heat×trajectory) cluster carrying this term. */
   top_headline: string;
 }
 
@@ -202,6 +202,10 @@ export function computeTrendingFromRows(
   // Dedup by cluster_id (kills the per-run re-minted duplicates), with
   // a normalized-headline secondary guard for the rare one-story-two-
   // clusters case. First occurrence wins — caller orders latest-first.
+  // The headline guard is intentionally lossy: a second cluster whose
+  // headline normalizes identically is dropped whole (its tags/keywords
+  // discarded), not merged. Acceptable because in-window normalized-
+  // headline collisions between genuinely-distinct stories are rare.
   const seenCluster = new Set<string>();
   const seenHeadline = new Set<string>();
   const deduped: TrendingRow[] = [];
@@ -252,6 +256,9 @@ export async function computeTrending(db: Db, opts: TrendingOpts = {}): Promise<
   const whereParts = [sql`status = 'new'`, sql`expires_at > NOW()`];
   if (opts.domain) whereParts.push(sql`primary_domain = ${opts.domain}`);
   const whereSql = sql.join(whereParts, sql` AND `);
+  // No LIMIT — aggregation needs the whole in-window pool. Cost scales
+  // with active-pool size; the WHERE hits idx_candidates_status /
+  // idx_candidates_primary_domain_status so the scan stays indexed.
   const rows = await db.execute<TrendingDbRow>(sql`
     SELECT cluster_id, headline, primary_domain, domains,
            temperature, trajectory, keywords, tags

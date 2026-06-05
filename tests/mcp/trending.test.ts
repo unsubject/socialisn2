@@ -56,6 +56,10 @@ describe.skipIf(!DATABASE_URL)('scoring/trending computeTrending (real PG)', () 
     await client.unsafe('TRUNCATE TABLE raw_items CASCADE');
   });
 
+  // Unique default headline per seed so the normalized-headline dedup
+  // guard doesn't accidentally collapse fixtures that share the default.
+  let seedSeq = 0;
+
   // Each candidate gets its own cluster (distinct cluster_id) unless an
   // explicit clusterId is passed — lets us exercise the cluster dedup.
   async function seed(opts: Partial<{
@@ -69,6 +73,7 @@ describe.skipIf(!DATABASE_URL)('scoring/trending computeTrending (real PG)', () 
     keywords: string[];
     tags: string[];
   }> = {}): Promise<void> {
+    seedSeq += 1;
     const primary = opts.primaryDomain ?? 'geopolitics';
     const clusterId = opts.clusterId ?? uuidv7();
     const vec = `[${unitVec([1]).join(',')}]`;
@@ -91,7 +96,7 @@ describe.skipIf(!DATABASE_URL)('scoring/trending computeTrending (real PG)', () 
         generated_run_id, expires_at
       ) VALUES (
         ${uuidv7()}, ${clusterId},
-        ${opts.headline ?? 'Headline with enough length for the context summary slice padding.'},
+        ${opts.headline ?? `Distinct seed headline number ${seedSeq} for the trending fixture.`},
         ${'A long context summary with at least eighty characters of content for the preview slice.'},
         ${primary}, ARRAY[${primary}]::text[],
         ${opts.temperature ?? 'hot'}, ${opts.trajectory ?? 'rising'},
@@ -124,8 +129,11 @@ describe.skipIf(!DATABASE_URL)('scoring/trending computeTrending (real PG)', () 
     expect(themeTerms).not.toContain('expired-theme');
     const supplyChain = board.themes.find((t) => t.term === 'supply-chain-realignment');
     expect(supplyChain?.cluster_count).toBe(2);
-    // text[] mapping round-trips: both keywords aggregate.
-    expect(board.keywords.map((k) => k.term).sort()).toEqual(['energy-security', 'tariffs']);
+
+    // text[] mapping round-trips: both single-cluster keywords aggregate
+    // (min_clusters:1 since each spans just one of the two clusters).
+    const allKw = await computeTrending(db, { minClusters: 1 });
+    expect(allKw.keywords.map((k) => k.term).sort()).toEqual(['energy-security', 'tariffs']);
   });
 
   it('dedups re-minted candidate rows sharing a cluster_id', async () => {

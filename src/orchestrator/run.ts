@@ -44,6 +44,7 @@ import { BUCKET_ORCHESTRATOR } from '../cost/buckets.js';
 import { assertWithinCeiling, CostCeilingHitError } from '../cost/ceiling.js';
 import { recordCost } from '../cost/ledger.js';
 import { generateAllFeeds } from '../rss/generate.js';
+import { computeTrending, type TrendingBoard } from '../scoring/trending.js';
 import { formatDigest, formatExclusivePush } from '../telegram/format.js';
 import {
   pushPlainText as defaultPushPlainText,
@@ -131,6 +132,10 @@ export interface ExclusivePushInput {
 export interface DigestPushInput {
   runKind: RunKind;
   candidates: Array<{ primaryDomain: string; isExclusive: boolean }>;
+  /** Trending board, computed for morning runs only — a once-a-day
+   *  signal (afternoon overlaps heavily). undefined on afternoon/manual,
+   *  where the digest renders the summary line alone. */
+  trending?: TrendingBoard;
 }
 
 export interface RunDependencies {
@@ -492,9 +497,21 @@ export async function runScoring(
     // Tail hooks. Each safe-wrapped; their errors are joined with the
     // halt reason (if any) into the final runs.error field.
     const feedError = await safeRegenerateFeeds(db, regenerateFeeds);
+    // Trending board rides the morning digest only. Degrades to a
+    // boardless digest if the aggregation throws — it must never block
+    // the push (the per-domain summary is the load-bearing part).
+    let trending: TrendingBoard | undefined;
+    if (opts.kind === 'morning') {
+      try {
+        trending = await computeTrending(db);
+      } catch (err) {
+        console.error('[orchestrator] trending board computation failed:', err);
+      }
+    }
     const digestError = await safeNotifyDigest(notifyDigest, {
       runKind: opts.kind,
       candidates: digestCandidates,
+      trending,
     });
     const finalError = combineErrors(halt?.reason, feedError, digestError);
 
@@ -535,6 +552,10 @@ async function safeRegenerateFeeds(
  *  call time so a per-run env change is picked up. */
 async function defaultNotifyDigest(input: DigestPushInput): Promise<void> {
   if (!env.telegramBotToken() || !env.telegramChatId()) return;
+  // Sent as a single message — formatDigest does NOT run through
+  // chunkForTelegram. Safe today: the summary line + the capped board
+  // (6 themes / 10 keywords of short kebab terms) stay well under
+  // Telegram's 4096 limit. Revisit if the board grows long fields.
   const text = formatDigest(input);
   const result = await defaultSendTelegram({ text, disableLinkPreview: true });
   if (!result.ok) {

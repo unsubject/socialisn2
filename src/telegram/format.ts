@@ -12,6 +12,8 @@
 
 import { InlineKeyboard } from 'grammy';
 
+import type { TrendingBoard } from '../scoring/trending.js';
+
 const TEMPERATURE_ICON: Record<string, string> = {
   cold: '❄',
   warm: '☀',
@@ -210,25 +212,75 @@ export function formatTodayList(candidates: RenderCandidate[]): string {
 export function formatDigest(opts: {
   runKind: 'morning' | 'afternoon' | 'manual';
   candidates: Array<{ primaryDomain: string; isExclusive: boolean }>;
+  /** Trending board, present on morning runs only — appended below the
+   *  summary line. See formatTrendingSection. */
+  trending?: TrendingBoard;
 }): string {
   const kindLabel = opts.runKind === 'manual' ? 'Manual run' : `${capitalize(opts.runKind)} run`;
+  let summary: string;
   if (opts.candidates.length === 0) {
-    return `${escapeMarkdownV2(kindLabel)} complete\\. No new candidates this run\\.`;
+    summary = `${escapeMarkdownV2(kindLabel)} complete\\. No new candidates this run\\.`;
+  } else {
+    const byDomain = new Map<string, number>();
+    let exclusives = 0;
+    for (const c of opts.candidates) {
+      byDomain.set(c.primaryDomain, (byDomain.get(c.primaryDomain) ?? 0) + 1);
+      if (c.isExclusive) exclusives += 1;
+    }
+    const domainSummary = Array.from(byDomain.entries())
+      .map(([d, n]) => `${n} new in \`${escapeMarkdownV2(d)}\``)
+      .join(', ');
+    const exclusiveLine =
+      exclusives === 0
+        ? ''
+        : `, ${exclusives} exclusive${exclusives === 1 ? '' : 's'} flagged`;
+    summary = `${escapeMarkdownV2(kindLabel)} complete\\. ${domainSummary}${exclusiveLine}\\. /today`;
   }
-  const byDomain = new Map<string, number>();
-  let exclusives = 0;
-  for (const c of opts.candidates) {
-    byDomain.set(c.primaryDomain, (byDomain.get(c.primaryDomain) ?? 0) + 1);
-    if (c.isExclusive) exclusives += 1;
+  const board = opts.trending ? formatTrendingSection(opts.trending) : '';
+  return board ? `${summary}\n\n${board}` : summary;
+}
+
+// Heat ordinal (0..3, matching cold/warm/over_saturated/hot) → icon for
+// the trending board, keyed by the mean_heat number the aggregation
+// reports (mirrors TEMPERATURE_ICON's vocabulary).
+const HEAT_ICON = ['❄', '☀', '💥', '🔥'];
+
+const MAX_TREND_THEMES = 6;
+const MAX_TREND_KEYWORDS = 10;
+
+/** Wrap a term in a MarkdownV2 code span. Inside a code span only
+ *  backtick + backslash are special, so kebab-case terms (hyphens,
+ *  dots) need NO escaping — which is the whole reason the board uses
+ *  code spans rather than escapeMarkdownV2 (escaping inside a span
+ *  renders the literal backslashes). Strip any backtick/backslash that
+ *  would break or leak out of the span. */
+function codeSpan(s: string): string {
+  return `\`${s.replace(/[`\\]/g, '')}\``;
+}
+
+/**
+ * Render the trending-board section for the morning digest: top themes
+ * (curated tags, the de-noised primary axis) with a heat icon + cluster
+ * count + lead domain, then a line of top keywords. Returns '' when the
+ * board is empty so formatDigest can omit the section entirely.
+ */
+export function formatTrendingSection(board: TrendingBoard): string {
+  const themeLines = board.themes.slice(0, MAX_TREND_THEMES).map((t) => {
+    const icon = HEAT_ICON[Math.round(t.mean_heat)] ?? '·';
+    const n = t.cluster_count;
+    const domain = t.domains[0];
+    const domainPart = domain ? ` · ${codeSpan(domain)}` : '';
+    return `${icon} ${codeSpan(t.term)} · ${n} cluster${n === 1 ? '' : 's'}${domainPart}`;
+  });
+  const keywords = board.keywords.slice(0, MAX_TREND_KEYWORDS);
+
+  const parts: string[] = [];
+  if (themeLines.length > 0) parts.push(themeLines.join('\n'));
+  if (keywords.length > 0) {
+    parts.push(`*Keywords:* ${keywords.map((k) => codeSpan(k.term)).join(' · ')}`);
   }
-  const domainSummary = Array.from(byDomain.entries())
-    .map(([d, n]) => `${n} new in \`${escapeMarkdownV2(d)}\``)
-    .join(', ');
-  const exclusiveLine =
-    exclusives === 0
-      ? ''
-      : `, ${exclusives} exclusive${exclusives === 1 ? '' : 's'} flagged`;
-  return `${escapeMarkdownV2(kindLabel)} complete\\. ${domainSummary}${exclusiveLine}\\. /today`;
+  if (parts.length === 0) return '';
+  return `📈 *Trending now*\n${parts.join('\n')}`;
 }
 
 /**

@@ -93,7 +93,7 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
   });
 
   beforeEach(async () => {
-    await client.unsafe('TRUNCATE TABLE candidates CASCADE');
+    await client.unsafe('TRUNCATE TABLE briefs, candidates CASCADE');
     if (outDir) await rm(outDir, { recursive: true, force: true });
     outDir = await mkdtemp(join(tmpdir(), 'socialisn2-rss-test-'));
   });
@@ -172,10 +172,10 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
   // tests
   // -------------------------------------------------------------------------
 
-  it('writes all 7 feed files (all + 5 domain + pulse) even when no candidates', async () => {
+  it('writes all 8 feed files (all + 5 domain + pulse + brief) even when no candidates', async () => {
     const written = await generateAllFeeds(db, outDir, PUBLIC_HOST);
 
-    expect(written).toHaveLength(7);
+    expect(written).toHaveLength(8);
     expect(written.map((p) => p.split('/').pop())).toEqual([
       'all.xml',
       'economy.xml',
@@ -184,6 +184,7 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
       'geopolitics.xml',
       'national.xml',
       'pulse.xml',
+      'brief.xml',
     ]);
 
     // Each file parses as a valid RSS doc with zero items.
@@ -357,5 +358,40 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
     expect(pulse.items[0]!.link).toBe(`https://${PUBLIC_HOST}/c/${candId}`);
     expect(pulse.items[0]!.content).toContain('angle line');
     expect(pulse.items[1]!.link).toBe(`https://${PUBLIC_HOST}/`);
+  });
+
+  it('brief.xml renders one entry per week with full pitch HTML in content:encoded (P1)', async () => {
+    const briefId = uuidv7();
+    const pitches = [
+      {
+        hook: 'The hook <line>',
+        thesis: 'T',
+        steelman: 'S',
+        break: 'B',
+        whyNow: 'W',
+        fit: 'F',
+        evidence: [{ title: 'FT piece', url: 'https://ft.example.com/x' }],
+        candidateIds: [],
+      },
+    ];
+    await client`
+      INSERT INTO briefs (id, week_of, pitches, content_md, model)
+      VALUES (${briefId}, '2026-07-05'::date,
+              ${JSON.stringify(pitches)}::jsonb, 'md body', 'claude-sonnet-4.5')
+    `;
+
+    await generateAllFeeds(db, outDir, PUBLIC_HOST);
+    const raw = await readFile(join(outDir, 'brief.xml'), 'utf-8');
+    const brief = await parser.parseString(raw);
+
+    expect(brief.items).toHaveLength(1);
+    expect(brief.items[0]!.title).toBe('Weekly Ideation Brief — 2026-07-05 (1 pitches)');
+    expect(brief.items[0]!.guid).toBe(briefId);
+    expect(brief.items[0]!.link).toBe(`https://${PUBLIC_HOST}/brief/2026-07-05`);
+    // description carries the hooks; content:encoded carries escaped HTML
+    // (raw-byte check: the pitch HTML is entitised, not raw markup).
+    expect(brief.items[0]!.contentSnippet ?? brief.items[0]!.content).toContain('The hook');
+    expect(raw).toContain('&lt;h2&gt;');
+    expect(raw).toContain('The hook &amp;lt;line&amp;gt;');
   });
 });

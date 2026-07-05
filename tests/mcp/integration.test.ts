@@ -141,7 +141,7 @@ describe.skipIf(!DATABASE_URL)('mcp integration via POST /mcp', () => {
   // tools/list
   // -------------------------------------------------------------------------
 
-  it('tools/list returns all 12 SPEC §11.4 tools', async () => {
+  it('tools/list returns all 12 SPEC §11.4 tools + get_brief (P1)', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/mcp',
@@ -162,6 +162,7 @@ describe.skipIf(!DATABASE_URL)('mcp integration via POST /mcp', () => {
         'compare_against_archive',
         'defer',
         'expand_competitor_list',
+        'get_brief',
         'get_candidate',
         'list_candidates',
         'pass',

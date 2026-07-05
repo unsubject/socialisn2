@@ -170,4 +170,28 @@ export const env = {
   orchestratorMorningCron: () => optional('ORCHESTRATOR_MORNING_CRON', '0 5 * * *'),
   orchestratorAfternoonCron: () => optional('ORCHESTRATOR_AFTERNOON_CRON', '0 14 * * *'),
   orchestratorTimezone: () => optional('ORCHESTRATOR_TIMEZONE', 'America/New_York'),
+  // Redesign P1 (docs/redesign/2026-07-05 §5.2): the Weekly Ideation
+  // Brief. Default Sunday 18:00 in the orchestrator timezone — the week
+  // starts with fresh pitches in the reader. The model is the ONE
+  // deliberately-frontier call in the system (~1/week; see cost note on
+  // costCeilingBriefDailyUsd).
+  weeklyBriefCron: () => optional('WEEKLY_BRIEF_CRON', '0 18 * * 0'),
+  briefModel: () => optional('BRIEF_MODEL', 'claude-sonnet-4.5'),
+  /**
+   * Sub-budget for the 'brief' bucket — covers stage='weekly_brief'.
+   * Flat default (not %-of-daily like the other buckets): the brief is
+   * one call/week projected ≤ $0.60, so $1.00/day bounds a runaway
+   * retry loop at ~2 calls while never binding on the normal path.
+   */
+  costCeilingBriefDailyUsd: () => {
+    const raw = process.env.COST_CEILING_BRIEF_DAILY_USD;
+    if (raw === undefined || raw === '') return 1.0;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(
+        `Invalid COST_CEILING_BRIEF_DAILY_USD=${JSON.stringify(raw)} — must be a positive number`,
+      );
+    }
+    return parsed;
+  },
 };

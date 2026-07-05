@@ -20,10 +20,15 @@
 
 export const BUCKET_NORMALIZE = 'normalize' as const;
 export const BUCKET_ORCHESTRATOR = 'orchestrator' as const;
+// Redesign P1: the weekly ideation brief — one frontier-model call per
+// week, isolated so a runaway brief retry can't eat the orchestrator's
+// twice-daily allowance (and vice versa).
+export const BUCKET_BRIEF = 'brief' as const;
 
 export type CostBucket =
   | typeof BUCKET_NORMALIZE
-  | typeof BUCKET_ORCHESTRATOR;
+  | typeof BUCKET_ORCHESTRATOR
+  | typeof BUCKET_BRIEF;
 
 /**
  * Map a stage label to its bucket. Returns null for stages we don't
@@ -45,6 +50,8 @@ export function bucketForStage(stage: string | undefined): CostBucket | null {
     case 'stage4_summarise':
     case 'stage6_curate':
       return BUCKET_ORCHESTRATOR;
+    case 'weekly_brief':
+      return BUCKET_BRIEF;
     default:
       return null;
   }

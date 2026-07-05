@@ -1,5 +1,5 @@
 // zod input schemas + tools/list definitions for the 12 SPEC §11.4
-// tools.
+// tools + get_brief (redesign P1).
 //
 // One source of truth — both:
 //   1. The `tools/list` response (advertised JSON Schema for each tool)
@@ -79,6 +79,14 @@ export const CompareAgainstArchiveArgs = z.object({
 export const RunNowArgs = z.object({}).default({});
 
 export const SystemStatusArgs = z.object({}).default({});
+
+export const GetBriefArgs = z.object({
+  /** YYYY-MM-DD of the brief's week; omit for the latest brief. */
+  week_of: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+});
 
 // ---------------------------------------------------------------------------
 // Tool definitions — fed to the SDK's tools/list response
@@ -251,6 +259,22 @@ export const TOOL_DEFINITIONS = [
     description:
       'Snapshot: last_run summary + today cost in USD + pending raw_items + active candidate pool size.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'get_brief',
+    description:
+      "Fetch a Weekly Ideation Brief (redesign P1): 3-5 episode pitches (hook / thesis / steelman / why-now / fit / evidence) generated from the week's candidate pool + decisions. Omit week_of for the latest brief.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        week_of: {
+          type: 'string',
+          pattern: '^\\d{4}-\\d{2}-\\d{2}$',
+          description: 'YYYY-MM-DD of the brief week (Sunday). Omit for latest.',
+        },
+      },
+      additionalProperties: false,
+    },
   },
 ] as const;
 

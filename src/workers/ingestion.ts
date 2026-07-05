@@ -32,6 +32,7 @@ import {
   createIngestionQueue,
   type IngestionJobData,
 } from '../queue/ingestion-queue.js';
+import { startBriefCron } from '../scheduler/brief-cron.js';
 import { startScheduler } from '../scheduler/cron.js';
 import { startOrchestratorCron } from '../scheduler/orchestrator-cron.js';
 import { startRecalibrationCron } from '../scheduler/recalibrate.js';
@@ -264,6 +265,11 @@ async function main(): Promise<void> {
   const orchestratorCron = startOrchestratorCron(db, raw, {
     onTick: heartbeat.markProgress,
   });
+  // Redesign P1: Sunday 18:00 ET weekly ideation brief. Same colocation
+  // rationale as the crons above — schedule-only side, shared DB handle.
+  const briefCron = startBriefCron(db, {
+    onTick: heartbeat.markProgress,
+  });
   // Phase 2.b: stuck-runs watchdog. Every 5 min, fails any
   // runs.status='running' older than 90 min — catches the case where a
   // process is SIGKILL'd between runs.INSERT and the runScoring try
@@ -281,6 +287,7 @@ async function main(): Promise<void> {
     scheduler.stop();
     recalibrationCron.stop();
     orchestratorCron.stop();
+    briefCron.stop();
     stuckRunsWatchdog.stop();
     await worker.close();
     await queue.close();

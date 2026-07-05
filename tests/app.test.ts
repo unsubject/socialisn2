@@ -54,7 +54,7 @@ describe.skipIf(!DATABASE_URL)('Fastify app (src/app.ts)', () => {
 
   beforeEach(async () => {
     await client.unsafe(
-      'TRUNCATE TABLE candidates, items, gdelt_coverage, clusters CASCADE',
+      'TRUNCATE TABLE briefs, candidates, items, gdelt_coverage, clusters CASCADE',
     );
     // Extended to cover runs + cost_ledger so /status tests start from a
     // known-empty state. Pre-existing /c/:id tests don't seed either, so
@@ -345,5 +345,58 @@ describe.skipIf(!DATABASE_URL)('Fastify app (src/app.ts)', () => {
     // The id passes the loose UUID-shape check then misses the DB; the
     // renderer must still escape whatever the user typed.
     expect(res.body).toContain('abcdefgh-1234');
+  });
+
+  // -------------------------------------------------------------------------
+  // /brief/:weekOf (redesign P1)
+  // -------------------------------------------------------------------------
+
+  async function seedBrief(weekOf: string, hook: string): Promise<string> {
+    const id = uuidv7();
+    const pitches = [
+      {
+        hook,
+        thesis: 'T',
+        steelman: 'S',
+        break: 'B',
+        whyNow: 'W',
+        fit: 'F',
+        evidence: [{ title: 'src', url: 'https://example.com/e' }],
+        candidateIds: [],
+      },
+    ];
+    await client`
+      INSERT INTO briefs (id, week_of, pitches, content_md, model)
+      VALUES (${id}, ${weekOf}::date, ${JSON.stringify(pitches)}::jsonb,
+              'md', 'claude-sonnet-4.5')
+    `;
+    return id;
+  }
+
+  it('/brief/:weekOf renders the brief page with escaped pitch content', async () => {
+    await seedBrief('2026-07-05', 'Hook with <script>alert(1)</script>');
+    const res = await app.inject({ method: 'GET', url: '/brief/2026-07-05' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/html');
+    expect(res.body).toContain('Weekly Ideation Brief — 2026-07-05');
+    expect(res.body).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(res.body).not.toContain('<script>alert(1)');
+  });
+
+  it('/brief/latest serves the newest week', async () => {
+    await seedBrief('2026-06-28', 'older');
+    await seedBrief('2026-07-05', 'newest');
+    const res = await app.inject({ method: 'GET', url: '/brief/latest' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('2026-07-05');
+    expect(res.body).toContain('newest');
+  });
+
+  it('/brief 404s on a missing week and on a malformed param (no DB 500)', async () => {
+    const missing = await app.inject({ method: 'GET', url: '/brief/2026-01-04' });
+    expect(missing.statusCode).toBe(404);
+    const malformed = await app.inject({ method: 'GET', url: '/brief/next-sunday' });
+    expect(malformed.statusCode).toBe(404);
+    expect(malformed.body).toContain('next-sunday');
   });
 });

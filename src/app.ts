@@ -24,7 +24,9 @@ import { buildStatus } from './lib/status.js';
 import { UUID_RE } from './lib/uuid.js';
 import { buildMcpServer } from './mcp/server.js';
 import { mcpPlugin } from './mcp/transport.js';
+import { renderBriefNotFound, renderBriefPage } from './rss/render-brief.js';
 import { renderDetail, renderNotFound } from './rss/render-detail.js';
+import type { BriefPitch } from './scoring/brief.js';
 
 // Strict 8-4-4-4-12 hex UUID pattern. The route uses this as a
 // pre-filter BEFORE the DB query so a UUID-shaped-but-syntactically-
@@ -56,6 +58,18 @@ type ClusterSourceRow = {
   url: string;
   published_at: string;
 };
+
+type BriefPageRow = {
+  week_of: string;
+  pitches: BriefPitch[];
+  model: string;
+  created_at: string;
+  updated_at: string | null;
+};
+
+// /brief/:weekOf path param: strict YYYY-MM-DD (or the literal
+// 'latest') — same 500-avoidance rationale as UUID_RE on /c/:id.
+const WEEK_OF_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * `raw` is the postgres-js client behind drizzle. Required so the MCP
@@ -169,6 +183,43 @@ export function buildApp(db: Db, raw: Sql): FastifyInstance {
         publishedAt: new Date(s.published_at),
       })),
       archiveLinks,
+    });
+    return reply.type('text/html; charset=utf-8').send(html);
+  });
+
+  // Weekly Ideation Brief page (redesign P1) — the brief.xml <link>
+  // target. `/brief/latest` serves the newest row for bookmarking.
+  app.get<{ Params: { weekOf: string } }>('/brief/:weekOf', async (req, reply) => {
+    const weekOf = req.params.weekOf;
+    if (weekOf !== 'latest' && !WEEK_OF_RE.test(weekOf)) {
+      return reply
+        .code(404)
+        .type('text/html; charset=utf-8')
+        .send(renderBriefNotFound(weekOf));
+    }
+    const rows =
+      weekOf === 'latest'
+        ? await db.execute<BriefPageRow>(sql`
+            SELECT week_of, pitches, model, created_at, updated_at
+            FROM briefs ORDER BY week_of DESC LIMIT 1
+          `)
+        : await db.execute<BriefPageRow>(sql`
+            SELECT week_of, pitches, model, created_at, updated_at
+            FROM briefs WHERE week_of = ${weekOf}::date LIMIT 1
+          `);
+    const row = rows[0];
+    if (!row) {
+      return reply
+        .code(404)
+        .type('text/html; charset=utf-8')
+        .send(renderBriefNotFound(weekOf));
+    }
+    const html = renderBriefPage({
+      weekOf: String(row.week_of).slice(0, 10),
+      pitches: row.pitches,
+      model: row.model,
+      createdAt: new Date(row.created_at),
+      updatedAt: row.updated_at ? new Date(row.updated_at) : null,
     });
     return reply.type('text/html; charset=utf-8').send(html);
   });

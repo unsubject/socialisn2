@@ -1,7 +1,7 @@
 # Feed Redesign: From Firehose to Editorial Desk
 
 **Date:** 2026-07-05
-**Status:** Approved 2026-07-05 (Simon) — RSS-first delivery (§8); P0 implementation started
+**Status:** Approved 2026-07-05 (Simon) — RSS-first delivery (§8). P0 shipped (#155, #156). P1 (Weekly Ideation Brief) shipped. P2 (collision detector) next.
 **Supersedes:** SPEC.md §11 (delivery) and the "no thesis, no angle" boundary in SPEC.md §2;
 SPEC.md gets amended once this is approved.
 

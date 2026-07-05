@@ -231,6 +231,26 @@ export const pulseEntries = pgTable(
   }),
 );
 
+// Migration 021 (redesign P1): weekly ideation briefs. One row per
+// week_of (Sunday of the generating run); re-runs upsert in place.
+export const briefs = pgTable(
+  'briefs',
+  {
+    id: uuid('id').primaryKey(),
+    weekOf: date('week_of').notNull(),
+    pitches: jsonb('pitches').notNull(),
+    contentMd: text('content_md').notNull(),
+    model: text('model').notNull(),
+    costUsd: numeric('cost_usd', { precision: 10, scale: 6 }).notNull().default('0'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }),
+  },
+  (t) => ({
+    weekOfIdx: uniqueIndex('briefs_week_of_key').on(t.weekOf),
+    createdAtIdx: index('idx_briefs_created_at').on(t.createdAt.desc()),
+  }),
+);
+
 export const feedback = pgTable('feedback', {
   id: uuid('id').primaryKey(),
   candidateId: uuid('candidate_id')

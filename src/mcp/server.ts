@@ -1,6 +1,6 @@
 // MCP Server construction. buildMcpServer(db, raw) returns an SDK Server
-// instance with the 12 SPEC §11.4 tools registered against tools/list
-// and tools/call. Transport (Fastify ↔ StreamableHTTPServerTransport
+// instance with the 12 SPEC §11.4 tools + get_brief (redesign P1)
+// registered against tools/list and tools/call. Transport (Fastify ↔ StreamableHTTPServerTransport
 // bridge) lives in transport.ts; this module is pure wiring.
 //
 // `raw` is the postgres-js client behind drizzle. Only `run_now` needs
@@ -29,6 +29,7 @@ import {
 import { addInfluencer, expandCompetitorList } from './tools/sources.js';
 import { runNow, systemStatus } from './tools/runs.js';
 import { compareAgainstArchive } from './tools/archive.js';
+import { getBrief } from './tools/brief.js';
 import { trendingKeywords } from './tools/trending_keywords.js';
 
 type ToolHandler = (db: Db, args: unknown) => Promise<unknown>;
@@ -56,6 +57,7 @@ export function buildMcpServer(db: Db, raw: Sql): Server {
     compare_against_archive: compareAgainstArchive,
     run_now: (boundDb, args) => runNow(boundDb, raw, args),
     system_status: systemStatus,
+    get_brief: getBrief,
   };
 
   const server = new Server(

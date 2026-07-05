@@ -78,6 +78,10 @@ litellm_settings:
     - { "gemini-3.1-flash-lite": ["gemini-2.5-flash-lite", "claude-haiku-4.5"] }
     - { "gemini-3.5-flash": ["gemini-2.5-flash-lite", "claude-haiku-4.5"] }
     - { "gemini-2.5-flash-lite": ["claude-haiku-4.5"] }
+    # Weekly brief (redesign P1): the one deliberately-frontier call in
+    # the system. On a Sonnet outage, degrade to Gemini 3.5 Flash —
+    # a weaker brief beats a missing Sunday brief.
+    - { "claude-sonnet-4.5": ["gemini-3.5-flash"] }
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

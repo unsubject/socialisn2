@@ -1,12 +1,14 @@
 // RSS 2.0 generator for Socialisn2's static feeds (SPEC §11.2 +
 // redesign P0.3, docs/redesign/2026-07-05 §5.1).
 //
-// Writes 7 files to `outputDir`:
+// Writes 8 files to `outputDir`:
 //
 //   all.xml          — master feed, every `new` non-expired candidate
 //   <domain>.xml × 5 — one per SPEC §3 domain, filtered on primary_domain
 //   pulse.xml        — the Daily Pulse: append-only, attention-budgeted
 //                      (≤ PULSE_TOP_N entries per run from pulse_entries)
+//   brief.xml        — the Weekly Ideation Brief: one entry per week,
+//                      full pitch HTML in content:encoded (P1)
 //
 // Per-domain feeds use `primary_domain` (strict), NOT the multi-label
 // `domains[]` array. The multi-label set is for search / filter UI
@@ -34,6 +36,7 @@ import { DOMAIN_CONFIGS } from '../../config/domains.js';
 import type { Db } from '../db/client.js';
 import { escapeXml } from '../lib/escape.js';
 import { PULSE_TOP_N } from './pulse.js';
+import { renderBriefBodyHtml, type BriefPitch } from '../scoring/brief.js';
 
 /**
  * Cap on items per feed. RSS readers tolerate larger feeds, but capping
@@ -71,6 +74,14 @@ type PulseRow = {
   title: string;
   description: string;
   created_at: string;
+};
+
+type BriefRow = {
+  id: string;
+  week_of: string;
+  pitches: BriefPitch[];
+  created_at: string;
+  updated_at: string | null;
 };
 
 export interface GenerateOptions {
@@ -155,6 +166,18 @@ export async function generateAllFeeds(
       error: err instanceof Error ? err : new Error(String(err)),
     });
   }
+  // Weekly Ideation Brief (P1) — one entry per week from `briefs`.
+  try {
+    const briefRows = await fetchBriefItems(db, BRIEF_FEED_LIMIT);
+    const briefPath = join(outputDir, 'brief.xml');
+    await atomicWriteXml(briefPath, renderBriefFeed(briefRows, publicHost));
+    writtenByFeed.set('brief', briefPath);
+  } catch (err) {
+    failures.push({
+      feed: 'brief',
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+  }
   // Master 'all' feed last, per the write-order rationale above.
   await writeOne('all', null);
 
@@ -170,11 +193,13 @@ export async function generateAllFeeds(
   }
 
   // Documented return order: master first, then domains in SPEC §3
-  // table order, then pulse. Tests pin this; external callers may also.
+  // table order, then pulse, then brief. Tests pin this; external
+  // callers may also.
   const orderedSlugs = [
     'all',
     ...(Object.keys(DOMAIN_CONFIGS) as string[]),
     'pulse',
+    'brief',
   ];
   return orderedSlugs.map((s) => writtenByFeed.get(s)!).filter(Boolean);
 }
@@ -236,9 +261,56 @@ export async function fetchPulseItems(db: Db, limit: number): Promise<PulseRow[]
   `);
 }
 
+/** ~3 months of Sunday briefs per feed window. */
+const BRIEF_FEED_LIMIT = 12;
+
+export async function fetchBriefItems(db: Db, limit: number): Promise<BriefRow[]> {
+  return db.execute<BriefRow>(sql`
+    SELECT id, week_of, pitches, created_at, updated_at
+    FROM briefs
+    ORDER BY week_of DESC
+    LIMIT ${limit}
+  `);
+}
+
 // ---------------------------------------------------------------------------
 // rendering
 // ---------------------------------------------------------------------------
+
+function renderBriefFeed(items: BriefRow[], publicHost: string): string {
+  const baseUrl = `https://${publicHost}`;
+  const feedLink = `${baseUrl}/feeds/brief.xml`;
+  const itemsXml = items
+    .map((b) => {
+      // week_of comes back as a date string (YYYY-MM-DD); normalise in
+      // case the driver returns a full timestamp.
+      const weekOf = String(b.week_of).slice(0, 10);
+      const hooks = b.pitches.map((p) => p.hook).join(' · ');
+      const bodyHtml = renderBriefBodyHtml(b.pitches);
+      const pubDate = new Date(b.updated_at ?? b.created_at).toUTCString();
+      return `    <item>
+      <title>Weekly Ideation Brief — ${escapeXml(weekOf)} (${b.pitches.length} pitches)</title>
+      <description>${escapeXml(hooks)}</description>
+      <content:encoded>${escapeXml(bodyHtml)}</content:encoded>
+      <link>${escapeXml(`${baseUrl}/brief/${weekOf}`)}</link>
+      <guid isPermaLink="false">${escapeXml(b.id)}</guid>
+      <pubDate>${pubDate}</pubDate>
+    </item>`;
+    })
+    .join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Socialisn2 — Weekly Ideation Brief</title>
+    <link>${escapeXml(feedLink)}</link>
+    <atom:link href="${escapeXml(feedLink)}" rel="self" type="application/rss+xml"/>
+    <description>Episode pitches from the week's signal: hook, thesis, steelman, why-now, evidence.</description>
+    <lastBuildDate>${new Date().toUTCString()}</lastBuildDate>
+${itemsXml}
+  </channel>
+</rss>
+`;
+}
 
 function renderPulseFeed(items: PulseRow[], publicHost: string): string {
   const baseUrl = `https://${publicHost}`;

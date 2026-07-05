@@ -18,6 +18,7 @@
 
 import { dailyTotalUsd, dailyTotalUsdByBucket } from './ledger.js';
 import {
+  BUCKET_BRIEF,
   BUCKET_NORMALIZE,
   BUCKET_ORCHESTRATOR,
   type CostBucket,
@@ -85,6 +86,8 @@ function bucketCeiling(bucket: CostBucket): number {
       return env.costCeilingNormalizeDailyUsd();
     case BUCKET_ORCHESTRATOR:
       return env.costCeilingOrchestratorDailyUsd();
+    case BUCKET_BRIEF:
+      return env.costCeilingBriefDailyUsd();
     default: {
       const _exhaustive: never = bucket;
       throw new Error(`bucketCeiling: unhandled bucket ${String(_exhaustive)}`);

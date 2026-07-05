@@ -1,7 +1,7 @@
 # Feed Redesign: From Firehose to Editorial Desk
 
 **Date:** 2026-07-05
-**Status:** Proposal — pending Simon's sign-off on open questions (§8)
+**Status:** Approved 2026-07-05 (Simon) — RSS-first delivery (§8); P0 implementation started
 **Supersedes:** SPEC.md §11 (delivery) and the "no thesis, no angle" boundary in SPEC.md §2;
 SPEC.md gets amended once this is approved.
 
@@ -70,32 +70,39 @@ and never run.
 
 ## 5. The two new surfaces
 
-### 5.1 Daily Pulse (replaces the digest)
+### 5.1 Daily Pulse (replaces the digest) — delivered as RSS
 
-Morning run push becomes:
+Per Simon's Q5 answer (2026-07-05): **RSS is the reading channel, not Telegram.**
+The pulse is a new feed, `/feeds/pulse.xml`, and Telegram's scheduled digest push is
+disabled by default. Telegram remains the *interaction* channel — `/cand`, pick/pass/
+defer buttons — plus (pending Simon's call) the instant ⚡ exclusive push, which is the
+one thing an RSS poll cycle is too slow for (success criterion C, early waves).
+
+Each run appends **at most `PULSE_TOP_N = 5` entries** to `pulse.xml` (≤10/day), the
+top of the run by `curation_score DESC`. Entry shape:
 
 ```
-☀️ Morning pulse — 5 worth your time
-
-1. 💥📈 *US mega-IPO window and the AI capex cliff*
-   ↳ Underpriced angle: the IPO calendar is a liquidity clock for the AI bubble thesis
-   economy · /cand a1b2
-
-2. …(×5 max, ordered by curation_score)
-
-📈 Waves: `ai-labour` rising · `stablecoin-hk` new
-⚡ 1 exclusive above · +23 more above cutoff → /today
+<title>💥📈 US mega-IPO window and the AI capex cliff</title>
+<description>
+  ↳ Angle: the IPO calendar is a liquidity clock for the AI bubble thesis
+  economy · score 84 · rising · 2 more sources since yesterday
+</description>
+<link>https://…/c/<id></link>   ← existing rendered detail page
 ```
 
-- **Cap:** `DIGEST_TOP_N = 5` per run. Ordered by `curation_score DESC`.
+- **Cap:** 5 per run, ordered by `curation_score DESC`. Not a re-sort of the existing
+  50-item feeds — a separate, budgeted feed. The existing `all.xml` + 5 domain feeds
+  remain as the deep archive (now score-ranked and deduped via P0.1–2).
 - **Angle line:** reuses the already-stored `curation_rationale` (1–2 sentences, written
   by the curate stage since Phase 3) — zero new LLM cost in P0; upgraded to a true
   pitched hook in P1.
-- **Waves:** the trending board survives, arXiv-suppressed (§6 P0.5), themes only.
-- **Afternoon run:** silent unless it produced an exclusive or a new `hot`/`rising` wave —
-  then a short push. (Assumed default; see §8.)
-- Everything else stays reachable: `/today` becomes score-ranked and deduped, and gains
-  the suppressed remainder.
+- **Waves:** one additional `pulse.xml` entry per morning run — the trending board as a
+  single entry, arXiv-suppressed (§6 P0.5), themes only.
+- **Afternoon run:** contributes entries only if it produced an exclusive or a new
+  `hot`/`rising` wave (Q10). RSS is pull-based, so "silent" here means "adds nothing to
+  the feed," keeping pulse.xml thin.
+- Everything else stays reachable: `/today` and the archive feeds become score-ranked
+  and deduped.
 
 ### 5.2 Weekly Ideation Brief (the new product)
 
@@ -118,9 +125,12 @@ Output — 3–5 **episode pitches**:
 - Collision: cross-domain rhyme, when the detector (§5.3) found one
 ```
 
-Delivery: Telegram (chunked) + a rendered HTML page (`/brief/:date`, reusing the
-`src/rss/render-detail.ts` server-rendering infra). Stored in a new `briefs` table so
-past briefs are queryable via MCP.
+Delivery: a rendered HTML page (`/brief/:date`, reusing the `src/rss/render-detail.ts`
+server-rendering infra) + one weekly entry in a new `/feeds/brief.xml` feed whose
+`content:encoded` carries the full brief HTML (RSS-first per Q5). Stored in a new
+`briefs` table so past briefs are queryable via MCP. Decisions on pitches still happen
+via Telegram/MCP; a P1 nice-to-have is signed one-click pick/pass action links embedded
+in the brief HTML so a decision is one tap from the RSS reader.
 
 Model: this is the one call/week where a frontier model is worth it (see §7 cost). The
 curate stage's flash-lite economics don't apply — 1 call/week, high stakes.
@@ -148,10 +158,12 @@ holds ~500 clusters/week across five domains — no human scans that cross-produ
    `(cluster_id) WHERE status = 'new'`. Kills the 4–5× repeats at the root.
 2. **Rank every surface.** `ORDER BY curation_score DESC, created_at DESC` in
    `src/telegram/commands/list.ts`, `src/rss/generate.ts`, `src/mcp/tools/candidates.ts`.
-3. **Pulse format.** `formatDigest` → §5.1 layout: top-5 with headline + rationale line +
-   `/cand` link; counts demoted to the footer. Respect the 3800-char chunking guard.
-4. **Afternoon quieting.** Digest push gated on (exclusives > 0 OR new hot/rising wave)
-   for `kind === 'afternoon'`.
+3. **Pulse feed.** New `/feeds/pulse.xml` per §5.1: top-5 entries per run (angle line
+   from `curation_rationale`), plus a morning waves entry. Telegram scheduled digest
+   push gated behind `TELEGRAM_DIGEST_ENABLED` (default **false**); the ⚡ exclusive
+   instant push stays enabled for now (only remaining push — Simon can veto).
+4. **Afternoon quieting.** Afternoon runs contribute pulse entries only when
+   (exclusives > 0 OR new hot/rising wave).
 5. **arXiv containment.** (a) exclude arXiv-only clusters from the trending keyword pool
    (`src/scoring/trending.ts`); (b) 0.5 heuristic multiplier for clusters whose items
    are all `kind='arxiv'` (`src/scoring/heuristic.ts`) — corroboration by any non-arXiv
@@ -184,16 +196,16 @@ machinery. Revisit after 4–6 weeks of brief feedback.
   projected ≤ $0.60/run — ~$0.09/day amortised against the $2.20/day ceiling. New
   `weekly` sub-bucket wired through `assertWithinCeiling`.
 
-## 8. Open questions (assumed defaults — confirm or override)
+## 8. Open questions — RESOLVED (Simon, 2026-07-05)
 
-| # | Question | Assumed default |
-|---|----------|-----------------|
-| Q5 | Primary surface | Telegram for push; MCP for deep dives; RSS demoted to archive |
-| Q6 | Taste loop | Deferred (P3); reasons consumed by the brief prompt only |
-| Q7 | Domains / arXiv | Keep all five domains; contain arXiv (P0.5), don't kill it |
-| Q8 | Daily triage number | 5 pushed per run, ≤10/day pushed total |
-| Q9 | Brief timing | Sunday 18:00 ET |
-| Q10 | Afternoon pulse | Silent unless exclusive or new hot wave |
+| # | Question | Resolution |
+|---|----------|------------|
+| Q5 | Primary surface | **RSS, not Telegram** — pulse + brief delivered as feeds; Telegram digest push off by default; Telegram/MCP remain the decision channel |
+| Q6 | Taste loop | Deferred (P3) — default accepted; reasons consumed by the brief prompt only |
+| Q7 | Domains / arXiv | **Keep all five domains; contain arXiv** (P0.5), don't kill it |
+| Q8 | Daily triage number | 5 per run, ≤10/day in pulse.xml — confirmed |
+| Q9 | Brief timing | Sunday 18:00 ET — confirmed |
+| Q10 | Afternoon pulse | Contributes nothing unless exclusive or new hot wave — confirmed |
 
 ## 9. Acceptance criteria
 

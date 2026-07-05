@@ -78,6 +78,17 @@ describe.skipIf(!DATABASE_URL)('mcp tools/candidates', () => {
     expiresAt: Date;
     contextSummary: string;
   }> = {}): Promise<string> {
+    // Migration 018: at most one 'new' candidate per cluster — each
+    // seeded candidate gets its own cluster. The module-level clusterId
+    // tracks the LAST seeded candidate's cluster for tests that attach
+    // items to it.
+    clusterId = uuidv7();
+    const cvec = `[${unitVec([1]).join(',')}]`;
+    await client`
+      INSERT INTO clusters (id, centroid, first_seen_at, last_seen_at, item_count, domains, primary_domain, status)
+      VALUES (${clusterId}, ${cvec}::vector(1536),
+              NOW(), NOW(), 1, ARRAY['economy']::text[], 'economy', 'active')
+    `;
     const id = uuidv7();
     const runId = uuidv7();
     const expires = (opts.expiresAt ?? new Date(Date.now() + 24 * 3600 * 1000)).toISOString();

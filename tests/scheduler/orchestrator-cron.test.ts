@@ -103,6 +103,8 @@ function okResult(kind: RunOptions['kind']): RunResult {
     clustersFailedAtSummarise: 0,
     clustersFailedAtCurate: 0,
     candidatesPersisted: 0,
+    candidatesSuperseded: 0,
+    candidatesSkippedDecided: 0,
     totalCostUsd: 0,
     status: 'completed',
   };

@@ -9,13 +9,13 @@
 //     flood for free — most ML churn is untagged or only `ai-safety`.
 //     KEYWORDS are the secondary detail.
 //   * "Trending" is a heat-weighted distinct-CLUSTER count, NOT raw
-//     candidate-row frequency. The pipeline re-mints a candidate row
-//     for a persisting story on every run and never supersedes the old
-//     one, so multiple status='new' rows for one story coexist
-//     in-window; and a single high-volume outlet (arXiv) floods many
-//     warm clusters. Deduping by cluster_id and weighting hot/rising
-//     above warm/declining is what keeps a genuine multi-outlet hot
-//     story above the evergreen academic churn.
+//     candidate-row frequency. Migration 018 (supersede) now guarantees
+//     at most one status='new' row per cluster, but the cluster_id
+//     dedup stays as defence-in-depth (pre-018 rows, one-story-two-
+//     clusters forks); and a single high-volume outlet (arXiv) floods
+//     many warm clusters. Weighting hot/rising above warm/declining —
+//     plus the P0.5 arXiv-only exclusion in computeTrending's WHERE —
+//     keeps a genuine multi-outlet hot story above the academic churn.
 //   * Weights are named constants, deliberately simple for v1 — tune
 //     against a week of real boards rather than guessing finer now.
 //   * These are EDITORIAL descriptors for topic timeliness, not
@@ -265,6 +265,23 @@ type TrendingDbRow = {
  */
 export async function computeTrending(db: Db, opts: TrendingOpts = {}): Promise<TrendingBoard> {
   const whereParts = [sql`status = 'new'`, sql`expires_at > NOW()`];
+  // Redesign P0.5: arXiv containment. Clusters carried ONLY by arXiv
+  // sources are excluded from the trending pool outright — evergreen ML
+  // papers were flooding ~80% of the rising keywords ("large-language-
+  // models every day", docs/handoffs/2026-06-05.md). A paper any
+  // non-arXiv source corroborated still trends. The subquery yields a
+  // row only for provably-all-arXiv clusters (has items AND every one
+  // is arXiv), so an item-less cluster is NOT excluded. Probe hits
+  // idx_items_cluster_id, so it stays indexed per candidate.
+  whereParts.push(sql`NOT EXISTS (
+    SELECT 1
+    FROM items i
+    JOIN raw_items ri ON ri.id = i.raw_item_id
+    JOIN sources s ON s.id = ri.source_id
+    WHERE i.cluster_id = candidates.cluster_id
+    GROUP BY i.cluster_id
+    HAVING BOOL_AND(s.kind = 'arxiv')
+  )`);
   if (opts.domain) whereParts.push(sql`primary_domain = ${opts.domain}`);
   const whereSql = sql.join(whereParts, sql` AND `);
   // No LIMIT — aggregation needs the whole in-window pool. Cost scales

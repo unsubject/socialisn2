@@ -133,6 +133,12 @@ export const env = {
   publicHost: () => required('PUBLIC_HOST'),
   telegramBotToken: () => optional('TELEGRAM_BOT_TOKEN', ''),
   telegramChatId: () => optional('TELEGRAM_CHAT_ID', ''),
+  // Feed redesign (docs/redesign/2026-07-05 §5.1): RSS-first delivery —
+  // the scheduled digest push is opt-in from here on. Only the literal
+  // string 'true' enables it. The ⚡ exclusive instant push and the bot
+  // commands (/today, /cand, pick/pass/defer) are unaffected.
+  telegramDigestEnabled: () =>
+    optional('TELEGRAM_DIGEST_ENABLED', 'false').toLowerCase() === 'true',
   socialisn2McpToken: () => optional('SOCIALISN2_MCP_TOKEN', ''),
   // YouTube Data API key (SPEC §13 + §17). Optional — empty disables
   // the Phase 5 backfill's "fetch Simon's own channel videos" path.

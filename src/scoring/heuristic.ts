@@ -32,6 +32,15 @@ const NON_EXCLUSIVE_MULTIPLIER = 1.0;
 const GEO_BONUS_COEF = 0.5;
 const GEO_BONUS_SATURATION_COUNTRIES = 5;
 export const TOP_N_FOR_STAGE_4 = 200;
+/**
+ * Redesign P0.5 (docs/redesign/2026-07-05 §6): arXiv containment.
+ * Clusters whose items ALL come from kind='arxiv' sources get their
+ * heuristic score halved — the arXiv firehose was flooding ~80% of the
+ * rising pool with evergreen ML papers (docs/handoffs/2026-06-05.md).
+ * Corroboration by ANY non-arXiv source lifts the penalty, so a paper
+ * that news/newsletters actually picked up competes at full strength.
+ */
+export const ARXIV_ONLY_MULTIPLIER = 0.5;
 
 export interface HeuristicSignals {
   isExclusive: boolean;
@@ -49,6 +58,9 @@ export interface HeuristicResult {
   geographicSpreadBonus: number;
   domainWeightUsed: number;
   exclusiveBonusMultiplier: number;
+  /** True when every item in the cluster came from an arXiv source —
+   *  the ARXIV_ONLY_MULTIPLIER penalty was applied to heuristicScore. */
+  arxivOnly: boolean;
 }
 
 /**
@@ -62,18 +74,23 @@ export async function computeHeuristic(
   clusterId: string,
   signals: HeuristicSignals,
 ): Promise<HeuristicResult> {
-  const sumRow = await db.execute<{ sum_authority: number | null }>(sql`
+  const sumRow = await db.execute<{
+    sum_authority: number | null;
+    all_arxiv: boolean | null;
+  }>(sql`
     SELECT
       COALESCE(
         SUM(COALESCE(i.authority_weighted, s.authority_score::float)),
         0
-      )::float AS sum_authority
+      )::float AS sum_authority,
+      COALESCE(BOOL_AND(s.kind = 'arxiv'), false) AS all_arxiv
     FROM items i
     JOIN raw_items ri ON ri.id = i.raw_item_id
     JOIN sources s ON s.id = ri.source_id
     WHERE i.cluster_id = ${clusterId}
   `);
   const sumAuthorityWeighted = sumRow[0]?.sum_authority ?? 0;
+  const arxivOnly = sumRow[0]?.all_arxiv ?? false;
 
   const geoRow = await db.execute<{ country_count: number | null }>(sql`
     SELECT country_count
@@ -93,12 +110,15 @@ export async function computeHeuristic(
     ? EXCLUSIVE_MULTIPLIER
     : NON_EXCLUSIVE_MULTIPLIER;
 
-  const heuristicScore = scoreFromSignals({
-    sumAuthorityWeighted,
-    domainWeight: domainWeightUsed,
-    geographicSpreadBonus,
-    isExclusive: signals.isExclusive,
-  });
+  // SPEC §9.1 formula, then the P0.5 arXiv containment on top —
+  // scoreFromSignals stays the pure spec formula.
+  const heuristicScore =
+    scoreFromSignals({
+      sumAuthorityWeighted,
+      domainWeight: domainWeightUsed,
+      geographicSpreadBonus,
+      isExclusive: signals.isExclusive,
+    }) * (arxivOnly ? ARXIV_ONLY_MULTIPLIER : 1);
 
   return {
     heuristicScore,
@@ -106,6 +126,7 @@ export async function computeHeuristic(
     geographicSpreadBonus,
     domainWeightUsed,
     exclusiveBonusMultiplier,
+    arxivOnly,
   };
 }
 

@@ -136,14 +136,68 @@ describe.skipIf(!DATABASE_URL)('scoring/trending computeTrending (real PG)', () 
     expect(allKw.keywords.map((k) => k.term).sort()).toEqual(['energy-security', 'tariffs']);
   });
 
-  it('dedups re-minted candidate rows sharing a cluster_id', async () => {
+  it('rejects a second new row per cluster (migration 018 supersede invariant)', async () => {
+    // Pre-018 the pipeline re-minted a duplicate 'new' candidate per
+    // run and trending had to dedup by cluster_id. The partial unique
+    // index now forbids that state at the schema level; the dedup in
+    // computeTrendingFromRows stays as defence-in-depth (covered
+    // DB-free in tests/scoring/trending.test.ts).
     const clusterId = uuidv7();
     await seed({ clusterId, headline: 'Morning row', tags: ['post-america'] });
-    await seed({ clusterId, headline: 'Afternoon row', tags: ['post-america'] });
+    await expect(
+      seed({ clusterId, headline: 'Afternoon row', tags: ['post-america'] }),
+    ).rejects.toThrow(/idx_candidates_cluster_new/);
 
     const board = await computeTrending(db);
     expect(board.cluster_count).toBe(1);
     expect(board.themes.find((t) => t.term === 'post-america')?.cluster_count).toBe(1);
+  });
+
+  it('excludes arXiv-only clusters from the pool; corroborated ones stay (P0.5)', async () => {
+    // Two clusters, both hot+rising: one carried solely by an arXiv
+    // source (the evergreen-ML-paper flood), one corroborated by a
+    // news RSS source. Only the corroborated one may trend.
+    const arxivSource = uuidv7();
+    const rssSource = uuidv7();
+    await client`
+      INSERT INTO sources (id, kind, url, name, domains) VALUES
+        (${arxivSource}, 'arxiv', 'http://arxiv.org/rss/cs.AI', 'arxiv-test', ARRAY['scitech']::text[]),
+        (${rssSource}, 'rss', 'https://news.example.com/feed.xml', 'news-test', ARRAY['scitech']::text[])
+    `;
+    const arxivCluster = uuidv7();
+    const newsCluster = uuidv7();
+    await seed({ clusterId: arxivCluster, primaryDomain: 'scitech', tags: ['arxiv-flood'] });
+    await seed({ clusterId: newsCluster, primaryDomain: 'scitech', tags: ['real-news'] });
+
+    const vec = `[${unitVec([1]).join(',')}]`;
+    const attachItem = async (clusterId: string, sourceId: string): Promise<void> => {
+      const rawId = uuidv7();
+      await client`
+        INSERT INTO raw_items (id, source_id, url, url_hash, title, title_hash, published_at)
+        VALUES (${rawId}, ${sourceId}, ${'https://example.com/' + rawId},
+                ${'uh-' + rawId}, 't', ${'th-' + rawId}, NOW())
+      `;
+      await client`
+        INSERT INTO items (
+          id, raw_item_id, title_original, summary_en, context_en, language_original,
+          entities, keywords, domains, primary_domain, embedding, published_at, cluster_id
+        ) VALUES (
+          ${uuidv7()}, ${rawId}, 'orig', 'sum', 'ctx', 'en',
+          ARRAY['E']::text[], ARRAY['kw']::text[],
+          ARRAY['scitech']::text[], 'scitech',
+          ${vec}::vector(1536), NOW(), ${clusterId}
+        )
+      `;
+    };
+    await attachItem(arxivCluster, arxivSource);
+    await attachItem(newsCluster, arxivSource); // corroborated cluster ALSO has the paper…
+    await attachItem(newsCluster, rssSource);   // …plus a non-arXiv source → stays.
+
+    const board = await computeTrending(db);
+    expect(board.cluster_count).toBe(1);
+    const terms = board.themes.map((t) => t.term);
+    expect(terms).toContain('real-news');
+    expect(terms).not.toContain('arxiv-flood');
   });
 
   it('filters by primary_domain', async () => {

@@ -79,6 +79,9 @@ async function loadActiveCandidates(
   db: Db,
   primaryDomain: string | null,
 ): Promise<CandidateRow[]> {
+  // Redesign P0.2: best-first — the 30-row window now shows the 30
+  // highest-curation-score candidates, not the 30 newest. Recency is
+  // the tiebreak.
   if (primaryDomain === null) {
     return db.execute<CandidateRow>(sql`
       SELECT id, headline, primary_domain, domains,
@@ -87,7 +90,7 @@ async function loadActiveCandidates(
       FROM candidates
       WHERE status = 'new'
         AND expires_at > NOW()
-      ORDER BY created_at DESC
+      ORDER BY curation_score DESC, created_at DESC
       LIMIT ${LIST_LIMIT}
     `);
   }
@@ -99,7 +102,7 @@ async function loadActiveCandidates(
     WHERE status = 'new'
       AND expires_at > NOW()
       AND primary_domain = ${primaryDomain}
-    ORDER BY created_at DESC
+    ORDER BY curation_score DESC, created_at DESC
     LIMIT ${LIST_LIMIT}
   `);
 }

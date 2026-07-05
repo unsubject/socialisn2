@@ -106,6 +106,10 @@ export async function listCandidates(
   if (args.temperature) whereParts.push(sql`temperature = ${args.temperature}`);
   if (args.trajectory) whereParts.push(sql`trajectory = ${args.trajectory}`);
   const whereSql = sql.join(whereParts, sql` AND `);
+  // Redesign P0.2: best-first (curation_score DESC, recency tiebreak)
+  // so the limit window carries the strongest candidates, not the
+  // newest. Applies uniformly across statuses — for decided rows the
+  // score ordering is as informative as recency was.
   const rows = await db.execute<CandidateRow>(sql`
     SELECT id, headline, primary_domain, domains,
            temperature, trajectory, is_exclusive,
@@ -113,7 +117,7 @@ export async function listCandidates(
            keywords, tags, context_summary, created_at
     FROM candidates
     WHERE ${whereSql}
-    ORDER BY created_at DESC
+    ORDER BY curation_score DESC, created_at DESC
     LIMIT ${args.limit}
   `);
   return { candidates: rows.map(rowToCandidate) };

@@ -119,9 +119,19 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
     archiveOverlap?: number;
     status?: 'new' | 'picked' | 'passed' | 'deferred' | 'expired';
     expiresAt?: Date;
+    curationScore?: number;
   }
 
   async function seedCandidate(opts: SeedCandidate = {}): Promise<string> {
+    // Migration 018: at most one 'new' candidate per cluster — each
+    // seeded candidate gets its own cluster.
+    clusterId = uuidv7();
+    const zeroVec = `[${new Array(1536).fill(0.001).join(',')}]`;
+    await client`
+      INSERT INTO clusters (id, centroid, first_seen_at, last_seen_at, item_count, domains, primary_domain, status)
+      VALUES (${clusterId}, ${zeroVec}::vector(1536),
+              NOW(), NOW(), 1, ARRAY['economy']::text[], 'economy', 'active')
+    `;
     const id = uuidv7();
     const runId = uuidv7();
     const primary = opts.primaryDomain ?? 'economy';
@@ -146,7 +156,7 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
         0.5,
         ${opts.archiveOverlap ?? 0.1},
         ${JSON.stringify({ overlap: opts.archiveOverlap ?? 0.1, links: [] })}::jsonb,
-        75,
+        ${opts.curationScore ?? 75},
         'rationale',
         ${opts.keywords ?? ['kw1', 'kw2']}::text[],
         ${opts.tags ?? ['tag1']}::text[],
@@ -162,10 +172,10 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
   // tests
   // -------------------------------------------------------------------------
 
-  it('writes all 6 feed files (all + 5 domain) even when no candidates', async () => {
+  it('writes all 7 feed files (all + 5 domain + pulse) even when no candidates', async () => {
     const written = await generateAllFeeds(db, outDir, PUBLIC_HOST);
 
-    expect(written).toHaveLength(6);
+    expect(written).toHaveLength(7);
     expect(written.map((p) => p.split('/').pop())).toEqual([
       'all.xml',
       'economy.xml',
@@ -173,6 +183,7 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
       'scitech.xml',
       'geopolitics.xml',
       'national.xml',
+      'pulse.xml',
     ]);
 
     // Each file parses as a valid RSS doc with zero items.
@@ -309,5 +320,42 @@ describe.skipIf(!DATABASE_URL)('RSS generator (SPEC §11.2)', () => {
     await generateAllFeeds(db, outDir, PUBLIC_HOST, { limit: 3 });
     const all = await parser.parseString(await readFile(join(outDir, 'all.xml'), 'utf-8'));
     expect(all.items).toHaveLength(3);
+  });
+
+  it('orders candidate feeds by curation_score DESC, recency tiebreak (P0.2)', async () => {
+    const mid = await seedCandidate({ headline: 'mid', curationScore: 70 });
+    const best = await seedCandidate({ headline: 'best', curationScore: 92 });
+    const low = await seedCandidate({ headline: 'low', curationScore: 61 });
+
+    await generateAllFeeds(db, outDir, PUBLIC_HOST);
+    const all = await parser.parseString(await readFile(join(outDir, 'all.xml'), 'utf-8'));
+    expect(all.items.map((i) => i.guid)).toEqual([best, mid, low]);
+  });
+
+  it('pulse.xml renders pulse_entries newest-first with candidate links (P0.3)', async () => {
+    const candId = await seedCandidate({ headline: 'Pulse story' });
+    const runId = uuidv7();
+    await client`
+      INSERT INTO runs (id, kind, status) VALUES (${runId}, 'morning', 'completed')
+    `;
+    const entryCand = uuidv7();
+    const entryWaves = uuidv7();
+    await client`
+      INSERT INTO pulse_entries (id, run_id, kind, candidate_id, rank, title, description, created_at) VALUES
+        (${entryCand}, ${runId}, 'candidate', ${candId}, 1,
+         'Pulse story', ${'↳ angle line\neconomy · score 84 · rising'}, NOW()),
+        (${entryWaves}, ${runId}, 'waves', NULL, NULL,
+         'Waves — 2026-07-05', ${'theme-a · 3 clusters · economy'}, NOW() - INTERVAL '1 minute')
+    `;
+
+    await generateAllFeeds(db, outDir, PUBLIC_HOST);
+    const pulse = await parser.parseString(await readFile(join(outDir, 'pulse.xml'), 'utf-8'));
+
+    expect(pulse.items).toHaveLength(2);
+    // Newest-first: the candidate entry precedes the older waves entry.
+    expect(pulse.items.map((i) => i.guid)).toEqual([entryCand, entryWaves]);
+    expect(pulse.items[0]!.link).toBe(`https://${PUBLIC_HOST}/c/${candId}`);
+    expect(pulse.items[0]!.content).toContain('angle line');
+    expect(pulse.items[1]!.link).toBe(`https://${PUBLIC_HOST}/`);
   });
 });

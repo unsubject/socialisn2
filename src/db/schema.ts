@@ -189,6 +189,11 @@ export const candidates = pgTable(
     generatedRunId: uuid('generated_run_id').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    // Migration 018 (supersede): set on every in-place refresh of a
+    // persisting story's 'new' row; runs_seen counts how many runs the
+    // story has re-qualified in. created_at stays first-seen.
+    updatedAt: timestamp('updated_at', { withTimezone: true }),
+    runsSeen: integer('runs_seen').notNull().default(1),
   },
   (t) => ({
     statusIdx: index('idx_candidates_status').on(t.status),
@@ -197,6 +202,32 @@ export const candidates = pgTable(
       t.status,
     ),
     createdAtIdx: index('idx_candidates_created_at').on(t.createdAt.desc()),
+    // Migration 018: partial unique — at most ONE 'new' row per cluster.
+    // Schema-level backstop against the pre-2026-07 duplicate re-mint bug.
+    clusterNewIdx: uniqueIndex('idx_candidates_cluster_new')
+      .on(t.clusterId)
+      .where(sql`status = 'new'`),
+  }),
+);
+
+// Migration 019 (feed redesign P0.3): append-only Daily Pulse entries.
+// Each scoring run contributes at most PULSE_TOP_N candidate entries
+// plus one morning 'waves' entry; pulse.xml renders the newest window.
+// Rows are write-once snapshots so feed GUIDs stay stable.
+export const pulseEntries = pgTable(
+  'pulse_entries',
+  {
+    id: uuid('id').primaryKey(),
+    runId: uuid('run_id').notNull(),
+    kind: text('kind').notNull(), // CHECK: 'candidate'|'waves'
+    candidateId: uuid('candidate_id').references(() => candidates.id),
+    rank: integer('rank'),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    createdAtIdx: index('idx_pulse_entries_created_at').on(t.createdAt.desc()),
   }),
 );
 

@@ -44,6 +44,7 @@ import { BUCKET_ORCHESTRATOR } from '../cost/buckets.js';
 import { assertWithinCeiling, CostCeilingHitError } from '../cost/ceiling.js';
 import { recordCost } from '../cost/ledger.js';
 import { generateAllFeeds } from '../rss/generate.js';
+import { persistPulse, type PulseCandidate } from '../rss/pulse.js';
 import { computeTrending, type TrendingBoard } from '../scoring/trending.js';
 import { formatDigest, formatExclusivePush } from '../telegram/format.js';
 import {
@@ -176,6 +177,14 @@ export interface RunResult {
    *  /status so a spike is visible without a log dive. */
   clustersFailedAtCurate: number;
   candidatesPersisted: number;
+  /** Persisting stories whose existing 'new' (or deferred) row was
+   *  refreshed in place instead of re-minted (redesign P0.1). These do
+   *  NOT re-enter the pulse, the digest counts, or the exclusive push. */
+  candidatesSuperseded: number;
+  /** Clusters skipped because a picked/passed candidate for the same
+   *  story is still inside its relevance window — a decision means
+   *  "handled"; re-minting decided stories was half the firehose. */
+  candidatesSkippedDecided: number;
   totalCostUsd: number;
   status: 'completed' | 'failed';
   /** Non-empty when status='completed' with halt reason
@@ -236,11 +245,16 @@ export async function runScoring(
     clustersFailedAtSummarise: 0,
     clustersFailedAtCurate: 0,
     candidatesPersisted: 0,
+    candidatesSuperseded: 0,
+    candidatesSkippedDecided: 0,
     totalCostUsd: 0,
   };
   let halt: { reason: string; err: Error } | null = null;
   // Aggregated per-domain + exclusive list for the tail digest push.
   const digestCandidates: DigestPushInput['candidates'] = [];
+  // Freshly-INSERTED candidates only (superseded refreshes excluded) —
+  // the pool the Daily Pulse selects its per-run top-N from (P0.3).
+  const pulseCandidates: PulseCandidate[] = [];
 
   try {
     const clusters = await db.execute<ClusterRow>(sql`
@@ -467,7 +481,7 @@ export async function runScoring(
         continue;
       }
 
-      const candidateId = await insertCandidate(db, {
+      const upsert = await upsertCandidate(db, {
         runId,
         cluster,
         summary: summary.output,
@@ -475,19 +489,40 @@ export async function runScoring(
         flagRelatedToRecentWork: decision.flagRelatedToRecentWork,
         curation: curation.output,
       });
+      if (upsert.outcome === 'skipped_decided') {
+        stats.candidatesSkippedDecided += 1;
+        continue;
+      }
+      if (upsert.outcome === 'superseded') {
+        // Persisting story refreshed in place — it already had its day
+        // in the digest/pulse/exclusive-push; only the row is updated.
+        stats.candidatesSuperseded += 1;
+        continue;
+      }
       stats.candidatesPersisted += 1;
       digestCandidates.push({
         primaryDomain: cluster.primary_domain,
+        isExclusive: cluster.exclusive.isExclusive,
+      });
+      pulseCandidates.push({
+        candidateId: upsert.candidateId,
+        headline: summary.output.headline,
+        curationRationale: curation.output.curationRationale,
+        primaryDomain: cluster.primary_domain,
+        curationScore: curation.output.curationScore,
+        temperature: cluster.temperature.temperature,
+        trajectory: cluster.trajectory.trajectory,
         isExclusive: cluster.exclusive.isExclusive,
       });
 
       // SPEC §11.3 — instant push for is_exclusive=true. Inside the
       // per-cluster loop, not at the tail, so the notification arrives
       // before the next cluster's LLM round-trip rather than after
-      // every batch completes.
+      // every batch completes. Fresh inserts only: a superseded story
+      // already pushed on first sight.
       if (cluster.exclusive.isExclusive) {
         await safeNotifyExclusive(notifyExclusive, {
-          id: candidateId,
+          id: upsert.candidateId,
           headline: summary.output.headline,
           primaryDomain: cluster.primary_domain,
         });
@@ -496,10 +531,12 @@ export async function runScoring(
 
     // Tail hooks. Each safe-wrapped; their errors are joined with the
     // halt reason (if any) into the final runs.error field.
-    const feedError = await safeRegenerateFeeds(db, regenerateFeeds);
-    // Trending board rides the morning digest only. Degrades to a
-    // boardless digest if the aggregation throws — it must never block
-    // the push (the per-domain summary is the load-bearing part).
+    //
+    // Trending is computed FIRST (morning only — a once-a-day signal;
+    // afternoon overlaps heavily): it feeds both the pulse waves entry
+    // and, when enabled, the Telegram digest board. Degrades to
+    // undefined if the aggregation throws — it must never block the
+    // remaining hooks.
     let trending: TrendingBoard | undefined;
     if (opts.kind === 'morning') {
       try {
@@ -508,12 +545,21 @@ export async function runScoring(
         console.error('[orchestrator] trending board computation failed:', err);
       }
     }
+    // Pulse entries persist BEFORE feed regeneration so the freshly
+    // written pulse.xml includes this run's entries (P0.3).
+    const pulseError = await safePersistPulse(db, {
+      runId,
+      runKind: opts.kind,
+      candidates: pulseCandidates,
+      trending,
+    });
+    const feedError = await safeRegenerateFeeds(db, regenerateFeeds);
     const digestError = await safeNotifyDigest(notifyDigest, {
       runKind: opts.kind,
       candidates: digestCandidates,
       trending,
     });
-    const finalError = combineErrors(halt?.reason, feedError, digestError);
+    const finalError = combineErrors(halt?.reason, pulseError, feedError, digestError);
 
     await finaliseRun(db, runId, 'completed', stats, finalError);
     return { runId, ...stats, status: 'completed', error: finalError };
@@ -548,9 +594,30 @@ async function safeRegenerateFeeds(
   }
 }
 
-/** Default tail digest. No-ops when Telegram env unset. Reads env at
- *  call time so a per-run env change is picked up. */
+/** Persist this run's Daily Pulse entries (P0.3). DB-only — no
+ *  external service — so it runs for real in integration tests; the
+ *  safe wrapper mirrors the other tail hooks' error contract. */
+async function safePersistPulse(
+  db: Db,
+  input: Parameters<typeof persistPulse>[1],
+): Promise<string | undefined> {
+  try {
+    await persistPulse(db, input);
+    return undefined;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[orchestrator] pulse persistence failed:', err);
+    return `pulse_persist_failed: ${msg.slice(0, 200)}`;
+  }
+}
+
+/** Default tail digest. No-ops when Telegram env unset, and — since the
+ *  RSS-first redesign (docs/redesign/2026-07-05) — when
+ *  TELEGRAM_DIGEST_ENABLED is not explicitly true: the pulse feed is
+ *  the reading surface; the ⚡ exclusive push stays on independently.
+ *  Reads env at call time so a per-run env change is picked up. */
 async function defaultNotifyDigest(input: DigestPushInput): Promise<void> {
+  if (!env.telegramDigestEnabled()) return;
   if (!env.telegramBotToken() || !env.telegramChatId()) return;
   // Sent as a single message — formatDigest does NOT run through
   // chunkForTelegram. Safe today: the summary line + the capped board
@@ -702,11 +769,32 @@ interface CandidateInsertInput {
   curation: { curationScore: number; curationRationale: string };
 }
 
-async function insertCandidate(
+type CandidateUpsertResult =
+  | { outcome: 'inserted'; candidateId: string }
+  | { outcome: 'superseded'; candidateId: string }
+  | { outcome: 'skipped_decided'; candidateId: null };
+
+/**
+ * Redesign P0.1 (docs/redesign/2026-07-05 §6): persist a curated
+ * cluster WITHOUT re-minting duplicates.
+ *
+ *   - no prior row for this cluster           → INSERT (as before)
+ *   - prior 'new' row (any age)               → UPDATE in place
+ *   - prior 'deferred' row, unexpired         → UPDATE in place, back
+ *     to 'new' (SPEC §11.1: defer re-surfaces on the next run)
+ *   - prior picked/passed row, unexpired      → skip: a decision means
+ *     "handled" until its relevance window lapses
+ *   - prior picked/passed/deferred, expired   → INSERT (story resurged
+ *     after the decision aged out — a genuinely fresh event)
+ *
+ * The partial unique index idx_candidates_cluster_new (migration 018)
+ * backstops the one-'new'-row-per-cluster invariant; the orchestrator
+ * advisory lock (PR #110) already serialises writers.
+ */
+async function upsertCandidate(
   db: Db,
   input: CandidateInsertInput,
-): Promise<string> {
-  const candidateId = uuidv7();
+): Promise<CandidateUpsertResult> {
   const halfLifeHours = DOMAIN_CONFIGS[input.cluster.primary_domain as Domain]
     .recencyHalfLifeHours;
   const expiresIso = new Date(
@@ -717,7 +805,68 @@ async function insertCandidate(
     flagRelatedToRecentWork: input.flagRelatedToRecentWork,
     links: input.overlap.links,
   };
+  const archiveJsonb = sql.raw(
+    "'" + JSON.stringify(archivePayload).replace(/'/g, "''") + "'",
+  );
 
+  // Latest existing row for this cluster, 'new' preferred: pre-018
+  // data can still carry e.g. a deferred row alongside an (older) new
+  // one, and the 'new' row is the one the invariant is about.
+  const existing = await db.execute<{
+    id: string;
+    status: string;
+    expired: boolean;
+  }>(sql`
+    SELECT id, status, (expires_at <= NOW()) AS expired
+    FROM candidates
+    WHERE cluster_id = ${input.cluster.id}
+    ORDER BY (status = 'new') DESC, created_at DESC
+    LIMIT 1
+  `);
+  const prior = existing[0];
+
+  if (
+    prior &&
+    (prior.status === 'picked' || prior.status === 'passed') &&
+    !prior.expired
+  ) {
+    return { outcome: 'skipped_decided', candidateId: null };
+  }
+
+  if (
+    prior &&
+    (prior.status === 'new' || (prior.status === 'deferred' && !prior.expired))
+  ) {
+    // Refresh the persisting story's row in place. created_at stays
+    // first-seen (feed GUID + "when did this story appear" semantics);
+    // updated_at/runs_seen record the refresh; expires_at extends —
+    // a story still clearing the cutoff is still relevant.
+    await db.execute(sql`
+      UPDATE candidates SET
+        headline = ${input.summary.headline},
+        context_summary = ${input.summary.contextSummary},
+        temperature = ${input.cluster.temperature.temperature},
+        trajectory = ${input.cluster.trajectory.trajectory},
+        is_exclusive = ${input.cluster.exclusive.isExclusive},
+        exclusive_source_id = ${input.cluster.exclusive.exclusiveSourceId},
+        similarity_score = ${input.cluster.heuristicScore},
+        archive_overlap = ${input.overlap.overlap},
+        archive_overlap_links = ${archiveJsonb}::jsonb,
+        curation_score = ${input.curation.curationScore},
+        curation_rationale = ${input.curation.curationRationale},
+        keywords = ${textArrayLiteral(input.summary.keywords)},
+        tags = ${textArrayLiteral(input.summary.tags)},
+        status = 'new',
+        generated_run_id = ${input.runId},
+        expires_at = ${expiresIso}::timestamptz,
+        updated_at = NOW(),
+        runs_seen = runs_seen + 1
+      WHERE id = ${prior.id}
+    `);
+    return { outcome: 'superseded', candidateId: prior.id };
+  }
+
+  const candidateId = uuidv7();
   await db.execute(sql`
     INSERT INTO candidates (
       id, cluster_id, headline, context_summary,
@@ -741,7 +890,7 @@ async function insertCandidate(
       ${input.cluster.exclusive.exclusiveSourceId},
       ${input.cluster.heuristicScore},
       ${input.overlap.overlap},
-      ${sql.raw("'" + JSON.stringify(archivePayload).replace(/'/g, "''") + "'")}::jsonb,
+      ${archiveJsonb}::jsonb,
       ${input.curation.curationScore},
       ${input.curation.curationRationale},
       ${textArrayLiteral(input.summary.keywords)},
@@ -751,7 +900,7 @@ async function insertCandidate(
       ${expiresIso}::timestamptz
     )
   `);
-  return candidateId;
+  return { outcome: 'inserted', candidateId };
 }
 
 async function finaliseRun(
@@ -767,6 +916,8 @@ async function finaliseRun(
     clustersFailedAtSummarise: number;
     clustersFailedAtCurate: number;
     candidatesPersisted: number;
+    candidatesSuperseded: number;
+    candidatesSkippedDecided: number;
     totalCostUsd: number;
   },
   error: string | undefined,
@@ -778,6 +929,8 @@ async function finaliseRun(
     clusters_advanced_to_stage4: stats.clustersAdvancedToStage4,
     clusters_failed_at_summarise: stats.clustersFailedAtSummarise,
     clusters_failed_at_curate: stats.clustersFailedAtCurate,
+    candidates_superseded: stats.candidatesSuperseded,
+    candidates_skipped_decided: stats.candidatesSkippedDecided,
   };
   // Phase 2.b: gate the UPDATE on `status='running'` so a legitimate
   // long-running pass that the watchdog already flipped to 'failed'

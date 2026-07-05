@@ -1,9 +1,12 @@
-// RSS 2.0 generator for Socialisn2's static feeds (SPEC §11.2).
+// RSS 2.0 generator for Socialisn2's static feeds (SPEC §11.2 +
+// redesign P0.3, docs/redesign/2026-07-05 §5.1).
 //
-// Writes 6 files to `outputDir`:
+// Writes 7 files to `outputDir`:
 //
 //   all.xml          — master feed, every `new` non-expired candidate
 //   <domain>.xml × 5 — one per SPEC §3 domain, filtered on primary_domain
+//   pulse.xml        — the Daily Pulse: append-only, attention-budgeted
+//                      (≤ PULSE_TOP_N entries per run from pulse_entries)
 //
 // Per-domain feeds use `primary_domain` (strict), NOT the multi-label
 // `domains[]` array. The multi-label set is for search / filter UI
@@ -30,6 +33,7 @@ import { sql } from 'drizzle-orm';
 import { DOMAIN_CONFIGS } from '../../config/domains.js';
 import type { Db } from '../db/client.js';
 import { escapeXml } from '../lib/escape.js';
+import { PULSE_TOP_N } from './pulse.js';
 
 /**
  * Cap on items per feed. RSS readers tolerate larger feeds, but capping
@@ -57,6 +61,15 @@ type CandidateRow = {
   trajectory: string;
   is_exclusive: boolean;
   archive_overlap: number;
+  created_at: string;
+};
+
+type PulseRow = {
+  id: string;
+  kind: string;
+  candidate_id: string | null;
+  title: string;
+  description: string;
   created_at: string;
 };
 
@@ -128,6 +141,20 @@ export async function generateAllFeeds(
   for (const domain of Object.keys(DOMAIN_CONFIGS) as Array<keyof typeof DOMAIN_CONFIGS>) {
     await writeOne(domain, domain);
   }
+  // Daily Pulse (P0.3) — a different query shape (pulse_entries, not
+  // the live candidate pool), so it bypasses writeOne's fetch but keeps
+  // the same partial-failure accounting.
+  try {
+    const pulseRows = await fetchPulseItems(db, limit);
+    const pulsePath = join(outputDir, 'pulse.xml');
+    await atomicWriteXml(pulsePath, renderPulseFeed(pulseRows, publicHost));
+    writtenByFeed.set('pulse', pulsePath);
+  } catch (err) {
+    failures.push({
+      feed: 'pulse',
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+  }
   // Master 'all' feed last, per the write-order rationale above.
   await writeOne('all', null);
 
@@ -143,10 +170,11 @@ export async function generateAllFeeds(
   }
 
   // Documented return order: master first, then domains in SPEC §3
-  // table order. Tests pin this; external callers may also.
+  // table order, then pulse. Tests pin this; external callers may also.
   const orderedSlugs = [
     'all',
     ...(Object.keys(DOMAIN_CONFIGS) as string[]),
+    'pulse',
   ];
   return orderedSlugs.map((s) => writtenByFeed.get(s)!).filter(Boolean);
 }
@@ -165,6 +193,10 @@ export async function fetchFeedItems(
   // `expires_at > NOW()` is the lazy "is this candidate still relevant"
   // gate per SPEC §11.1 (status transitions). No sweeper cron exists —
   // the filter is the contract.
+  // Redesign P0.2: best-first, not newest-first. curation_score was
+  // computed and stored on every candidate since Phase 3 but never used
+  // for ordering — the day's best item could fall out of the 50-item
+  // window under newer mediocre ones. Recency is the tiebreak.
   if (primaryDomain === null) {
     return db.execute<CandidateRow>(sql`
       SELECT id, headline, context_summary, primary_domain,
@@ -173,7 +205,7 @@ export async function fetchFeedItems(
       FROM candidates
       WHERE status = 'new'
         AND expires_at > NOW()
-      ORDER BY created_at DESC
+      ORDER BY curation_score DESC, created_at DESC
       LIMIT ${limit}
     `);
   }
@@ -185,6 +217,20 @@ export async function fetchFeedItems(
     WHERE status = 'new'
       AND expires_at > NOW()
       AND primary_domain = ${primaryDomain}
+    ORDER BY curation_score DESC, created_at DESC
+    LIMIT ${limit}
+  `);
+}
+
+/**
+ * Newest window of Daily Pulse entries. Append-only snapshots
+ * (migration 019) — no expiry filter: a pulse entry is a moment-in-time
+ * editorial selection, and readers page through history naturally.
+ */
+export async function fetchPulseItems(db: Db, limit: number): Promise<PulseRow[]> {
+  return db.execute<PulseRow>(sql`
+    SELECT id, kind, candidate_id, title, description, created_at
+    FROM pulse_entries
     ORDER BY created_at DESC
     LIMIT ${limit}
   `);
@@ -193,6 +239,40 @@ export async function fetchFeedItems(
 // ---------------------------------------------------------------------------
 // rendering
 // ---------------------------------------------------------------------------
+
+function renderPulseFeed(items: PulseRow[], publicHost: string): string {
+  const baseUrl = `https://${publicHost}`;
+  const feedLink = `${baseUrl}/feeds/pulse.xml`;
+  const itemsXml = items
+    .map((it) => {
+      // Candidate entries link to the rendered detail page; the waves
+      // entry has no detail page — link it to the site root.
+      const link =
+        it.kind === 'candidate' && it.candidate_id
+          ? `${baseUrl}/c/${it.candidate_id}`
+          : `${baseUrl}/`;
+      return `    <item>
+      <title>${escapeXml(it.title)}</title>
+      <description>${escapeXml(it.description)}</description>
+      <link>${escapeXml(link)}</link>
+      <guid isPermaLink="false">${escapeXml(it.id)}</guid>
+      <pubDate>${new Date(it.created_at).toUTCString()}</pubDate>
+    </item>`;
+    })
+    .join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Socialisn2 — Daily Pulse</title>
+    <link>${escapeXml(feedLink)}</link>
+    <atom:link href="${escapeXml(feedLink)}" rel="self" type="application/rss+xml"/>
+    <description>The attention-budgeted shortlist: at most ${PULSE_TOP_N} per run, ranked, with an angle line each.</description>
+    <lastBuildDate>${new Date().toUTCString()}</lastBuildDate>
+${itemsXml}
+  </channel>
+</rss>
+`;
+}
 
 function renderFeed(
   feedSlug: string,

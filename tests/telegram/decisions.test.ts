@@ -53,6 +53,12 @@ describe.skipIf(!DATABASE_URL)('telegram decisions.decide', () => {
       'TRUNCATE TABLE feedback, candidates, items, gdelt_coverage, clusters CASCADE',
     );
     await client.unsafe('TRUNCATE TABLE raw_items CASCADE');
+  });
+
+  /** Each seeded candidate gets its OWN cluster (+ one item so urls[]
+   *  is non-empty when recordPick is called) — migration 018's partial
+   *  unique index allows at most one 'new' candidate per cluster. */
+  async function seedCandidate(): Promise<string> {
     clusterId = uuidv7();
     const vec = `[${new Array(1536).fill(0.001).join(',')}]`;
     await client`
@@ -60,12 +66,11 @@ describe.skipIf(!DATABASE_URL)('telegram decisions.decide', () => {
       VALUES (${clusterId}, ${vec}::vector(1536),
               NOW(), NOW(), 1, ARRAY['economy']::text[], 'economy', 'active')
     `;
-    // One item in the cluster so urls[] is non-empty when recordPick is called.
     const rawId = uuidv7();
     await client`
       INSERT INTO raw_items (id, source_id, url, url_hash, title, title_hash, published_at)
       VALUES (${rawId}, ${sourceId}, 'https://example.com/article',
-              'uh1', 'Article', 'th1', NOW())
+              ${'uh-' + rawId}, 'Article', ${'th-' + rawId}, NOW())
     `;
     await client`
       INSERT INTO items (
@@ -79,9 +84,6 @@ describe.skipIf(!DATABASE_URL)('telegram decisions.decide', () => {
         NOW(), ${clusterId}
       )
     `;
-  });
-
-  async function seedCandidate(): Promise<string> {
     const id = uuidv7();
     const runId = uuidv7();
     await client`

@@ -165,6 +165,15 @@ describe.skipIf(!DATABASE_URL)('telegram bot (buildBot)', () => {
   }
 
   async function seedCandidate(opts: { headline?: string } = {}): Promise<string> {
+    // Migration 018: at most one 'new' candidate per cluster — each
+    // seeded candidate gets its own cluster.
+    clusterId = uuidv7();
+    const vec = `[${new Array(1536).fill(0.001).join(',')}]`;
+    await client`
+      INSERT INTO clusters (id, centroid, first_seen_at, last_seen_at, item_count, domains, primary_domain, status)
+      VALUES (${clusterId}, ${vec}::vector(1536),
+              NOW(), NOW(), 1, ARRAY['economy']::text[], 'economy', 'active')
+    `;
     const id = uuidv7();
     const runId = uuidv7();
     await client`
@@ -301,7 +310,15 @@ describe.skipIf(!DATABASE_URL)('telegram bot (buildBot)', () => {
     const longHeadline =
       'A reasonably long headline about regulatory shifts in financial markets and AI policy implications';
     const domains = ['economy', 'scitech', 'geopolitics', 'national'];
+    const vec = `[${new Array(1536).fill(0.001).join(',')}]`;
     for (let i = 0; i < 30; i += 1) {
+      // Migration 018: one 'new' candidate per cluster — fresh cluster each.
+      const cid = uuidv7();
+      await client`
+        INSERT INTO clusters (id, centroid, first_seen_at, last_seen_at, item_count, domains, primary_domain, status)
+        VALUES (${cid}, ${vec}::vector(1536),
+                NOW(), NOW(), 1, ARRAY[${domains[i % 4]!}]::text[], ${domains[i % 4]!}, 'active')
+      `;
       const id = uuidv7();
       const runId = uuidv7();
       await client`
@@ -312,7 +329,7 @@ describe.skipIf(!DATABASE_URL)('telegram bot (buildBot)', () => {
           curation_score, curation_rationale, keywords, tags, status,
           generated_run_id, expires_at
         ) VALUES (
-          ${id}, ${clusterId},
+          ${id}, ${cid},
           ${`${longHeadline} #${i}`},
           'context', ${domains[i % 4]!}, ARRAY[${domains[i % 4]!}]::text[],
           'warm', 'rising', false, 0.5, 0.1,

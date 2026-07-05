@@ -746,4 +746,111 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     expect(candidates[0]?.is_exclusive).toBe(true);
     expect(candidates[0]?.id).toBe(exclusiveCalls[0]?.id);
   });
+
+  // ---------------------------------------------------------------------
+  // Redesign P0.1 — candidate supersede (docs/redesign/2026-07-05 §6)
+  // ---------------------------------------------------------------------
+
+  it('supersede: a persisting cluster refreshes its row instead of re-minting (P0.1)', async () => {
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+    const deps = {
+      summarise: makeStubSummarise(),
+      curate: makeStubCurate(75),
+      archiveSearcher: makeStubArchive([]),
+    };
+
+    const first = await runScoring(db, { kind: 'manual' }, deps);
+    expect(first.candidatesPersisted).toBe(1);
+    expect(first.candidatesSuperseded).toBe(0);
+
+    // Same cluster still active on the next run → refreshed in place,
+    // with a better score. Pre-018 this minted a second 'new' row (the
+    // 4-5x duplicate-story bug).
+    const second = await runScoring(
+      db,
+      { kind: 'manual' },
+      { ...deps, curate: makeStubCurate(88, 'Even stronger now') },
+    );
+    expect(second.candidatesPersisted).toBe(0);
+    expect(second.candidatesSuperseded).toBe(1);
+
+    const rows = await client<
+      { curation_score: number; runs_seen: number; updated_at: string | null; status: string }[]
+    >`SELECT curation_score, runs_seen, updated_at, status FROM candidates`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('new');
+    expect(rows[0]!.curation_score).toBe(88);
+    expect(rows[0]!.runs_seen).toBe(2);
+    expect(rows[0]!.updated_at).not.toBeNull();
+  });
+
+  it('supersede: a recently-decided story is not re-minted; a deferred one re-surfaces (P0.1)', async () => {
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+    const deps = {
+      summarise: makeStubSummarise(),
+      curate: makeStubCurate(75),
+      archiveSearcher: makeStubArchive([]),
+    };
+
+    await runScoring(db, { kind: 'manual' }, deps);
+    await client`UPDATE candidates SET status = 'passed', decided_at = NOW()`;
+
+    const afterPass = await runScoring(db, { kind: 'manual' }, deps);
+    expect(afterPass.candidatesPersisted).toBe(0);
+    expect(afterPass.candidatesSuperseded).toBe(0);
+    expect(afterPass.candidatesSkippedDecided).toBe(1);
+    expect((await client`SELECT id FROM candidates`)).toHaveLength(1);
+
+    // Deferred re-surfaces per SPEC §11.1: flips back to 'new' in place.
+    await client`UPDATE candidates SET status = 'deferred'`;
+    const afterDefer = await runScoring(db, { kind: 'manual' }, deps);
+    expect(afterDefer.candidatesSuperseded).toBe(1);
+    const rows = await client<{ status: string; runs_seen: number }[]>`
+      SELECT status, runs_seen FROM candidates
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('new');
+  });
+
+  // ---------------------------------------------------------------------
+  // Redesign P0.3 — Daily Pulse persistence (docs/redesign/2026-07-05 §5.1)
+  // ---------------------------------------------------------------------
+
+  it('pulse: a morning run writes candidate entries; a quiet manual run writes none (P0.3)', async () => {
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+    const deps = {
+      summarise: makeStubSummarise(),
+      curate: makeStubCurate(75, 'The angle line'),
+      archiveSearcher: makeStubArchive([]),
+    };
+
+    const morning = await runScoring(db, { kind: 'morning' }, deps);
+    expect(morning.status).toBe('completed');
+
+    const entries = await client<
+      { kind: string; rank: number | null; title: string; description: string }[]
+    >`SELECT kind, rank, title, description FROM pulse_entries ORDER BY created_at`;
+    // The fixture cluster is exclusive (sourceA 6h lead) → it clears the
+    // non-morning gates too, but on a morning run everything fresh
+    // enters up to the cap. Exactly one candidate entry; no waves entry
+    // (trending board is empty at 1 candidate but themes qualify at ≥1
+    // cluster, so allow either 1 or 2 rows and pin the candidate one).
+    const candidateEntries = entries.filter((e) => e.kind === 'candidate');
+    expect(candidateEntries).toHaveLength(1);
+    expect(candidateEntries[0]!.rank).toBe(1);
+    expect(candidateEntries[0]!.title).toBe('Fed holds rates steady');
+    expect(candidateEntries[0]!.description).toContain('The angle line');
+
+    // Second manual run: the cluster supersedes (no fresh insert) → no
+    // new pulse entries. A story pulses once.
+    await runScoring(db, { kind: 'manual' }, deps);
+    const after = await client`SELECT id FROM pulse_entries`;
+    expect(after).toHaveLength(candidateEntries.length + entries.filter((e) => e.kind === 'waves').length);
+  });
 });

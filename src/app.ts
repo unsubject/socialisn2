@@ -20,6 +20,7 @@ import type { Sql } from 'postgres';
 import { env } from './config/env.js';
 import type { Db } from './db/client.js';
 import { pingDatabase } from './lib/healthcheck.js';
+import { isValidIsoDate } from './lib/iso-date.js';
 import { buildStatus } from './lib/status.js';
 import { UUID_RE } from './lib/uuid.js';
 import { buildMcpServer } from './mcp/server.js';
@@ -67,9 +68,6 @@ type BriefPageRow = {
   updated_at: string | null;
 };
 
-// /brief/:weekOf path param: strict YYYY-MM-DD (or the literal
-// 'latest') — same 500-avoidance rationale as UUID_RE on /c/:id.
-const WEEK_OF_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * `raw` is the postgres-js client behind drizzle. Required so the MCP
@@ -189,9 +187,12 @@ export function buildApp(db: Db, raw: Sql): FastifyInstance {
 
   // Weekly Ideation Brief page (redesign P1) — the brief.xml <link>
   // target. `/brief/latest` serves the newest row for bookmarking.
+  // isValidIsoDate (not just a shape regex) gates the ::date cast:
+  // '2026-13-99' is YYYY-MM-DD-shaped but PG would raise out-of-range
+  // → 500 instead of this 404 (codex review on #157).
   app.get<{ Params: { weekOf: string } }>('/brief/:weekOf', async (req, reply) => {
     const weekOf = req.params.weekOf;
-    if (weekOf !== 'latest' && !WEEK_OF_RE.test(weekOf)) {
+    if (weekOf !== 'latest' && !isValidIsoDate(weekOf)) {
       return reply
         .code(404)
         .type('text/html; charset=utf-8')

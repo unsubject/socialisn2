@@ -24,6 +24,7 @@ import { BUCKET_BRIEF } from '../cost/buckets.js';
 import { assertWithinCeiling, CostCeilingHitError } from '../cost/ceiling.js';
 import { recordCost } from '../cost/ledger.js';
 import { generateAllFeeds } from '../rss/generate.js';
+import { isValidIsoDate } from '../lib/iso-date.js';
 import {
   BriefParseError,
   generateBrief as defaultGenerateBrief,
@@ -75,9 +76,20 @@ export async function runWeeklyBrief(
   opts: BriefRunOptions = {},
   deps: BriefRunDependencies = {},
 ): Promise<BriefRunResult> {
-  const generate = deps.generate ?? defaultGenerateBrief;
+  // Default generate threads the operator-configurable model through —
+  // BRIEF_MODEL must actually reroute the call (codex review on #157),
+  // while src/scoring/brief.ts stays env-free like the other pure
+  // scoring modules.
+  const generate =
+    deps.generate ??
+    ((input: BriefInput) => defaultGenerateBrief(input, { model: env.briefModel() }));
   const regenerateFeeds = deps.regenerateFeeds ?? defaultRegenerateFeeds;
   const weekOf = opts.weekOf ?? new Date().toISOString().slice(0, 10);
+  // Guard before the ::date casts below AND before a runs row exists —
+  // an invalid caller-supplied week is a programming error, not a run.
+  if (!isValidIsoDate(weekOf)) {
+    throw new Error(`runWeeklyBrief: invalid weekOf ${JSON.stringify(weekOf)}`);
+  }
 
   const runId = uuidv7();
   await db.execute(sql`
@@ -229,6 +241,16 @@ async function gatherBriefInput(db: Db, weekOf: string): Promise<BriefInput> {
   // regardless of status — a passed story is still context (the model
   // is told to treat passes as dead absent a new angle). Top-N by
   // curation score bounds the prompt.
+  //
+  // The window is anchored to weekOf, NOT NOW() (codex review on #157):
+  // a manual rerun/backfill of an older week must gather THAT week —
+  // an upsert keyed on week_of fed from NOW()'s window would overwrite
+  // the old brief with current-week stories. Bounds: (weekOf - 7d,
+  // weekOf + 1d) so the weekOf day itself is included. On the cron
+  // path weekOf defaults to today, making this equivalent to the old
+  // NOW()-anchored query.
+  const windowEnd = sql`(${weekOf}::date + 1)`;
+  const windowStart = sql`(${weekOf}::date - ${BRIEF_WINDOW_DAYS - 1}::int)`;
   const rows = await db.execute<CandidateRow>(sql`
     SELECT c.id, c.headline, c.context_summary, c.primary_domain, c.domains,
            c.temperature, c.trajectory, c.curation_score, c.curation_rationale,
@@ -246,8 +268,8 @@ async function gatherBriefInput(db: Db, weekOf: string): Promise<BriefInput> {
              ) s
            ) AS source_urls
     FROM candidates c
-    WHERE (c.created_at > NOW() - make_interval(days => ${BRIEF_WINDOW_DAYS})
-           OR c.updated_at > NOW() - make_interval(days => ${BRIEF_WINDOW_DAYS}))
+    WHERE ((c.created_at >= ${windowStart} AND c.created_at < ${windowEnd})
+           OR (c.updated_at >= ${windowStart} AND c.updated_at < ${windowEnd}))
     ORDER BY c.curation_score DESC, c.created_at DESC
     LIMIT ${BRIEF_MAX_CANDIDATES}
   `);
@@ -256,10 +278,14 @@ async function gatherBriefInput(db: Db, weekOf: string): Promise<BriefInput> {
     SELECT f.action, f.reason, c.headline
     FROM feedback f
     JOIN candidates c ON c.id = f.candidate_id
-    WHERE f.created_at > NOW() - make_interval(days => ${BRIEF_WINDOW_DAYS})
+    WHERE f.created_at >= ${windowStart}
+      AND f.created_at < ${windowEnd}
     ORDER BY f.created_at DESC
   `);
 
+  // NOTE: trending reflects the CURRENT in-window pool — on a backfill
+  // of an older week it describes today's waves, not that week's.
+  // Acceptable: it's garnish, and historical trending isn't stored.
   let trendingThemes: BriefInput['trendingThemes'] = [];
   try {
     const board = await computeTrending(db);

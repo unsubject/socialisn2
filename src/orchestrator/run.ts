@@ -776,16 +776,18 @@ type CandidateUpsertResult =
 
 /**
  * Redesign P0.1 (docs/redesign/2026-07-05 §6): persist a curated
- * cluster WITHOUT re-minting duplicates.
+ * cluster WITHOUT re-minting duplicates. Precedence, checked against
+ * ALL of the cluster's rows (codex review on PR #155):
  *
- *   - no prior row for this cluster           → INSERT (as before)
- *   - prior 'new' row (any age)               → UPDATE in place
- *   - prior 'deferred' row, unexpired         → UPDATE in place, back
+ *   - ANY unexpired picked/passed row          → skip: a decision means
+ *     "handled" until its relevance window lapses — even when a pre-018
+ *     'new' duplicate also exists (that duplicate is retired here)
+ *   - else prior 'new' row (any age)           → UPDATE in place,
+ *     domains array included (the cluster may have broadened)
+ *   - else prior 'deferred' row, unexpired     → UPDATE in place, back
  *     to 'new' (SPEC §11.1: defer re-surfaces on the next run)
- *   - prior picked/passed row, unexpired      → skip: a decision means
- *     "handled" until its relevance window lapses
- *   - prior picked/passed/deferred, expired   → INSERT (story resurged
- *     after the decision aged out — a genuinely fresh event)
+ *   - else                                     → INSERT (no prior row,
+ *     or the story resurged after every prior row aged out)
  *
  * The partial unique index idx_candidates_cluster_new (migration 018)
  * backstops the one-'new'-row-per-cluster invariant; the orchestrator
@@ -809,9 +811,12 @@ async function upsertCandidate(
     "'" + JSON.stringify(archivePayload).replace(/'/g, "''") + "'",
   );
 
-  // Latest existing row for this cluster, 'new' preferred: pre-018
-  // data can still carry e.g. a deferred row alongside an (older) new
-  // one, and the 'new' row is the one the invariant is about.
+  // ALL in-play rows for this cluster, not just a preferred one: the
+  // decision check must see every row, because pre-018 data can carry
+  // an unexpired picked/passed row ALONGSIDE a later 'new' duplicate
+  // (the old re-mint bug). A LIMIT-1 probe that preferred 'new' let
+  // that duplicate mask the decision and get refreshed back into feeds
+  // (codex review on PR #155).
   const existing = await db.execute<{
     id: string;
     status: string;
@@ -820,23 +825,31 @@ async function upsertCandidate(
     SELECT id, status, (expires_at <= NOW()) AS expired
     FROM candidates
     WHERE cluster_id = ${input.cluster.id}
-    ORDER BY (status = 'new') DESC, created_at DESC
-    LIMIT 1
+      AND status IN ('new', 'deferred', 'picked', 'passed')
+    ORDER BY created_at DESC
   `);
-  const prior = existing[0];
 
-  if (
-    prior &&
-    (prior.status === 'picked' || prior.status === 'passed') &&
-    !prior.expired
-  ) {
+  const decided = existing.find(
+    (r) => (r.status === 'picked' || r.status === 'passed') && !r.expired,
+  );
+  if (decided) {
+    // Honor the decision — and retire any pre-018 'new' duplicate so a
+    // decided story drops out of feeds now instead of riding its
+    // duplicate until expiry (migration 020 does the same sweep for
+    // clusters that don't re-qualify).
+    if (existing.some((r) => r.status === 'new')) {
+      await db.execute(sql`
+        UPDATE candidates SET status = 'expired', updated_at = NOW()
+        WHERE cluster_id = ${input.cluster.id} AND status = 'new'
+      `);
+    }
     return { outcome: 'skipped_decided', candidateId: null };
   }
 
-  if (
-    prior &&
-    (prior.status === 'new' || (prior.status === 'deferred' && !prior.expired))
-  ) {
+  const prior =
+    existing.find((r) => r.status === 'new') ??
+    existing.find((r) => r.status === 'deferred' && !r.expired);
+  if (prior) {
     // Refresh the persisting story's row in place. created_at stays
     // first-seen (feed GUID + "when did this story appear" semantics);
     // updated_at/runs_seen record the refresh; expires_at extends —
@@ -845,6 +858,7 @@ async function upsertCandidate(
       UPDATE candidates SET
         headline = ${input.summary.headline},
         context_summary = ${input.summary.contextSummary},
+        domains = ${textArrayLiteral(input.cluster.domains)},
         temperature = ${input.cluster.temperature.temperature},
         trajectory = ${input.cluster.trajectory.trajectory},
         is_exclusive = ${input.cluster.exclusive.isExclusive},

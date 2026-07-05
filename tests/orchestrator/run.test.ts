@@ -816,6 +816,81 @@ describe.skipIf(!DATABASE_URL)('orchestrator runScoring (SPEC §9)', () => {
     expect(rows[0]!.status).toBe('new');
   });
 
+  it('supersede: an unexpired decision wins over a pre-018 new duplicate, which is retired (codex P1)', async () => {
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+    const deps = {
+      summarise: makeStubSummarise(),
+      curate: makeStubCurate(75),
+      archiveSearcher: makeStubArchive([]),
+    };
+
+    await runScoring(db, { kind: 'manual' }, deps);
+    // Simon passes the story…
+    await client`UPDATE candidates SET status = 'passed', decided_at = NOW()`;
+    // …but pre-018 data also left a 'new' duplicate for the same
+    // cluster (legal to seed now that the first row is 'passed').
+    const dupId = uuidv7();
+    await client`
+      INSERT INTO candidates (
+        id, cluster_id, headline, context_summary,
+        primary_domain, domains, temperature, trajectory,
+        is_exclusive, similarity_score, archive_overlap, archive_overlap_links,
+        curation_score, curation_rationale, keywords, tags, status,
+        generated_run_id, expires_at
+      ) VALUES (
+        ${dupId}, ${cluster}, 'Pre-018 duplicate', 'ctx',
+        'economy', ARRAY['economy']::text[], 'warm', 'rising',
+        false, 0.5, 0.1, ${JSON.stringify({ overlap: 0.1, links: [] })}::jsonb,
+        70, 'r', ARRAY['kw']::text[], ARRAY['tag']::text[], 'new',
+        ${uuidv7()},
+        ${new Date(Date.now() + 24 * 3_600_000).toISOString()}::timestamptz
+      )
+    `;
+
+    // Pre-fix, the LIMIT-1 'new'-preferred probe refreshed the
+    // duplicate and never saw the pass. Now: skip + retire the dup.
+    const result = await runScoring(db, { kind: 'manual' }, deps);
+    expect(result.candidatesPersisted).toBe(0);
+    expect(result.candidatesSuperseded).toBe(0);
+    expect(result.candidatesSkippedDecided).toBe(1);
+
+    const rows = await client<{ id: string; status: string }[]>`
+      SELECT id, status FROM candidates ORDER BY created_at
+    `;
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.id === dupId)?.status).toBe('expired');
+    expect(rows.find((r) => r.id !== dupId)?.status).toBe('passed');
+  });
+
+  it('supersede: refreshes the multi-label domains array when the cluster broadens (codex P2)', async () => {
+    const cluster = await makeCluster();
+    await attachItem(cluster, sourceA, new Date(Date.now() - 6 * 3_600_000));
+    await attachItem(cluster, sourceB, new Date(Date.now() - 1 * 3_600_000));
+    const deps = {
+      summarise: makeStubSummarise(),
+      curate: makeStubCurate(75),
+      archiveSearcher: makeStubArchive([]),
+    };
+
+    await runScoring(db, { kind: 'manual' }, deps);
+    // The cluster gains a second domain label between runs.
+    await client`
+      UPDATE clusters SET domains = ARRAY['economy','geopolitics']::text[]
+      WHERE id = ${cluster}
+    `;
+
+    const second = await runScoring(db, { kind: 'manual' }, deps);
+    expect(second.candidatesSuperseded).toBe(1);
+    const rows = await client<{ domains: string[]; primary_domain: string }[]>`
+      SELECT domains, primary_domain FROM candidates
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.domains).toEqual(['economy', 'geopolitics']);
+    expect(rows[0]!.primary_domain).toBe('economy');
+  });
+
   // ---------------------------------------------------------------------
   // Redesign P0.3 — Daily Pulse persistence (docs/redesign/2026-07-05 §5.1)
   // ---------------------------------------------------------------------

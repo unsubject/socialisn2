@@ -91,5 +91,10 @@ describe.skipIf(!DATABASE_URL)('mcp tools/brief getBrief (real PG)', () => {
 
   it('rejects malformed week_of via zod', async () => {
     await expect(getBrief(db, { week_of: 'next sunday' })).rejects.toThrow();
+    // Shaped-but-impossible dates are rejected BEFORE the ::date cast
+    // (codex #157 class) — zod refine, not a PG out-of-range error.
+    await expect(getBrief(db, { week_of: '2026-13-99' })).rejects.toThrow(
+      /not a real calendar date/,
+    );
   });
 });

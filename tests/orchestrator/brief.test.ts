@@ -32,6 +32,11 @@ import { assertDestructiveAllowed } from '../helpers/destructive-guard.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
+// Candidates are seeded with created_at = NOW(); the gather window is
+// anchored to weekOf (codex #157 fix), so tests that expect the seeded
+// pool must use TODAY as the brief week — a hard-coded date would rot.
+const TODAY = new Date().toISOString().slice(0, 10);
+
 function unitVec(): number[] {
   const v = new Array(EMBEDDING_DIM).fill(0);
   v[0] = 1;
@@ -171,7 +176,7 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
     let seenInput: BriefInput | undefined;
     const result = await runWeeklyBrief(
       db,
-      { weekOf: '2026-07-05' },
+      { weekOf: TODAY },
       {
         generate: async (input) => {
           seenInput = input;
@@ -197,7 +202,7 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
       SELECT week_of, content_md FROM briefs
     `;
     expect(briefs).toHaveLength(1);
-    expect(briefs[0]!.content_md).toContain('Weekly Ideation Brief — 2026-07-05');
+    expect(briefs[0]!.content_md).toContain(`Weekly Ideation Brief — ${TODAY}`);
 
     const runs = await client<{ kind: string; status: string; candidates_count: number }[]>`
       SELECT kind, status, candidates_count FROM runs
@@ -215,8 +220,8 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
     await seedCandidate('Fed holds rates');
     const deps = { generate: stubGenerate(onePitch), regenerateFeeds: async () => {} };
 
-    const first = await runWeeklyBrief(db, { weekOf: '2026-07-05' }, deps);
-    const second = await runWeeklyBrief(db, { weekOf: '2026-07-05' }, deps);
+    const first = await runWeeklyBrief(db, { weekOf: TODAY }, deps);
+    const second = await runWeeklyBrief(db, { weekOf: TODAY }, deps);
     expect(second.status).toBe('completed');
 
     const briefs = await client<{ id: string; updated_at: string | null }[]>`
@@ -231,7 +236,7 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
   it('empty week: completes with error=empty_week and writes no brief', async () => {
     const result = await runWeeklyBrief(
       db,
-      { weekOf: '2026-07-05' },
+      { weekOf: TODAY },
       { generate: stubGenerate(onePitch), regenerateFeeds: async () => {} },
     );
     expect(result.status).toBe('completed');
@@ -244,7 +249,7 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
     await seedCandidate('Fed holds rates');
     const result = await runWeeklyBrief(
       db,
-      { weekOf: '2026-07-05' },
+      { weekOf: TODAY },
       {
         generate: async () => {
           throw new BriefParseError(new Error('brief: unparseable JSON'), {
@@ -272,7 +277,7 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
     await seedCandidate('Fed holds rates');
     const result = await runWeeklyBrief(
       db,
-      { weekOf: '2026-07-05' },
+      { weekOf: TODAY },
       {
         generate: stubGenerate(onePitch),
         regenerateFeeds: async () => {
@@ -283,5 +288,31 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
     expect(result.status).toBe('completed');
     expect(result.error).toContain('rss_regeneration_failed');
     expect(await client`SELECT id FROM briefs`).toHaveLength(1);
+  });
+
+  it('backfill of an older week gathers THAT week — current stories stay out (codex #157)', async () => {
+    // Candidate exists NOW; a rerun for a long-past week must not see
+    // it (pre-fix, the NOW()-anchored window would have written today's
+    // stories into the old week's brief row).
+    await seedCandidate('Fed holds rates');
+    const result = await runWeeklyBrief(
+      db,
+      { weekOf: '2026-01-04' },
+      { generate: stubGenerate(onePitch), regenerateFeeds: async () => {} },
+    );
+    expect(result.status).toBe('completed');
+    expect(result.error).toBe('empty_week');
+    expect(await client`SELECT id FROM briefs`).toHaveLength(0);
+  });
+
+  it('rejects an invalid weekOf before creating a runs row (codex #157)', async () => {
+    await expect(
+      runWeeklyBrief(
+        db,
+        { weekOf: '2026-13-99' },
+        { generate: stubGenerate(onePitch), regenerateFeeds: async () => {} },
+      ),
+    ).rejects.toThrow(/invalid weekOf/);
+    expect(await client`SELECT id FROM runs`).toHaveLength(0);
   });
 });

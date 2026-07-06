@@ -14,6 +14,8 @@
 
 import { z } from 'zod';
 
+import { isValidIsoDate } from '../lib/iso-date.js';
+
 // ---------------------------------------------------------------------------
 // zod schemas — runtime validation in tool handlers
 // ---------------------------------------------------------------------------
@@ -81,10 +83,15 @@ export const RunNowArgs = z.object({}).default({});
 export const SystemStatusArgs = z.object({}).default({});
 
 export const GetBriefArgs = z.object({
-  /** YYYY-MM-DD of the brief's week; omit for the latest brief. */
+  /** YYYY-MM-DD of the brief's week; omit for the latest brief.
+   *  isValidIsoDate (not just the shape regex) gates the handler's
+   *  ::date cast — '2026-13-99' would otherwise raise a PG
+   *  out-of-range error (same class as the /brief route fix, codex
+   *  review on #157). */
   week_of: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .refine(isValidIsoDate, { message: 'not a real calendar date' })
     .optional(),
 });
 

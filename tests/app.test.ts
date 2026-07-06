@@ -399,4 +399,12 @@ describe.skipIf(!DATABASE_URL)('Fastify app (src/app.ts)', () => {
     expect(malformed.statusCode).toBe(404);
     expect(malformed.body).toContain('next-sunday');
   });
+
+  it('/brief 404s (not 500s) on a shaped-but-impossible date (codex #157)', async () => {
+    // '2026-13-99' passes a YYYY-MM-DD shape regex but PG's ::date cast
+    // raises out-of-range — the route must validate before casting.
+    const res = await app.inject({ method: 'GET', url: '/brief/2026-13-99' });
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toContain('2026-13-99');
+  });
 });

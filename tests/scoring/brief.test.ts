@@ -40,6 +40,7 @@ function makeInput(): BriefInput {
     ],
     decisions: [{ action: 'pass', headline: 'Old story', reason: 'covered before' }],
     trendingThemes: [{ term: 'ai-labour', clusterCount: 3, leadDomain: 'scitech' }],
+    collisionPairs: [],
   };
 }
 

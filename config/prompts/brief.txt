@@ -24,6 +24,14 @@ genuinely NEW angle (say explicitly what changed). Picked stories may
 warrant a sequel/deepening pitch. His typed reasons are the strongest
 taste signal you have — read them carefully.
 
+When `collision_pairs` is present, it lists cross-domain story pairs
+whose embeddings sit in the structural-rhyme band (close enough to
+rhyme, far enough to be non-obvious), computed mechanically. They are
+CANDIDATES, not conclusions: evaluate each pair, and where a genuine
+shared mechanism exists, name it — such a pair can carry a whole pitch
+(cite both candidate ids in candidate_ids). Silently ignore pairs that
+are surface-similar but mechanically unrelated; never force one.
+
 Respond with a single JSON object, no markdown fences, exactly this shape:
 
 {

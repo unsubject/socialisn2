@@ -25,6 +25,7 @@ import { assertWithinCeiling, CostCeilingHitError } from '../cost/ceiling.js';
 import { recordCost } from '../cost/ledger.js';
 import { generateAllFeeds } from '../rss/generate.js';
 import { isValidIsoDate } from '../lib/iso-date.js';
+import { findCollisionPairs } from '../scoring/collisions.js';
 import {
   BriefParseError,
   generateBrief as defaultGenerateBrief,
@@ -299,6 +300,28 @@ async function gatherBriefInput(db: Db, weekOf: string): Promise<BriefInput> {
     console.error('[brief] trending computation failed:', err);
   }
 
+  // P2: computed cross-domain rhyme-band pairs. Degrades open — a
+  // failure means the model falls back to P1 behavior (collisions it
+  // notices itself). Log the matched distribution so the band
+  // constants can be tuned against real Sundays (§5.3).
+  let collisionPairs: BriefInput['collisionPairs'] = [];
+  try {
+    collisionPairs = await findCollisionPairs(db, weekOf, {
+      windowDays: BRIEF_WINDOW_DAYS,
+    });
+    if (collisionPairs.length > 0) {
+      const sims = collisionPairs.map((p) => p.similarity);
+      console.log(
+        `[brief] collision pairs in band: ${collisionPairs.length} ` +
+          `(sim ${Math.min(...sims).toFixed(3)}-${Math.max(...sims).toFixed(3)})`,
+      );
+    } else {
+      console.log('[brief] collision pairs in band: 0');
+    }
+  } catch (err) {
+    console.error('[brief] collision detection failed:', err);
+  }
+
   return {
     weekOf,
     candidates: rows.map(toBriefCandidate),
@@ -308,6 +331,7 @@ async function gatherBriefInput(db: Db, weekOf: string): Promise<BriefInput> {
       reason: d.reason,
     })),
     trendingThemes,
+    collisionPairs,
   };
 }
 

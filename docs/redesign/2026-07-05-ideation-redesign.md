@@ -1,7 +1,7 @@
 # Feed Redesign: From Firehose to Editorial Desk
 
 **Date:** 2026-07-05
-**Status:** Approved 2026-07-05 (Simon) — RSS-first delivery (§8). P0 shipped (#155, #156). P1 (Weekly Ideation Brief) shipped. P2 (collision detector) next.
+**Status:** Approved 2026-07-05 (Simon) — RSS-first delivery (§8). P0 shipped (#155, #156). P1 (Weekly Ideation Brief) shipped (#157, #158). P2 (collision detector) shipped. Remaining: P3 taste loop, deferred by design — revisit after 4-6 weeks of brief feedback.
 **Supersedes:** SPEC.md §11 (delivery) and the "no thesis, no angle" boundary in SPEC.md §2;
 SPEC.md gets amended once this is approved.
 

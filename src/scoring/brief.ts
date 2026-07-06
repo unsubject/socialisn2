@@ -79,6 +79,20 @@ export interface BriefInput {
   candidates: BriefCandidate[];
   decisions: BriefDecision[];
   trendingThemes: BriefTrendingTerm[];
+  /** P2: computed cross-domain rhyme-band pairs (src/scoring/
+   *  collisions.ts). Candidates for bisociation, judged by the brief
+   *  model inside the same call. */
+  collisionPairs: CollisionPairInput[];
+}
+
+export interface CollisionPairInput {
+  aCandidateId: string;
+  aHeadline: string;
+  aDomain: string;
+  bCandidateId: string;
+  bHeadline: string;
+  bDomain: string;
+  similarity: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +210,15 @@ function toWireShape(input: BriefInput): Record<string, unknown> {
       term: t.term,
       cluster_count: t.clusterCount,
       lead_domain: t.leadDomain,
+    })),
+    collision_pairs: input.collisionPairs.map((p) => ({
+      a_candidate_id: p.aCandidateId,
+      a_headline: p.aHeadline,
+      a_domain: p.aDomain,
+      b_candidate_id: p.bCandidateId,
+      b_headline: p.bHeadline,
+      b_domain: p.bDomain,
+      similarity: Number(p.similarity.toFixed(3)),
     })),
   };
 }

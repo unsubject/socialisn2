@@ -85,17 +85,28 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
   });
 
   /** Cluster + item + candidate — the minimum for gatherBriefInput to
-   *  surface a candidate with a source URL. */
-  async function seedCandidate(headline: string, opts: { status?: string } = {}): Promise<{
+   *  surface a candidate with a source URL. Optional domain + centroid
+   *  angle (degrees, first two dims) support the P2 collision tests. */
+  async function seedCandidate(
+    headline: string,
+    opts: { status?: string; domain?: string; thetaDeg?: number } = {},
+  ): Promise<{
     candidateId: string;
     url: string;
   }> {
+    const domain = opts.domain ?? 'economy';
     const clusterId = uuidv7();
-    const vec = `[${unitVec().join(',')}]`;
+    const v = unitVec();
+    if (opts.thetaDeg !== undefined) {
+      const theta = (opts.thetaDeg * Math.PI) / 180;
+      v[0] = Math.cos(theta);
+      v[1] = Math.sin(theta);
+    }
+    const vec = `[${v.join(',')}]`;
     await client`
       INSERT INTO clusters (id, centroid, first_seen_at, last_seen_at, item_count, domains, primary_domain, status)
       VALUES (${clusterId}, ${vec}::vector(1536), NOW(), NOW(), 1,
-              ARRAY['economy']::text[], 'economy', 'active')
+              ARRAY[${domain}]::text[], ${domain}, 'active')
     `;
     const rawId = uuidv7();
     const url = `https://example.com/${rawId}`;
@@ -110,7 +121,7 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
       ) VALUES (
         ${uuidv7()}, ${rawId}, 'orig', 'sum', 'ctx', 'en',
         ARRAY['E']::text[], ARRAY['kw']::text[],
-        ARRAY['economy']::text[], 'economy',
+        ARRAY[${domain}]::text[], ${domain},
         ${vec}::vector(1536), NOW(), ${clusterId}
       )
     `;
@@ -124,7 +135,7 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
         generated_run_id, expires_at
       ) VALUES (
         ${candidateId}, ${clusterId}, ${headline}, 'ctx',
-        'economy', ARRAY['economy']::text[], 'hot', 'rising',
+        ${domain}, ARRAY[${domain}]::text[], 'hot', 'rising',
         false, 0.5, 0.1, ${JSON.stringify({ overlap: 0.1, links: [] })}::jsonb,
         82, 'strong angle', ARRAY['kw']::text[], ARRAY['tag']::text[],
         ${opts.status ?? 'new'}, ${uuidv7()},
@@ -303,6 +314,37 @@ describe.skipIf(!DATABASE_URL)('orchestrator runWeeklyBrief (redesign P1)', () =
     expect(result.status).toBe('completed');
     expect(result.error).toBe('empty_week');
     expect(await client`SELECT id FROM briefs`).toHaveLength(0);
+  });
+
+  it('collision pairs: cross-domain rhyme-band pairs reach the generate input (P2)', async () => {
+    // θ=0 economy vs θ=45 scitech → sim ≈ 0.707, inside the band.
+    const { candidateId: econ } = await seedCandidate('IPO liquidity clock', {
+      domain: 'economy',
+      thetaDeg: 0,
+    });
+    const { candidateId: sci } = await seedCandidate('TPU cost curves', {
+      domain: 'scitech',
+      thetaDeg: 45,
+    });
+
+    let seenInput: BriefInput | undefined;
+    const result = await runWeeklyBrief(
+      db,
+      { weekOf: TODAY },
+      {
+        generate: async (input) => {
+          seenInput = input;
+          return stubGenerate(onePitch)(input);
+        },
+        regenerateFeeds: async () => {},
+      },
+    );
+
+    expect(result.status).toBe('completed');
+    expect(seenInput!.collisionPairs).toHaveLength(1);
+    const pair = seenInput!.collisionPairs[0]!;
+    expect([pair.aCandidateId, pair.bCandidateId].sort()).toEqual([econ, sci].sort());
+    expect(pair.similarity).toBeCloseTo(Math.cos(Math.PI / 4), 2);
   });
 
   it('rejects an invalid weekOf before creating a runs row (codex #157)', async () => {
